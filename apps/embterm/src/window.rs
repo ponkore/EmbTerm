@@ -328,6 +328,8 @@ impl App {
                 log(&format!("render state を更新できません: {e}"));
                 return;
             }
+            // 画像の画素は render state に無いので、端末のロックの中で写す（T-088）
+            self.frame.capture_images(&mut self.rs, &term);
             hold
         };
         // hold の時限が来たら描き直せるように、タイマーで起こす

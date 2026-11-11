@@ -3,7 +3,9 @@
 //! render state は「次の update まで」しか読めないので、描画のほうでは使い回せる形に写しておく。
 //! 写すのは UI スレッドで、端末のロックを外したあと（T-006）。
 
-use et_vt::{Cursor, CursorShape, RenderState, Rgb, Style, StyleExt, Underline, Wide};
+use std::sync::Arc;
+
+use et_vt::{Cursor, CursorShape, ImageFormat, ImagePlacement, RenderState, Rgb, Style, StyleExt, Terminal, Underline, Wide};
 
 /// セル 1 つ
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +44,25 @@ impl Cell {
     }
 }
 
+/// Kitty graphics の Unicode placeholder（T-088）。画像は render state が解決するので、文字としては描かない
+pub const PLACEHOLDER: char = '\u{10EEEE}';
+
+/// 端末から写した画像の画素（[`Frame::capture_images`]）
+#[derive(Debug)]
+pub struct ImagePixels {
+    pub width: u32,
+    pub height: u32,
+    pub format: ImageFormat,
+    pub data: Vec<u8>,
+}
+
+/// 描く画像 1 枚（配置 1 つ）
+#[derive(Clone, Debug)]
+pub struct PlacedImage {
+    pub placement: ImagePlacement,
+    pub pixels: Arc<ImagePixels>,
+}
+
 /// フレーム全体
 #[derive(Clone)]
 pub struct Frame {
@@ -60,6 +81,12 @@ pub struct Frame {
     /// アプリ（OSC 12）か既定で決まったカーソルの色
     pub cursor_color: Option<Rgb>,
     pub palette: [Rgb; 256],
+    /// 描く画像（層、z-index の順。[`Frame::capture_images`] で写す）
+    pub images: Vec<PlacedImage>,
+    /// `images` の配置が計算されたときのセルの画素の大きさ（[`Terminal::cell_px`]）。DPI の違うペインで拡大縮小に使う
+    pub image_cell: (u32, u32),
+    /// `images` が変わったので描き直しが要る（次の [`Frame::update`] が受け取る）
+    images_changed: bool,
 }
 
 impl Default for Frame {
@@ -75,6 +102,9 @@ impl Default for Frame {
             background: Rgb { r: 0x1e, g: 0x1e, b: 0x1e },
             cursor_color: None,
             palette: [Rgb::default(); 256],
+            images: Vec::new(),
+            image_cell: (1, 1),
+            images_changed: false,
         }
     }
 }
@@ -87,6 +117,38 @@ impl Frame {
     pub fn row(&self, y: u16) -> &[Cell] {
         let c = self.cols as usize;
         &self.cells[y as usize * c..(y as usize + 1) * c]
+    }
+
+    /// render state の画像の一覧と、端末が持つ画素を写す（T-088）。**端末のロックの中で、`rs.update` のあとに呼ぶ**
+    /// （render state は画素を持たない。画素は `(generation)` が同じあいだは写し直さない）。
+    /// 一覧は毎回読んで持っているものと比べる（配置の世代は同じ render state の間でしか比べられず、遡るペインや hold では
+    /// render state が替わるうえ、一覧は短い）
+    pub fn capture_images(&mut self, rs: &mut RenderState, term: &Terminal) {
+        let placements = rs.images();
+        let same = placements.len() == self.images.len() && placements.iter().zip(&self.images).all(|(p, i)| *p == i.placement);
+        let cell = term.cell_px();
+        if same {
+            if cell != self.image_cell {
+                self.image_cell = cell;
+                self.images_changed = true;
+            }
+            return;
+        }
+        let mut images: Vec<PlacedImage> = Vec::with_capacity(placements.len());
+        for placement in placements {
+            let known = images.iter().chain(&self.images).find(|i| i.placement.generation == placement.generation).map(|i| i.pixels.clone());
+            let pixels = known.or_else(|| {
+                let image = term.kitty_image(placement.image_id).filter(|im| im.generation == placement.generation)?;
+                Some(Arc::new(ImagePixels { width: image.width, height: image.height, format: image.format, data: image.pixels.to_vec() }))
+            });
+            // 画素が読めない（その間に消された）配置は描かない。次の update で一覧から消える
+            if let Some(pixels) = pixels {
+                images.push(PlacedImage { placement, pixels });
+            }
+        }
+        self.images = images;
+        self.image_cell = cell;
+        self.images_changed = true;
     }
 
     /// render state から写す。変わった行だけを読み、最後に render state の dirty を落とす。
@@ -113,7 +175,8 @@ impl Frame {
             || colors.cursor != self.cursor_color
             || cursor.pos != self.cursor.pos
             || cursor.visible != self.cursor.visible
-            || cursor.shape != self.cursor.shape;
+            || cursor.shape != self.cursor.shape
+            || std::mem::take(&mut self.images_changed);
         self.foreground = colors.foreground;
         self.background = colors.background;
         self.cursor_color = colors.cursor;

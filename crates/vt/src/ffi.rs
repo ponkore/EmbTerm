@@ -31,6 +31,9 @@ pub type GhosttySelectionGesture = *mut c_void;
 pub type GhosttySelectionGestureEvent = *mut c_void;
 pub type GhosttyMouseEncoder = *mut c_void;
 pub type GhosttyMouseEvent = *mut c_void;
+pub type GhosttyRenderStateImageIterator = *mut c_void;
+pub type GhosttyKittyGraphics = *mut c_void;
+pub type GhosttyKittyGraphicsImage = *const c_void;
 /// アロケータ。使わない（NULL を渡して既定のものにする）
 pub type GhosttyAllocator = c_void;
 
@@ -273,6 +276,16 @@ pub struct GhosttyMousePosition {
     pub y: f32,
 }
 
+/// sys.h（PNG のデコードの結果。8 ビットの RGBA で、行の間に余白は無い）
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GhosttySysImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: *mut u8,
+    pub data_len: usize,
+}
+
 // ---- 列挙の値（使うものだけ） ----
 
 // GhosttyTerminalOption
@@ -285,6 +298,10 @@ pub const GHOSTTY_TERMINAL_OPT_SIZE: c_int = 7;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND: c_int = 12;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: c_int = 13;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_CURSOR: c_int = 14;
+pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT: c_int = 16;
+pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE: c_int = 17;
+pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE: c_int = 18;
+pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM: c_int = 19;
 pub const GHOSTTY_TERMINAL_OPT_SELECTION: c_int = 22;
 pub const GHOSTTY_TERMINAL_OPT_PWD_CHANGED: c_int = 26;
 pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES: c_int = 28;
@@ -306,6 +323,7 @@ pub const GHOSTTY_TERMINAL_DATA_SCROLLBAR: c_int = 9;
 pub const GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING: c_int = 11;
 pub const GHOSTTY_TERMINAL_DATA_TITLE: c_int = 12;
 pub const GHOSTTY_TERMINAL_DATA_PWD: c_int = 13;
+pub const GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS: c_int = 30;
 pub const GHOSTTY_TERMINAL_DATA_SELECTION: c_int = 31;
 pub const GHOSTTY_TERMINAL_DATA_VIEWPORT_ACTIVE: c_int = 32;
 pub const GHOSTTY_TERMINAL_DATA_MODE: c_int = 37;
@@ -318,6 +336,7 @@ pub const GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR: c_int = 4;
 pub const GHOSTTY_RENDER_STATE_DATA_CURSOR: c_int = 18;
 pub const GHOSTTY_RENDER_STATE_DATA_COLORS: c_int = 19;
 pub const GHOSTTY_RENDER_STATE_DATA_OVERSCAN: c_int = 20;
+pub const GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR: c_int = 22;
 
 // GhosttyRenderStateOption
 pub const GHOSTTY_RENDER_STATE_OPT_OVERSCAN: c_int = 2;
@@ -339,6 +358,41 @@ pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN: c_int = 3;
 pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF: c_int = 4;
 pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR: c_int = 5;
 pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR: c_int = 6;
+
+// GhosttyImageProtocol / GhosttyImageLayer / GhosttyRenderStateImageData（render.h、types.h）
+pub const GHOSTTY_IMAGE_PROTOCOL_KITTY: c_int = 0;
+pub const GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND: c_int = 0;
+pub const GHOSTTY_IMAGE_LAYER_BELOW_TEXT: c_int = 1;
+pub const GHOSTTY_IMAGE_LAYER_ABOVE_TEXT: c_int = 2;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL: c_int = 1;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID: c_int = 2;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION: c_int = 3;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER: c_int = 4;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_Z: c_int = 5;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL: c_int = 6;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW: c_int = 7;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X: c_int = 10;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y: c_int = 11;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH: c_int = 12;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT: c_int = 13;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X: c_int = 14;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y: c_int = 15;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH: c_int = 16;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT: c_int = 17;
+
+// GhosttyKittyImageFormat / GhosttyKittyGraphicsImageData（kitty_graphics.h）
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_RGB: c_int = 0;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_RGBA: c_int = 1;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA: c_int = 3;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_GRAY: c_int = 4;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH: c_int = 3;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT: c_int = 4;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT: c_int = 5;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS: c_int = 7;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION: c_int = 9;
+
+// GhosttySysOption（sys.h）
+pub const GHOSTTY_SYS_OPT_DECODE_PNG: c_int = 2;
 
 // GhosttyFormatterFormat（types.h）/ GhosttyFormatterOption（formatter.h）
 pub const GHOSTTY_FORMATTER_FORMAT_PLAIN: c_int = 0;
@@ -462,6 +516,15 @@ pub type GhosttyTerminalRenderHoldFn = unsafe extern "C" fn(terminal: GhosttyTer
 pub type GhosttyTerminalSizeFn =
     unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, out: *mut GhosttySizeReportSize) -> bool;
 
+// ---- コールバックの型（sys.h） ----
+pub type GhosttySysDecodePngFn = unsafe extern "C" fn(
+    userdata: *mut c_void,
+    allocator: *const GhosttyAllocator,
+    data: *const u8,
+    data_len: usize,
+    out: *mut GhosttySysImage,
+) -> bool;
+
 unsafe extern "C" {
     pub fn ghostty_type_json() -> *const c_char;
 
@@ -524,6 +587,20 @@ unsafe extern "C" {
     ) -> GhosttyResult;
     pub fn ghostty_formatter_free(formatter: GhosttyFormatter);
     pub fn ghostty_free(allocator: *const GhosttyAllocator, ptr: *mut u8, len: usize);
+    pub fn ghostty_alloc(allocator: *const GhosttyAllocator, len: usize) -> *mut u8;
+
+    // sys.h
+    pub fn ghostty_sys_set(option: c_int, value: *const c_void) -> GhosttyResult;
+
+    // kitty_graphics.h
+    pub fn ghostty_kitty_graphics_image(graphics: GhosttyKittyGraphics, image_id: u32) -> GhosttyKittyGraphicsImage;
+    pub fn ghostty_kitty_graphics_image_get_multi(
+        image: GhosttyKittyGraphicsImage,
+        count: usize,
+        keys: *const c_int,
+        values: *mut *mut c_void,
+        out_written: *mut usize,
+    ) -> GhosttyResult;
 
     // selection.h
     pub fn ghostty_selection_gesture_new(
@@ -609,6 +686,20 @@ unsafe extern "C" {
         cells: GhosttyRenderStateRowCells,
         data: c_int,
         out: *mut c_void,
+    ) -> GhosttyResult;
+
+    pub fn ghostty_render_state_image_iterator_new(
+        allocator: *const GhosttyAllocator,
+        out_iterator: *mut GhosttyRenderStateImageIterator,
+    ) -> GhosttyResult;
+    pub fn ghostty_render_state_image_iterator_free(iterator: GhosttyRenderStateImageIterator);
+    pub fn ghostty_render_state_image_iterator_next(iterator: GhosttyRenderStateImageIterator) -> bool;
+    pub fn ghostty_render_state_image_get_multi(
+        iterator: GhosttyRenderStateImageIterator,
+        count: usize,
+        keys: *const c_int,
+        values: *mut *mut c_void,
+        out_written: *mut usize,
     ) -> GhosttyResult;
 
     // screen.h

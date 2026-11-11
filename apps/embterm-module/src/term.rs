@@ -298,6 +298,8 @@ impl Drop for Term {
 
 /// 端末の UI スレッドを立てる。制御用のウィンドウができるまでは待つ（数 ms）。子プロセスの起動は最初の Place のとき
 pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
+    // 端末のスレッドが libghostty-vt を使い始める前に登録する（T-088）
+    et_vt::install_png_decoder();
     let shared = Arc::new(Shared {
         state: Mutex::new(State::default()),
         events: Mutex::new(Vec::new()),
@@ -1087,6 +1089,8 @@ impl App {
                 log(&format!("render state を更新できません: {e}"));
                 return;
             }
+            // 画像の画素は render state に無いので、端末のロックの中で写す（T-088）
+            self.master.capture_images(&mut self.main_rs, &term);
             let total = term.total_rows() as i64;
             let active_top = total - rows as i64;
             let mut moved = false;
@@ -1139,6 +1143,8 @@ impl App {
                     log(&format!("render state を更新できません: {e}"));
                     continue;
                 }
+                // 遡っているペインの画像も、位置を動かしたこのときに写す（T-088）
+                p.scrolled.get_or_insert_with(|| ScrolledFrame { frame: Frame::default(), top: 0 }).frame.capture_images(&mut rs, &term);
                 synced.push((i, rs, (t - v) as i32));
             }
             if moved {

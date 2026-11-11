@@ -209,6 +209,7 @@ fn layout_matches_type_json() {
     check_struct!(t, "GhosttySelectionGestureGeometry", GhosttySelectionGestureGeometry, [columns, cell_width, padding_left, screen_height]);
     check_struct!(t, "GhosttyMouseEncoderSize", GhosttyMouseEncoderSize, [size, screen_width, screen_height, cell_width, cell_height, padding_top, padding_bottom, padding_right, padding_left]);
     check_struct!(t, "GhosttyMousePosition", GhosttyMousePosition, [x, y]);
+    check_struct!(t, "GhosttySysImage", GhosttySysImage, [width, height, data, data_len]);
     check_struct!(
         t,
         "GhosttyRenderStateCursor",
@@ -373,6 +374,76 @@ fn enums_match_type_json() {
             ("F12", GHOSTTY_KEY_F1 + 11),
         ],
     );
+}
+
+#[test]
+fn image_enums_match_type_json() {
+    let t = types();
+    check_enum(
+        &t,
+        "GhosttyTerminalOption",
+        &[
+            ("KITTY_IMAGE_STORAGE_LIMIT", GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT),
+            ("KITTY_IMAGE_MEDIUM_FILE", GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE),
+            ("KITTY_IMAGE_MEDIUM_TEMP_FILE", GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE),
+            ("KITTY_IMAGE_MEDIUM_SHARED_MEM", GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM),
+        ],
+    );
+    check_enum(&t, "GhosttyTerminalData", &[("KITTY_GRAPHICS", GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS)]);
+    check_enum(&t, "GhosttyRenderStateData", &[("IMAGE_ITERATOR", GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR)]);
+    check_enum(&t, "GhosttyImageProtocol", &[("KITTY", GHOSTTY_IMAGE_PROTOCOL_KITTY)]);
+    check_enum(
+        &t,
+        "GhosttyImageLayer",
+        &[
+            ("BELOW_BACKGROUND", GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND),
+            ("BELOW_TEXT", GHOSTTY_IMAGE_LAYER_BELOW_TEXT),
+            ("ABOVE_TEXT", GHOSTTY_IMAGE_LAYER_ABOVE_TEXT),
+        ],
+    );
+    check_enum(
+        &t,
+        "GhosttyRenderStateImageData",
+        &[
+            ("PROTOCOL", GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL),
+            ("IMAGE_ID", GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID),
+            ("IMAGE_GENERATION", GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION),
+            ("LAYER", GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER),
+            ("Z", GHOSTTY_RENDER_STATE_IMAGE_DATA_Z),
+            ("VIEWPORT_COL", GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL),
+            ("VIEWPORT_ROW", GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW),
+            ("CELL_OFFSET_X", GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X),
+            ("CELL_OFFSET_Y", GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y),
+            ("PIXEL_WIDTH", GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH),
+            ("PIXEL_HEIGHT", GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT),
+            ("SOURCE_X", GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X),
+            ("SOURCE_Y", GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y),
+            ("SOURCE_WIDTH", GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH),
+            ("SOURCE_HEIGHT", GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT),
+        ],
+    );
+    check_enum(
+        &t,
+        "GhosttyKittyImageFormat",
+        &[
+            ("RGB", GHOSTTY_KITTY_IMAGE_FORMAT_RGB),
+            ("RGBA", GHOSTTY_KITTY_IMAGE_FORMAT_RGBA),
+            ("GRAY_ALPHA", GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA),
+            ("GRAY", GHOSTTY_KITTY_IMAGE_FORMAT_GRAY),
+        ],
+    );
+    check_enum(
+        &t,
+        "GhosttyKittyGraphicsImageData",
+        &[
+            ("WIDTH", GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH),
+            ("HEIGHT", GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT),
+            ("FORMAT", GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT),
+            ("PIXELS", GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS),
+            ("GENERATION", GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION),
+        ],
+    );
+    check_enum(&t, "GhosttySysOption", &[("DECODE_PNG", GHOSTTY_SYS_OPT_DECODE_PNG)]);
 }
 
 // ---- 動きの確認 ----
@@ -730,4 +801,122 @@ fn render_hold() {
     assert!(t.render_hold(hold).is_some());
     t.vt_write(b"\x1b[?2026l");
     assert!(t.render_hold(hold).is_none());
+}
+
+// ---- 画像（Kitty graphics。T-088） ----
+
+/// 1x1 の赤い PNG（libghostty-vt の文書の例）
+const PNG_1X1: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+fn image_terminal() -> (Terminal, Arc<Mutex<Log>>) {
+    install_png_decoder();
+    let (mut term, log) = terminal(40, 10);
+    term.resize(40, 10, 10, 20).unwrap();
+    (term, log)
+}
+
+fn images(term: &Terminal) -> (RenderState, Vec<ImagePlacement>) {
+    let mut rs = RenderState::new().unwrap();
+    rs.update(term).unwrap();
+    let list = rs.images();
+    (rs, list)
+}
+
+#[test]
+fn kitty_raw_pixels_placed_at_cursor() {
+    let (mut term, _log) = image_terminal();
+    // 青い 2x1（RGBA）を id 7 で送って置く
+    term.vt_write(b"\x1b[3;5H\x1b_Ga=T,f=32,i=7,s=2,v=1,q=2;AAD//wAA//8=\x1b\\");
+    let (_rs, list) = images(&term);
+    assert_eq!(list.len(), 1);
+    let p = list[0];
+    assert_eq!((p.image_id, p.col, p.row), (7, 4, 2));
+    assert_eq!(p.layer, ImageLayer::AboveText);
+    assert_eq!((p.width, p.height), (2, 1));
+    assert_ne!(p.generation, 0);
+    let img = term.kitty_image(7).expect("画素が読める");
+    assert_eq!((img.width, img.height, img.format), (2, 1, ImageFormat::Rgba));
+    assert_eq!(img.generation, p.generation);
+    assert_eq!(img.pixels, [0, 0, 255, 255, 0, 0, 255, 255]);
+    // 消すと一覧から消える
+    term.vt_write(b"\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+    let (_rs, list) = images(&term);
+    assert!(list.is_empty());
+    assert!(term.kitty_image(7).is_none());
+}
+
+#[test]
+fn kitty_png_is_decoded_by_wic() {
+    let (mut term, _log) = image_terminal();
+    term.vt_write(format!("\x1b_Ga=T,f=100,i=3,q=2;{PNG_1X1}\x1b\\").as_bytes());
+    let (_rs, list) = images(&term);
+    assert_eq!(list.len(), 1);
+    let img = term.kitty_image(3).expect("PNG がデコードされて届く");
+    assert_eq!((img.width, img.height, img.format), (1, 1, ImageFormat::Rgba));
+    assert_eq!(img.pixels.len(), 4);
+    assert_eq!(img.pixels[3], 0xff, "不透明");
+}
+
+#[test]
+fn kitty_unicode_placeholder_is_resolved_by_render_state() {
+    let (mut term, _log) = image_terminal();
+    // 緑の 1x1 を id 3 で仮想配置（U=1）2 桁 1 行にして、placeholder を 2 つ書く（文書の例と同じ）
+    term.vt_write(b"\x1b_Ga=T,U=1,f=32,i=3,s=1,v=1,c=2,r=1,q=2;AP8A/w==\x1b\\");
+    term.vt_write(b"\x1b[5;1H\x1b[38;5;3m\xf4\x8e\xbb\xae\xcc\x85\xcc\x85\xf4\x8e\xbb\xae\xcc\x85\xcc\x8d\x1b[39m");
+    let (_rs, list) = images(&term);
+    assert_eq!(list.len(), 1, "1 行で 1 つの配置: {list:?}");
+    let p = list[0];
+    assert_eq!(p.image_id, 3);
+    assert_eq!((p.col, p.row), (0, 4));
+    assert_eq!(p.layer, ImageLayer::BelowText, "placeholder は文字より下");
+}
+
+#[test]
+fn kitty_queries_and_cell_size_reports() {
+    let (mut term, log) = image_terminal();
+    // a=q（t=d）は OK を返す
+    term.vt_write(b"\x1b_Ga=q,i=31,s=1,v=1,f=24,t=d;AAAA\x1b\\");
+    let reply = String::from_utf8_lossy(&std::mem::take(&mut log.lock().unwrap().pty)).into_owned();
+    assert!(reply.contains("i=31") && reply.contains(";OK"), "a=q: {reply:?}");
+    // a=q（t=s）は失敗（共有メモリは無効。yazi は base64 に戻る）
+    term.vt_write(b"\x1b_Ga=q,i=32,s=1,v=1,f=32,t=s;QQ==\x1b\\");
+    let reply = String::from_utf8_lossy(&std::mem::take(&mut log.lock().unwrap().pty)).into_owned();
+    assert!(reply.contains("i=32") && !reply.contains(";OK"), "t=s: {reply:?}");
+    // CSI 16 t はセルの画素
+    term.vt_write(b"\x1b[16t");
+    let reply = String::from_utf8_lossy(&std::mem::take(&mut log.lock().unwrap().pty)).into_owned();
+    assert_eq!(reply, "\x1b[6;20;10t");
+}
+
+#[test]
+fn kitty_medium_file_needs_opt_in() {
+    let dir = std::env::temp_dir().join(format!("et-vt-kgp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("two.rgba");
+    std::fs::write(&path, [255u8, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+    let b64 = base64(path.to_str().unwrap().as_bytes());
+    let cmd = format!("\x1b_Ga=T,t=f,f=32,i=9,s=2,v=1,q=2;{b64}\x1b\\");
+
+    let (mut term, _log) = image_terminal();
+    term.vt_write(cmd.as_bytes());
+    assert!(term.kitty_image(9).is_none(), "既定ではファイルを読まない");
+    term.set_kitty_medium_file(true).unwrap();
+    term.vt_write(cmd.as_bytes());
+    let img = term.kitty_image(9).expect("許すと読める");
+    assert_eq!(img.pixels, [255, 0, 0, 255, 0, 255, 0, 255]);
+    drop(term);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::new();
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        s.push(T[(n >> 18) as usize & 63] as char);
+        s.push(T[(n >> 12) as usize & 63] as char);
+        s.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        s.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    s
 }

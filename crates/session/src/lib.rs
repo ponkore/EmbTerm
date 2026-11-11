@@ -46,6 +46,9 @@ pub enum Event {
 /// `PostMessage` するか、フラグを立てるくらいにとどめる
 pub type Notify = Arc<dyn Fn(Event) + Send + Sync>;
 
+/// Kitty graphics の画像を置ける量（バイト。画面ごと）。libghostty-vt の既定は 10 MB で、大きな画像 1 枚で埋まる（T-088）
+pub const KITTY_IMAGE_STORAGE_LIMIT: u64 = 128 * 1024 * 1024;
+
 /// 端末を閉じるときに後始末を待つ時間（ClosePseudoConsole → EOF。過ぎたら Job ごと止める）
 pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -223,6 +226,10 @@ impl Session {
         // バイト数の上限の既定は 10,000 バイトと小さいので外し、行数の上限だけで決める
         term.set_scrollback_max_bytes(usize::MAX).map_err(|e| e.to_string())?;
         term.set_scrollback_max_lines(opts.scrollback_lines).map_err(|e| e.to_string())?;
+        // Kitty graphics（T-088）: 画像の置き場を広げ、ファイルでの転送（t=f）を許す。共有メモリ（t=s）と一時ファイル（t=t）は
+        // libghostty-vt の既定（無効）のままで、問い合わせに失敗を返す（yazi は base64 の t=d に戻る）
+        term.set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT).map_err(|e| e.to_string())?;
+        term.set_kitty_medium_file(true).map_err(|e| e.to_string())?;
         term.resize(opts.cols, opts.rows, opts.cell_px.0, opts.cell_px.1).map_err(|e| e.to_string())?;
 
         let shared = Arc::new(Shared {

@@ -5,11 +5,14 @@
 //! - [`RenderState`]: 描画用の写し。端末のロックを持っている間に [`RenderState::update`] し、
 //!   ロックを外してから行とセルを読んで描く（docs/TODO.md T-006）
 //! - [`KeyEncoder`]: 特殊キー（矢印・ファンクションキーなど）を端末のモードに合わせた VT の列にする
+//! - 画像（Kitty graphics。T-088）: どこに何を描くかは [`RenderState::images`]（ロックの外で読める）、
+//!   画素は [`Terminal::kitty_image`]（ロックの中で読む）。PNG のデコードは [`install_png_decoder`]（WIC）
 //!
 //! unsafe はこのクレートの中に閉じ込める。libghostty-vt の端末はスレッド安全ではないので、
 //! 複数のスレッドから使うときは呼ぶ側が `Mutex` で守る（[`Terminal`] は `Send` だが `Sync` ではない）。
 
 pub mod ffi;
+mod png;
 #[cfg(test)]
 mod tests;
 
@@ -41,6 +44,8 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub use png::install_png_decoder;
 
 fn check(r: ffi::GhosttyResult) -> Result<()> {
     if r == ffi::GHOSTTY_SUCCESS { Ok(()) } else { Err(Error(r)) }
@@ -240,6 +245,68 @@ impl Terminal {
     /// 桁数と行数
     pub fn size(&self) -> (u16, u16) {
         (self.get_u16(ffi::GHOSTTY_TERMINAL_DATA_COLS), self.get_u16(ffi::GHOSTTY_TERMINAL_DATA_ROWS))
+    }
+
+    /// [`Terminal::resize`] で渡したセルの画素の大きさ（画像の配置はこの大きさで計算される）
+    pub fn cell_px(&self) -> (u32, u32) {
+        unsafe { (*self.inner).cell_px }
+    }
+
+    /// Kitty graphics の画像を置ける量（バイト。主画面と代替画面でそれぞれ）。0 にすると Kitty graphics を止める
+    pub fn set_kitty_image_storage_limit(&mut self, bytes: u64) -> Result<()> {
+        check(unsafe {
+            ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &bytes as *const _ as *const c_void)
+        })
+    }
+
+    /// Kitty graphics のファイルでの転送（`t=f`）を許すか。既定は不許可
+    pub fn set_kitty_medium_file(&mut self, allow: bool) -> Result<()> {
+        check(unsafe {
+            ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE, &allow as *const _ as *const c_void)
+        })
+    }
+
+    /// Kitty graphics の画像を引く。`generation` が [`ImagePlacement::generation`] と同じなら、同じ画素である。
+    /// 無ければ（消された、画素がまだ届いていない）`None`。返す値の画素は端末の中を指すので、次に端末が変わるまで有効
+    pub fn kitty_image(&self, id: u32) -> Option<KittyImage<'_>> {
+        let mut graphics: ffi::GhosttyKittyGraphics = ptr::null_mut();
+        let r = unsafe { ffi::ghostty_terminal_get(self.raw, ffi::GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &mut graphics as *mut _ as *mut c_void) };
+        if r != ffi::GHOSTTY_SUCCESS || graphics.is_null() {
+            return None;
+        }
+        let image = unsafe { ffi::ghostty_kitty_graphics_image(graphics, id) };
+        if image.is_null() {
+            return None;
+        }
+        let (mut width, mut height, mut format, mut generation) = (0u32, 0u32, 0 as c_int, 0u64);
+        let mut pixels = ffi::GhosttyString { ptr: ptr::null(), len: 0 };
+        let keys = [
+            ffi::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH,
+            ffi::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT,
+            ffi::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT,
+            ffi::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION,
+            ffi::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS,
+        ];
+        let mut values: [*mut c_void; 5] = [
+            (&mut width as *mut u32).cast(),
+            (&mut height as *mut u32).cast(),
+            (&mut format as *mut c_int).cast(),
+            (&mut generation as *mut u64).cast(),
+            (&mut pixels as *mut ffi::GhosttyString).cast(),
+        ];
+        let r = unsafe { ffi::ghostty_kitty_graphics_image_get_multi(image, keys.len(), keys.as_ptr(), values.as_mut_ptr(), ptr::null_mut()) };
+        // 画素がまだ届いていなければ NO_VALUE（ここでは「描くものが無い」と同じ）
+        if r != ffi::GHOSTTY_SUCCESS || pixels.ptr.is_null() {
+            return None;
+        }
+        let format = match format {
+            ffi::GHOSTTY_KITTY_IMAGE_FORMAT_RGB => ImageFormat::Rgb,
+            ffi::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA => ImageFormat::Rgba,
+            ffi::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA => ImageFormat::GrayAlpha,
+            ffi::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY => ImageFormat::Gray,
+            _ => return None,
+        };
+        Some(KittyImage { width, height, format, generation, pixels: unsafe { std::slice::from_raw_parts(pixels.ptr, pixels.len) } })
     }
 
     /// カーソルの位置（アプリが書いている画面での桁と行）
@@ -895,6 +962,61 @@ unsafe extern "C" fn cb_render_hold(t: ffi::GhosttyTerminal, userdata: *mut c_vo
     }));
 }
 
+// ---- 画像（Kitty graphics。T-088） ----
+
+/// 画素の並び（[`KittyImage`]）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFormat {
+    Rgb,
+    Rgba,
+    GrayAlpha,
+    Gray,
+}
+
+/// 端末が持っている画像（[`Terminal::kitty_image`]）。画素は端末の中を指す
+pub struct KittyImage<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub format: ImageFormat,
+    /// 画素が変わると変わる値（別の画像・別の端末でも再利用されない）
+    pub generation: u64,
+    /// 展開済みの画素（`width * height * 1 画素のバイト数`）
+    pub pixels: &'a [u8],
+}
+
+/// 画像を描く層。小さいものから順に、背景・文字と重ねて描く
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ImageLayer {
+    /// セルの背景色より下
+    BelowBackground,
+    /// セルの背景色より上で、文字より下
+    BelowText,
+    /// 文字より上
+    AboveText,
+}
+
+/// 1 枚の画像の 1 回の配置（[`RenderState::images`]）。この値のとおりに描けばよい:
+/// `(col, row)` のセルから `offset_*` だけずらした位置に、画像の `source_*` の部分を `width` x `height` の画素で描く
+/// （`col` と `row` はビューポートの左上からのセルで、負にも、画面の外にもなりうる。描くときに切り取る）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImagePlacement {
+    pub image_id: u32,
+    /// [`KittyImage::generation`] と同じ値（キャッシュの鍵に使う）
+    pub generation: u64,
+    pub layer: ImageLayer,
+    pub z: i32,
+    pub col: i32,
+    pub row: i32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+}
+
 // ---- render state ----
 
 /// どれだけ描き直すか
@@ -1030,6 +1152,7 @@ pub struct RenderState {
     raw: ffi::GhosttyRenderState,
     rows: ffi::GhosttyRenderStateRowIterator,
     cells: ffi::GhosttyRenderStateRowCells,
+    image_iter: ffi::GhosttyRenderStateImageIterator,
 }
 
 unsafe impl Send for RenderState {}
@@ -1037,11 +1160,12 @@ unsafe impl Send for RenderState {}
 impl RenderState {
     pub fn new() -> Result<Self> {
         // 途中で失敗したら Drop が作れた分だけ解放する（どの free も NULL を受け付ける）
-        let mut s = Self { raw: ptr::null_mut(), rows: ptr::null_mut(), cells: ptr::null_mut() };
+        let mut s = Self { raw: ptr::null_mut(), rows: ptr::null_mut(), cells: ptr::null_mut(), image_iter: ptr::null_mut() };
         unsafe {
             check(ffi::ghostty_render_state_new(ptr::null(), &mut s.raw))?;
             check(ffi::ghostty_render_state_row_iterator_new(ptr::null(), &mut s.rows))?;
             check(ffi::ghostty_render_state_row_cells_new(ptr::null(), &mut s.cells))?;
+            check(ffi::ghostty_render_state_image_iterator_new(ptr::null(), &mut s.image_iter))?;
         }
         Ok(s)
     }
@@ -1140,6 +1264,91 @@ impl RenderState {
         (v.above, v.below)
     }
 
+    /// 前の update で写した画像の配置を、描く順（層、z-index の順）に返す。端末のロックは要らない。
+    /// Unicode placeholder（U=1）も相対配置も、ここまでに解決されている（placeholder は 1 行ごとに 1 つの配置）
+    pub fn images(&mut self) -> Vec<ImagePlacement> {
+        let mut list = Vec::new();
+        unsafe {
+            ffi::ghostty_render_state_get(self.raw, ffi::GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR, &mut self.image_iter as *mut _ as *mut c_void);
+            while ffi::ghostty_render_state_image_iterator_next(self.image_iter) {
+                if let Some(p) = self.current_image() {
+                    list.push(p);
+                }
+            }
+        }
+        // 反復の順は描く順ではない（render.h）。同じ層・z なら読んだ順のまま
+        list.sort_by_key(|p| (p.layer, p.z));
+        list
+    }
+
+    /// 反復子の今の配置を読む。知らない種類（将来の別のプロトコルなど）は `None`
+    unsafe fn current_image(&self) -> Option<ImagePlacement> {
+        let (mut protocol, mut image_id, mut generation) = (0 as c_int, 0u32, 0u64);
+        let (mut layer, mut z, mut col, mut row) = (0 as c_int, 0i32, 0i32, 0i32);
+        let (mut offset_x, mut offset_y, mut width, mut height) = (0u32, 0u32, 0u32, 0u32);
+        let (mut source_x, mut source_y, mut source_width, mut source_height) = (0u32, 0u32, 0u32, 0u32);
+        let keys = [
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_Z,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH,
+            ffi::GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT,
+        ];
+        let mut values: [*mut c_void; 15] = [
+            (&mut protocol as *mut c_int).cast(),
+            (&mut image_id as *mut u32).cast(),
+            (&mut generation as *mut u64).cast(),
+            (&mut layer as *mut c_int).cast(),
+            (&mut z as *mut i32).cast(),
+            (&mut col as *mut i32).cast(),
+            (&mut row as *mut i32).cast(),
+            (&mut offset_x as *mut u32).cast(),
+            (&mut offset_y as *mut u32).cast(),
+            (&mut width as *mut u32).cast(),
+            (&mut height as *mut u32).cast(),
+            (&mut source_x as *mut u32).cast(),
+            (&mut source_y as *mut u32).cast(),
+            (&mut source_width as *mut u32).cast(),
+            (&mut source_height as *mut u32).cast(),
+        ];
+        let r = unsafe { ffi::ghostty_render_state_image_get_multi(self.image_iter, keys.len(), keys.as_ptr(), values.as_mut_ptr(), ptr::null_mut()) };
+        if r != ffi::GHOSTTY_SUCCESS || protocol != ffi::GHOSTTY_IMAGE_PROTOCOL_KITTY {
+            return None;
+        }
+        let layer = match layer {
+            ffi::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND => ImageLayer::BelowBackground,
+            ffi::GHOSTTY_IMAGE_LAYER_BELOW_TEXT => ImageLayer::BelowText,
+            ffi::GHOSTTY_IMAGE_LAYER_ABOVE_TEXT => ImageLayer::AboveText,
+            _ => return None,
+        };
+        Some(ImagePlacement {
+            image_id,
+            generation,
+            layer,
+            z,
+            col,
+            row,
+            offset_x,
+            offset_y,
+            width,
+            height,
+            source_x,
+            source_y,
+            source_width,
+            source_height,
+        })
+    }
+
     /// 行の反復を始める。写した行（overscan を含む）を上から順にすべて返す
     pub fn all_rows(&mut self) -> Rows<'_> {
         unsafe {
@@ -1161,6 +1370,7 @@ impl Drop for RenderState {
     fn drop(&mut self) {
         unsafe {
             ffi::ghostty_render_state_row_cells_free(self.cells);
+            ffi::ghostty_render_state_image_iterator_free(self.image_iter);
             ffi::ghostty_render_state_row_iterator_free(self.rows);
             ffi::ghostty_render_state_free(self.raw);
         }

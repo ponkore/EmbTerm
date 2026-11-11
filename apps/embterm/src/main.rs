@@ -29,6 +29,8 @@ fn started() -> std::time::Instant {
 
 fn main() -> std::process::ExitCode {
     started();
+    // 端末を作る前に登録する（T-088）
+    et_vt::install_png_decoder();
     let args = match args::parse(std::env::args_os().skip(1)) {
         Ok(a) => a,
         Err(e) => {

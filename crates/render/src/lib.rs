@@ -15,12 +15,15 @@
 //!   - `Shrink`: 1 セルの枠に収まるよう縮める（幅・上・下の比の最小）。前後が空白で孤立しているときは
 //!     右隣の空白を借りて 2 セル分の枠にする（ghostel と同じ規則）
 //! - 描くのは呼ばれたときだけ。呼ぶ側は render state が dirty のときだけ呼ぶ
+//! - Kitty graphics の画像（T-088）は [`images`] モジュール。層（背景色の下・文字の下・文字の上）ごとに背景・文字と重ね、
+//!   GPU のビットマップは画像の世代ごとにキャッシュする
 //!
 //! unsafe（COM の呼び出し）はこのクレートの中に閉じ込める。
 
 mod font;
 mod frame;
 mod gpu;
+mod images;
 mod png;
 mod surface;
 mod view;
@@ -28,7 +31,7 @@ mod view;
 use std::collections::HashMap;
 use std::path::Path;
 
-use et_vt::{CursorShape, Rgb, StyleExt, Underline, Wide};
+use et_vt::{CursorShape, ImageLayer, Rgb, StyleExt, Underline, Wide};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
@@ -37,7 +40,7 @@ use windows::core::Result;
 use windows_numerics::{Matrix3x2, Vector2};
 
 pub use font::FontSpec;
-pub use frame::{Cell, Frame};
+pub use frame::{Cell, Frame, ImagePixels, PLACEHOLDER, PlacedImage};
 pub use view::FrameView;
 pub use gpu::Gpu;
 
@@ -122,6 +125,22 @@ struct Run {
     xs: Vec<f32>,
 }
 
+/// 行を描くときに一度決めたものの持ち回し
+struct RowContext {
+    cols: usize,
+    cursor: Option<(u16, u16, usize)>,
+    block_cursor: bool,
+    cursor_color: Rgb,
+}
+
+/// [`Renderer::draw_rows`] で何を描くか
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowPass {
+    Both,
+    Backgrounds,
+    Text,
+}
+
 /// HWND 1 枚に端末を描くもの
 pub struct Renderer {
     hwnd: HWND,
@@ -131,6 +150,8 @@ pub struct Renderer {
     spec: FontSpec,
     dpi: u32,
     brushes: HashMap<Rgb, ID2D1SolidColorBrush>,
+    /// 画像の GPU のビットマップ（画像の世代が鍵。世代が変わると一覧から外れて捨てられる。デバイスと一緒に捨てる）
+    bitmaps: HashMap<u64, ID2D1Bitmap1>,
     pub theme: Theme,
 }
 
@@ -144,7 +165,7 @@ impl Renderer {
     pub fn with_gpu(gpu: Gpu, hwnd: HWND, width: u32, height: u32, dpi: u32, spec: FontSpec) -> Result<Self> {
         let surface = Surface::new(&gpu, hwnd, width, height)?;
         let font = FontSet::new(&gpu.dwrite, &spec, dpi)?;
-        Ok(Self { hwnd, gpu, surface, font, spec, dpi, brushes: HashMap::new(), theme: Theme::default() })
+        Ok(Self { hwnd, gpu, surface, font, spec, dpi, brushes: HashMap::new(), bitmaps: HashMap::new(), theme: Theme::default() })
     }
 
     /// 使っているフォントのファミリ名
@@ -230,6 +251,7 @@ impl Renderer {
         self.gpu = gpu;
         self.surface = surface;
         self.brushes.clear();
+        self.bitmaps.clear();
         Ok(())
     }
 
@@ -269,6 +291,7 @@ impl Renderer {
             self.gpu = gpu;
             self.surface = surface;
             self.brushes.clear();
+            self.bitmaps.clear();
         }
     }
 
@@ -299,7 +322,58 @@ impl Renderer {
             Some((x, py as u16, span))
         });
         let block_cursor = focused && frame.cursor.shape == CursorShape::Block;
+        let ctx = RowContext { cols, cursor, block_cursor, cursor_color };
 
+        if frame.images.is_empty() {
+            // 画像が無いときは行ごとに背景と文字を描く
+            self.draw_rows(&dc, frame, view, &ctx, RowPass::Both)?;
+        } else {
+            // 画像の層（T-088）: 背景色より下 → 背景色 → 文字より下 → 文字 → 文字より上（文字と背景は別に一周する）
+            self.draw_images(&dc, frame, view, cols, ImageLayer::BelowBackground);
+            self.draw_rows(&dc, frame, view, &ctx, RowPass::Backgrounds)?;
+            self.draw_images(&dc, frame, view, cols, ImageLayer::BelowText);
+            // 塗りつぶしのカーソル（セルの背景として塗り済み）が、文字より下の画像に隠れないよう塗り直す
+            if block_cursor && let Some((cx, cy, span)) = cursor {
+                let b = self.brush(cursor_color)?;
+                let (l, t) = (pad + cx as f32 * cw, pad + cy as f32 * ch);
+                unsafe { dc.FillRectangle(&rect(l, t, l + span as f32 * cw, t + ch), &b) };
+            }
+            self.draw_rows(&dc, frame, view, &ctx, RowPass::Text)?;
+            self.draw_images(&dc, frame, view, cols, ImageLayer::AboveText);
+        }
+        self.prune_images(frame);
+
+        // 5. カーソル（ブロックで focus があるときは色を反転して描き済み）
+        if let Some((cx, cy, span)) = cursor
+            && cy < frame.rows
+            && (cx as usize) < cols
+        {
+            let b = self.brush(cursor_color)?;
+            let l = pad + cx as f32 * cw;
+            let t = pad + cy as f32 * ch;
+            let w = span as f32 * cw;
+            let thick = ((self.dpi as f32 / 96.0) * 2.0).round().max(1.0);
+            unsafe {
+                match frame.cursor.shape {
+                    CursorShape::Bar => dc.FillRectangle(&rect(l, t, l + thick, t + ch), &b),
+                    CursorShape::Underline => dc.FillRectangle(&rect(l, t + ch - thick, l + w, t + ch), &b),
+                    CursorShape::Block if focused => {}
+                    CursorShape::Block | CursorShape::BlockHollow => {
+                        let h = thick / 2.0;
+                        dc.DrawRectangle(&rect(l + h, t + h, l + w - h, t + ch - h), &b, thick.min(2.0), None)
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// ビューの行を描く。`pass` で背景と文字のどちらか（画像を間に挟むとき）か、両方（ふつう）かを選ぶ
+    fn draw_rows(&mut self, dc: &ID2D1DeviceContext, frame: &Frame, view: &FrameView, ctx: &RowContext, pass: RowPass) -> Result<()> {
+        let (cw, ch) = (self.font.cell_w as f32, self.font.cell_h as f32);
+        let pad = self.padding() as f32;
+        let cols = ctx.cols;
+        let (cursor, block_cursor, cursor_color) = (ctx.cursor, ctx.block_cursor, ctx.cursor_color);
         let mut fgs = vec![Rgb::default(); cols];
         let mut bgs: Vec<Option<Rgb>> = vec![None; cols];
         let mut text = String::new();
@@ -348,26 +422,31 @@ impl Renderer {
             }
 
             // 2. 背景（同じ色が続くところをまとめて塗る）
-            let mut x = 0;
-            while x < cols {
-                let Some(bg) = bgs[x] else {
-                    x += 1;
-                    continue;
-                };
-                let start = x;
-                while x < cols && bgs[x] == Some(bg) {
-                    x += 1;
+            if pass != RowPass::Text {
+                let mut x = 0;
+                while x < cols {
+                    let Some(bg) = bgs[x] else {
+                        x += 1;
+                        continue;
+                    };
+                    let start = x;
+                    while x < cols && bgs[x] == Some(bg) {
+                        x += 1;
+                    }
+                    let brush = self.brush(bg)?;
+                    let r = rect(pad + start as f32 * cw, top, pad + x as f32 * cw, top + ch);
+                    unsafe { dc.FillRectangle(&r, &brush) };
                 }
-                let brush = self.brush(bg)?;
-                let r = rect(pad + start as f32 * cw, top, pad + x as f32 * cw, top + ch);
-                unsafe { dc.FillRectangle(&r, &brush) };
+            }
+            if pass == RowPass::Backgrounds {
+                continue;
             }
 
             // 3. 文字
             let mut run: Option<Run> = None;
             for x in 0..cols {
                 let c = &row[x];
-                if matches!(c.wide, Wide::SpacerTail | Wide::SpacerHead) || c.is_blank() || c.style.invisible() {
+                if matches!(c.wide, Wide::SpacerTail | Wide::SpacerHead) || c.is_blank() || c.style.invisible() || c.ch == PLACEHOLDER {
                     continue;
                 }
                 let si = style_index(c.bold(), c.italic());
@@ -422,7 +501,7 @@ impl Renderer {
                         let same = run.as_ref().is_some_and(|r| r.face == si && r.em == em && r.color == fg);
                         if !same {
                             if let Some(r) = run.take() {
-                                self.flush_run(&dc, r, base_y)?;
+                                self.flush_run(dc, r, base_y)?;
                             }
                             run = Some(Run { face: si, em, color: fg, origin_x: gx, indices: Vec::new(), xs: Vec::new() });
                         }
@@ -447,14 +526,14 @@ impl Renderer {
                 }
             }
             if let Some(r) = run.take() {
-                self.flush_run(&dc, r, base_y)?;
+                self.flush_run(dc, r, base_y)?;
             }
 
-            // 4. 下線・取り消し線・上線
+            // 4. 下線・取り消し線・上線（placeholder の下線の色は配置の ID で、線としては描かない）
             for x in 0..cols {
                 let c = &row[x];
                 let ul = c.underline();
-                if ul == Underline::None && !c.style.strikethrough() && !c.style.overline() {
+                if (ul == Underline::None && !c.style.strikethrough() && !c.style.overline()) || c.ch == PLACEHOLDER {
                     continue;
                 }
                 let span = if c.wide == Wide::Wide { 2.0 } else { 1.0 };
@@ -502,29 +581,6 @@ impl Renderer {
                 if c.style.overline() {
                     let b = self.brush(fg)?;
                     unsafe { dc.FillRectangle(&rect(l, top, r, top + t), &b) };
-                }
-            }
-        }
-
-        // 5. カーソル（ブロックで focus があるときは色を反転して描き済み）
-        if let Some((cx, cy, span)) = cursor
-            && cy < frame.rows
-            && (cx as usize) < cols
-        {
-            let b = self.brush(cursor_color)?;
-            let l = pad + cx as f32 * cw;
-            let t = pad + cy as f32 * ch;
-            let w = span as f32 * cw;
-            let thick = ((self.dpi as f32 / 96.0) * 2.0).round().max(1.0);
-            unsafe {
-                match frame.cursor.shape {
-                    CursorShape::Bar => dc.FillRectangle(&rect(l, t, l + thick, t + ch), &b),
-                    CursorShape::Underline => dc.FillRectangle(&rect(l, t + ch - thick, l + w, t + ch), &b),
-                    CursorShape::Block if focused => {}
-                    CursorShape::Block | CursorShape::BlockHollow => {
-                        let h = thick / 2.0;
-                        dc.DrawRectangle(&rect(l + h, t + h, l + w - h, t + ch - h), &b, thick.min(2.0), None)
-                    }
                 }
             }
         }
