@@ -147,15 +147,16 @@ fn select(term: &RefCell<Term>, pane: Option<i64>) -> Result<()> {
     Ok(())
 }
 
-/// 文字列をそのまま端末に送る
+/// 文字列をそのまま端末に送る（貼り付けと同じく VT の素の文字列。キーとして送るときは `embterm-module-send-key'）
 #[defun]
 fn send_string(term: &RefCell<Term>, text: String) -> Result<()> {
     term.borrow().request(Request::SendString(text));
     Ok(())
 }
 
-/// キーを送る。KEY は 1 文字か、Emacs のファンクションキーの名前（"up" "return" "f5" "backtab" など）。
-/// MODS は修飾キーの文字列（C = Ctrl、M = Meta / Alt、S = Shift）
+/// キーを送る。KEY は 1 文字か、Emacs のファンクションキーの名前（"up" "return" "f5" "backtab" "kp-1" など）。
+/// MODS は修飾キーの文字列（C = Ctrl、M = Meta / Alt、S = Shift）。
+/// アプリの求めに応じて KKP / win32-input-mode / レガシーの VT で送る（T-069）
 #[defun]
 fn send_key(term: &RefCell<Term>, key: String, mods: Option<String>) -> Result<()> {
     term.borrow().request(Request::SendKey { key, mods: mods.unwrap_or_default() });
@@ -356,6 +357,22 @@ fn pane_text(term: &RefCell<Term>, pane: i64) -> Result<Option<String>> {
     let (tx, rx) = std::sync::mpsc::channel();
     term.borrow().request(Request::PaneText { pane, reply: tx });
     Ok(rx.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten())
+}
+
+/// 今のキーの送り方（"kitty" / "win32" / "legacy"）と KKP のフラグ。`(PROTOCOL . FLAGS)`。まだ起動していなければ nil（デバッグ・自動確認用）
+#[defun]
+fn key_protocol<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
+    let t = term.borrow();
+    let Some(s) = t.shared().session() else { return ().into_lisp(env) };
+    let term = s.lock();
+    let proto = match s.key_protocol(&term) {
+        et_session::keys::KeyProtocol::Kitty => "kitty",
+        et_session::keys::KeyProtocol::Win32 => "win32",
+        et_session::keys::KeyProtocol::Legacy => "legacy",
+    };
+    let flags = term.kitty_keyboard_flags() as i64;
+    drop(term);
+    env.cons(proto, flags)
 }
 
 /// 今の画面（ビューポート）のテキスト。行末の空白は落とし、行ごとに改行を付ける。まだ起動していなければ nil。

@@ -585,22 +585,15 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
           (if (memq 'shift mods) "S" "")))
 
 (defun embterm--event-key (ev)
-  "イベント EV を module に送る (KEY . MODS) にする。送れないものは nil。"
-  (cond
-   ((integerp ev)
-    (let ((meta (/= 0 (logand ev ?\M-\0)))
-          (c (logand ev (lognot ?\M-\0))))
-      (if (characterp c)
-          ;; 文字（C-a のような制御文字を含む）。Meta だけ外して渡す
-          (cons (string c) (if meta "M" ""))
-        ;; C-% や C-SPC のように、文字にならない修飾キーの組
-        (let ((base (event-basic-type ev)))
-          (when (characterp base)
-            (cons (string base) (embterm--mods-string (event-modifiers ev))))))))
-   ((symbolp ev)
-    (let ((base (event-basic-type ev)))
-      (when (symbolp base)
-        (cons (symbol-name base) (embterm--mods-string (event-modifiers ev))))))))
+  "イベント EV を module に送る (KEY . MODS) にする。送れないものは nil。
+KEY は基本のキー（文字かファンクションキーの名前）、MODS は修飾キーの文字列（T-069）。
+`event-basic-type' と `event-modifiers' は C-a（1）も `C-S-a' も C-SPC も
+`(a (control))' の形に揃える。"
+  (when (or (integerp ev) (symbolp ev))
+    (let ((base (event-basic-type ev))
+          (mods (embterm--mods-string (event-modifiers ev))))
+      (cond ((characterp base) (cons (string base) mods))
+            ((symbolp base) (cons (symbol-name base) mods))))))
 
 (defun embterm--require-term ()
   (unless embterm--term
@@ -625,7 +618,8 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
   (embterm--require-term)
   (let ((ev last-command-event))
     (if (characterp ev)
-        (embterm-module-send-string embterm--term (string ev))
+        ;; 文字もキーとして送る（win32-input-mode なら 1 文字ずつ Vk = 0 + Uc の形になる）
+        (embterm-module-send-key embterm--term (string ev) "")
       (embterm--send-event))))
 
 (defun embterm-send-string (string)
@@ -728,26 +722,40 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
                   (ignore-errors (define-key map (kbd key) #'embterm--send-event))))))
     (define-key map [remap self-insert-command] #'embterm--self-insert)
     ;; ファンクションキーと修飾キーの組
-    (dolist (key '("<return>" "<tab>" "<backspace>" "<escape>" "<delete>" "<deletechar>"
-                   "<up>" "<down>" "<right>" "<left>" "<home>" "<end>" "<prior>" "<next>" "<insert>"
-                   "<f1>" "<f2>" "<f3>" "<f4>" "<f5>" "<f6>" "<f7>" "<f8>" "<f9>" "<f10>" "<f11>" "<f12>"))
-      (dolist (mod '("" "S-" "C-" "M-" "C-S-" "M-S-" "C-M-"))
+    (dolist (key (append
+                  '("<return>" "<tab>" "<backspace>" "<escape>" "<delete>" "<deletechar>"
+                    "<up>" "<down>" "<right>" "<left>" "<home>" "<end>" "<prior>" "<next>" "<insert>"
+                    "<print>" "<pause>" "<scroll-lock>" "<apps>" "<menu>"
+                    "<kp-enter>" "<kp-tab>" "<kp-add>" "<kp-subtract>" "<kp-multiply>" "<kp-divide>"
+                    "<kp-decimal>" "<kp-separator>" "<kp-home>" "<kp-end>" "<kp-prior>" "<kp-next>"
+                    "<kp-up>" "<kp-down>" "<kp-left>" "<kp-right>" "<kp-insert>" "<kp-delete>")
+                  (mapcar (lambda (n) (format "<f%d>" n)) (number-sequence 1 24))
+                  (mapcar (lambda (n) (format "<kp-%d>" n)) (number-sequence 0 9))))
+      (dolist (mod '("" "S-" "C-" "M-" "C-S-" "M-S-" "C-M-" "C-M-S-"))
         (funcall bind map (concat mod key))))
-    (dolist (key '("RET" "TAB" "DEL" "<backtab>" "C-@" "M-DEL" "M-SPC" "C-]" "C-/" "C-M-]" "C-M-/"))
+    ;; 修飾キーが付いた SPC（`C-SPC' は PSReadLine の補完メニューなど）と、ふつうの文字にならない組
+    (dolist (key '("RET" "TAB" "DEL" "<backtab>" "C-@" "M-DEL" "M-SPC" "C-SPC" "S-SPC" "C-S-SPC" "C-M-SPC" "M-S-SPC"
+                   "C-M-S-SPC" "C-]" "C-/" "C-M-]" "C-M-/"))
       (funcall bind map key))
     ;; スクロールバックは Emacs に残す（T-037）。送るキーの一覧で束縛したあとで上書きする
     (define-key map (kbd "S-<prior>") #'embterm-scroll-page-up)
     (define-key map (kbd "S-<next>") #'embterm-scroll-page-down)
     (define-key map (kbd "S-<home>") #'embterm-scroll-top)
     (define-key map (kbd "S-<end>") #'embterm-scroll-bottom)
-    ;; C-<英字>（C-i = TAB、C-m = RET は上。C-y は貼り付け）と C-M-<英字>
+    ;; C-<英字>（C-i = TAB、C-m = RET は上。C-y は貼り付け）、C-M-<英字>、C-S-<英字>（`C-S-a' は C-a と別のキーとして送れる）
     (dolist (c (number-sequence ?a ?z))
       (unless (memq c '(?i ?m ?y))
         (funcall bind map (format "C-%c" c)))
-      (funcall bind map (format "C-M-%c" c)))
-    ;; M-<ASCII の印字可能な文字>
+      (funcall bind map (format "C-S-%c" c))
+      (funcall bind map (format "C-M-%c" c))
+      (funcall bind map (format "C-M-S-%c" c)))
+    ;; M-<ASCII の印字可能な文字>、C-M-<ASCII の印字可能な文字>
     (dolist (c (number-sequence ?! ?~))
-      (funcall bind map (format "M-%c" c)))
+      (funcall bind map (format "M-%c" c))
+      (funcall bind map (format "C-M-%c" c)))
+    ;; C-<数字・記号>（C-[ は ESC の接頭辞を兼ねるので束縛しない。C-i などの英字は上）
+    (dolist (c (string-to-list "0123456789-=]\\;',./`!\"#$%&()*+:<>?@^_{|}~"))
+      (funcall bind map (format "C-%c" c)))
     ;; 選択があれば M-w はコピー（T-036）
     (unless (member "M-w" embterm-keymap-exceptions)
       (define-key map (kbd "M-w") #'embterm-copy-or-send))

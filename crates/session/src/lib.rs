@@ -11,7 +11,7 @@
 //! - HWND には依存しない（知らせ方は `notify` に任せる）。embterm.exe と Emacs module の両方が使う
 //! - **端末の状態（[`Session`]）は表示（HWND）より長生きにする**（T-066）。メソッドはすべて `&self` なので、
 //!   `Arc<Session>` にして UI スレッドと呼び出し側（Lisp のスレッド）で分け合える
-//! - キーの変換（レガシーの VT）は [`keys`]
+//! - キーの変換（KKP / win32-input-mode / レガシーの VT の切り替え。T-069）は [`keys`]
 
 pub mod keys;
 
@@ -22,8 +22,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-use et_pty::{ConptyKind, ExitStatus, Pty, PtyOptions, PtyWriter};
-use et_vt::{Effects, Mode, Rgb, Terminal};
+use et_pty::{ConptyKind, ExitStatus, ProcessWatch, Pty, PtyOptions, PtyWriter};
+use et_vt::{Effects, KeyEncoder, Mode, Rgb, Terminal};
 
 /// 呼び出し側（UI）に知らせること
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +61,73 @@ pub struct SessionOptions {
     pub scrollback_lines: usize,
 }
 
+/// `CSI ?9001h` / `l`（win32-input-mode）を見つける。libghostty-vt は未知のモードを無視して、
+/// 未知の CSI を知らせる手段も無い（UNKNOWN_SEQUENCE は APC と OSC だけ。terminal.h）ので、自分で走査する。
+/// 読みが途中で切れてもよいよう状態を持つ
+#[derive(Default)]
+struct Win32ModeScanner {
+    state: ScanState,
+    /// いま読んでいるパラメータの値（u32 に収まらないものは 9001 と一致しないよう飽和させる）
+    param: u32,
+    /// このシーケンスに 9001 があった
+    found: bool,
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum ScanState {
+    #[default]
+    Ground,
+    Escape,
+    Csi,
+    PrivateParams,
+}
+
+impl Win32ModeScanner {
+    /// `data` を読み、`Some(true/false)` で最後に見つけた `h` / `l` を返す
+    fn feed(&mut self, data: &[u8]) -> Option<bool> {
+        let mut last = None;
+        let mut i = 0;
+        while i < data.len() {
+            if self.state == ScanState::Ground {
+                // 速さのため、ESC まで飛ばす
+                match data[i..].iter().position(|&b| b == 0x1b) {
+                    Some(n) => i += n,
+                    None => break,
+                }
+            }
+            let b = data[i];
+            i += 1;
+            match (self.state, b) {
+                (_, 0x1b) => self.state = ScanState::Escape,
+                (ScanState::Ground, _) => {}
+                (ScanState::Escape, b'[') => self.state = ScanState::Csi,
+                (ScanState::Escape, _) => self.state = ScanState::Ground,
+                (ScanState::Csi, b'?') => {
+                    self.state = ScanState::PrivateParams;
+                    self.param = 0;
+                    self.found = false;
+                }
+                (ScanState::Csi, _) => self.state = ScanState::Ground,
+                (ScanState::PrivateParams, b'0'..=b'9') => {
+                    self.param = self.param.saturating_mul(10).saturating_add((b - b'0') as u32);
+                }
+                (ScanState::PrivateParams, b';') => {
+                    self.found |= self.param == 9001;
+                    self.param = 0;
+                }
+                (ScanState::PrivateParams, b'h' | b'l') => {
+                    if self.found || self.param == 9001 {
+                        last = Some(b == b'h');
+                    }
+                    self.state = ScanState::Ground;
+                }
+                (ScanState::PrivateParams, _) => self.state = ScanState::Ground,
+            }
+        }
+        last
+    }
+}
+
 /// 端末からの知らせを受けるもの（読みのスレッドで、端末のロックを持ったまま呼ばれる）
 struct TermEffects {
     writer: Arc<OnceLock<PtyWriter>>,
@@ -96,6 +163,14 @@ struct Shared {
     pending: AtomicBool,
     /// 起動直後の出力に `CSI c`（DA1 の要求）が来たか。来れば再配布版の ConPTY（docs/research/conpty.md §2.4）
     saw_da1: AtomicBool,
+    /// ConPTY が `CSI ?9001h`（win32-input-mode）を求めている（T-069）
+    win32_input: AtomicBool,
+    /// 最初の子の PID（spawn のあとに置く）
+    root_pid: OnceLock<u32>,
+    /// KKP のフラグが 0 でないか（前回の読み）
+    kkp_on: AtomicBool,
+    /// KKP のフラグが 0 でなくなったときに、いたプロセス（アプリが落ちたかの判定。T-069）
+    kkp_owners: Mutex<Option<ProcessWatch>>,
     bytes_seen: AtomicUsize,
     exit: Mutex<Option<ExitStatus>>,
 }
@@ -142,6 +217,9 @@ impl Session {
         term.set_mode(Mode::GRAPHEME_CLUSTER, true, true).map_err(|e| e.to_string())?;
         term.set_default_colors(opts.foreground, opts.background, None).map_err(|e| e.to_string())?;
         term.set_terminfo_name("xterm-256color").map_err(|e| e.to_string())?;
+        // T-071: "ghostty" を含むと yazi が Kitty の Unicode プレースホルダ方式を選ぶ（docs/research/conpty.md §4）
+        term.set_xtversion(&format!("EmbTerm {} (libghostty-vt {})", env!("CARGO_PKG_VERSION"), et_vt::version()))
+            .map_err(|e| e.to_string())?;
         // バイト数の上限の既定は 10,000 バイトと小さいので外し、行数の上限だけで決める
         term.set_scrollback_max_bytes(usize::MAX).map_err(|e| e.to_string())?;
         term.set_scrollback_max_lines(opts.scrollback_lines).map_err(|e| e.to_string())?;
@@ -151,6 +229,10 @@ impl Session {
             term: Mutex::new(term),
             pending: AtomicBool::new(false),
             saw_da1: AtomicBool::new(false),
+            win32_input: AtomicBool::new(false),
+            root_pid: OnceLock::new(),
+            kkp_on: AtomicBool::new(false),
+            kkp_owners: Mutex::new(None),
             bytes_seen: AtomicUsize::new(0),
             exit: Mutex::new(None),
         });
@@ -166,15 +248,30 @@ impl Session {
         };
         let on_output = {
             let (shared, notify, ready) = (shared.clone(), notify.clone(), writer_cell.clone());
+            let mut scanner = Win32ModeScanner::default();
             move |data: &[u8]| {
                 // 書く口ができるまで待つ（端末の応答を落とさないため。起動の直後に 1 回だけ待つ）
                 ready.wait();
+                if let Some(on) = scanner.feed(data) {
+                    shared.win32_input.store(on, Ordering::Relaxed);
+                }
                 if shared.bytes_seen.fetch_add(data.len(), Ordering::Relaxed) < 64 * 1024
                     && data.windows(3).any(|w| w == b"\x1b[c")
                 {
                     shared.saw_da1.store(true, Ordering::Relaxed);
                 }
-                shared.term.lock().unwrap_or_else(|e| e.into_inner()).vt_write(data);
+                let flags = {
+                    let mut t = shared.term.lock().unwrap_or_else(|e| e.into_inner());
+                    t.vt_write(data);
+                    t.kitty_keyboard_flags()
+                };
+                // KKP が有効になったときにいたプロセスを覚える（T-069）
+                let on = flags != 0;
+                if on != shared.kkp_on.load(Ordering::Relaxed) {
+                    shared.kkp_on.store(on, Ordering::Relaxed);
+                    *shared.kkp_owners.lock().unwrap_or_else(|e| e.into_inner()) =
+                        if on { shared.root_pid.get().map(|&r| ProcessWatch::new(&et_pty::descendant_pids(r))) } else { None };
+                }
                 if !shared.pending.swap(true, Ordering::AcqRel) {
                     notify(Event::Output);
                 }
@@ -189,6 +286,8 @@ impl Session {
         };
         let pty = Pty::spawn(&pty_opts, on_output, on_exit).map_err(|e| format!("子プロセスを起動できません: {e}"))?;
         let writer = pty.writer();
+        // 順序: on_output は writer_cell の準備を待つので、root_pid を先に置く
+        let _ = shared.root_pid.set(pty.pid());
         let _ = writer_cell.set(writer.clone());
         let kind = pty.kind().clone();
         let pid = pty.pid();
@@ -204,6 +303,48 @@ impl Session {
     /// 端末をロックする。持っている間は読みのスレッドが止まるので、短くすること
     pub fn lock(&self) -> MutexGuard<'_, Terminal> {
         self.shared.term.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// キーの送り方（T-069）。KKP のフラグが立っていれば KKP、そうでなく ConPTY が 9001 を求めていれば
+    /// win32-input-mode、どちらでもなければレガシーの VT（Windows Terminal と同じ切り替え）。端末のロックを持って呼ぶ
+    pub fn key_protocol(&self, term: &Terminal) -> keys::KeyProtocol {
+        if term.kitty_keyboard_flags() != 0 {
+            keys::KeyProtocol::Kitty
+        } else if self.shared.win32_input.load(Ordering::Relaxed) {
+            keys::KeyProtocol::Win32
+        } else {
+            keys::KeyProtocol::Legacy
+        }
+    }
+
+    /// win32-input-mode か（ConPTY が 9001 を求めているか）
+    pub fn win32_input_mode(&self) -> bool {
+        self.shared.win32_input.load(Ordering::Relaxed)
+    }
+
+    /// キーのイベントを、今のモードの送り方でバイト列にする。KKP のフラグが残っているのにアプリが落ちていたら、ここで戻す
+    pub fn encode_key(&self, encoder: &mut KeyEncoder, ev: &keys::KeyEvent, phase: keys::KeyPhase) -> Vec<u8> {
+        let mut t = self.lock();
+        self.reset_stale_kkp(&mut t);
+        let proto = self.key_protocol(&t);
+        keys::encode(ev, proto, phase, &t, encoder)
+    }
+
+    /// KKP のフラグが立ったままアプリが落ちていたら、フラグを戻す（T-069。docs/research/conpty.md §3.4）。
+    ///
+    /// KKP が有効になったときの最初の子（シェル）の子孫プロセス（親子関係で求める）がすべて終わっていれば「求めたアプリは
+    /// もういない」とみなす（シェルが KKP を求めることはない）。フラグが残ったまま送ると、再配布版の ConPTY では
+    /// コンソールのアプリにゴミ文字が入る。KKP を使うアプリが動いている間は何もしない
+    fn reset_stale_kkp(&self, term: &mut Terminal) {
+        if term.kitty_keyboard_flags() == 0 {
+            return;
+        }
+        let mut owners = self.shared.kkp_owners.lock().unwrap_or_else(|e| e.into_inner());
+        if owners.as_ref().is_some_and(|w| w.all_exited()) {
+            // `CSI < 99 u`: スタックを全部 pop する（今の画面の分）
+            term.vt_write(b"\x1b[<99u");
+            *owners = None;
+        }
     }
 
     /// PTY に書く（待たない）
@@ -286,3 +427,6 @@ impl Drop for Session {
         let _ = self.close();
     }
 }
+
+#[cfg(test)]
+pub(crate) use Win32ModeScanner as Win32ModeScannerForTest;

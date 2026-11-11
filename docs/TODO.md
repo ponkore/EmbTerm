@@ -214,7 +214,7 @@
 - ⬜ **T-035** カーソル（形・点滅・アプリからの指定・フォーカスが無いときの表示）
 - ✅ **T-036** 選択・コピー（kill-ring にも入れる）・貼り付け（ブラケットペースト）（2026-11-11）→ ドラッグ・ダブル / トリプルクリック・Shift+ドラッグ（マウスの報告が有効なとき）、`embterm-copy-on-select`、`M-w`、`C-y`。実際のクリップボードへの到達は `gui-select-text` まで確認
 - ✅ **T-037** スクロールバック（行数の設定、ホイール、キーでのスクロール）（2026-11-11）→ ペインごとのホイール、Emacs 側のホイールの転送、`S-<prior>` / `S-<next>` / `S-<home>` / `S-<end>`、入力で下へ戻る、`embterm-scrollback-lines`。libghostty のバイト上限の既定（10,000 バイト）では数百行しか残らないので無制限にした
-- 🔄 **T-038** マウスの報告（vim / yazi）と、Emacs 側の選択との切り替え（2026-11-11: ホイールの報告と、報告が有効なときの Shift+ドラッグでの選択は実装済み。**クリックの報告の実アプリでの確認、代替画面でのホイール、マウスの形が残り**）
+- ✅ **T-038** マウスの報告（vim / yazi）と、Emacs 側の選択との切り替え（2026-11-11）→ クリック・ドラッグの報告（vim の `:set mouse=a` で位置を確認）、代替画面のホイールを矢印に変える（DEC 1007）、マウスの形。**マウスの形は目視していない**、yazi での確認は T-052
 - ⬜ **T-039** OSC の扱い（タイトル、カレントディレクトリ → `default-directory`、ハイパーリンク、通知、クリップボード）
 - ⬜ **T-040** ベル
 - ⬜ **T-041** 後始末（プロセスの終了、バッファの削除、Emacs の終了。子プロセスまで止める）
@@ -261,20 +261,21 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   GenPreview は文書を読み直して作り直すが、端末は作り直せない）
 - ⬜ **T-067** GPU のデバイスを端末どうしで共有し、デバイスを失ったときは全員で作り直す（GenPreview はビューアごとに作っている）
 - ⬜ **T-068** 描き直しの負荷を測る（GenPreview のスパイクは「1 回塗る」だけ。垂直同期を待つ `Present(1)` で UI スレッドが止まる量は未測定）
-- ⬜ **T-069** win32-input-mode のエンコーダを自前で作る（libghostty-vt には無い。`CSI Vk;Sc;Uc;Kd;Cs;Rc _`）。
+- ✅ **T-069**（2026-11-11）→ **KKP（アプリが求めたとき）→ win32-input-mode（自前）→ レガシーの順に切り替える。** `C-SPC`・`S-<return>`・`C-S-<英字>`・F1〜F24 の修飾・テンキーを区別して送る。文字は `Vk=0` + `Uc`。
+  KKP のフラグが残ったままアプリが落ちた場合の安全策あり。受け取ったキーを記録する `test/key-child.py` + `test/keys.el` で確認（docs/notes/t069-input.md）。実機の IME を通した再確認は T-091。win32-input-mode のエンコーダを自前で作る（libghostty-vt には無い。`CSI Vk;Sc;Uc;Kd;Cs;Rc _`）。
   KKP / win32-input-mode / レガシーの切り替え。KKP のフラグが残ったままコンソールのアプリに戻ったときにゴミ文字を入れない安全策。
   IME の確定文字列は `Vk = 0` + `Uc` の形でよいか、サロゲートペア、長い貼り付けの速さ（docs/research/conpty.md §3.5）
-- ⬜ **T-070** ConPTY が端末に求める応答をそろえる: `CSI 6n`（カーソル位置）にすぐ正しく答える、フォーカスの出入りで
+- ✅ **T-070**（2026-11-11）→ `CSI 6n` は 2 ms 以内に応答、`CSI 16t` はセルの画素の大きさを返す、フォーカスは出入りとも届く。ConPTY が端末に求める応答をそろえる: `CSI 6n`（カーソル位置）にすぐ正しく答える、フォーカスの出入りで
   `CSI I` / `CSI O` を必ず送る、`CSI 16t`（セルの画素の大きさ）に答える
-- ⬜ **T-071** DA1 と XTVERSION で何を名乗るか決める。DA1 には libghostty-vt が本当に対応するものだけを出す
+- ✅ **T-071**（2026-11-11）→ XTVERSION は `EmbTerm 0.1.0 (libghostty-vt 1.0.0)`、DA1 は `?62;22c`（28 と 4 を名乗らない）。`TERM_PROGRAM=EmbTerm` のまま。DA1 と XTVERSION で何を名乗るか決める。DA1 には libghostty-vt が本当に対応するものだけを出す
   （28 を出すと conhost が DECCRA / DECFRA を使い、4 を出すと yazi が Sixel を選ぶ）。
   XTVERSION に "ghostty" を含めると yazi が Kitty graphics の Unicode プレースホルダ方式を選ぶ（含めないと直接配置方式になる）
 - ✅ **T-072** 再配布版 ConPTY の取得を `cargo xtask` にする（2026-11-11）→ `cargo xtask fetch-conpty`。NuGet 1.25.260930003 を
   SHA256 と Authenticode の署名（Microsoft）で確かめ、`vendor/conpty/conpty.dll` + `x64/OpenConsole.exe` に置く。
   embterm.exe は起動直後に `CSI c` が届くかで再配布版か OS 同梱版かを見分けてログに出す
-- ⬜ **T-073** Job から抜けるプロセス: 外側の Job が breakaway を許すとき、pwsh の `Start-Process` で起こした孫が Job から抜けた。
+- ⬜ **T-073**（T-069 の調べでも再現: pwsh の子は Job に入らないことがあり、プロセスの親子関係でしか追えない）Job から抜けるプロセス: 外側の Job が breakaway を許すとき、pwsh の `Start-Process` で起こした孫が Job から抜けた。
   原因と、抜けさせない方法を決める（T-041 の一部）
-- ⬜ **T-074** 同期出力（DEC 2026）: `GHOSTTY_TERMINAL_OPT_RENDER_HOLD` を登録し、hold の間は render state を写し直さない（時限 1 秒）
+- ✅ **T-074**（2026-11-11）→ render hold の間は全ペインで写し直さない（時限 1 秒）。途中の画面が見えないことを確認。同期出力（DEC 2026）: `GHOSTTY_TERMINAL_OPT_RENDER_HOLD` を登録し、hold の間は render state を写し直さない（時限 1 秒）
 - ✅ **T-075**（2026-11-11）→ `crates/session`（`et-session`）に移し、embterm.exe と module の両方が使う。`apps/embterm/src/session.rs`（端末 + PTY + 読み書きのスレッド + 知らせ）を、Emacs module と共有するクレート（`et-session`）に移す。T-028 の前にやる
 - 🔄 **T-076**（2026-11-11: 前半は済み。閉じる待ちは別スレッドで行い、終わったら `Closed` を知らせる。`kill-buffer` は 1 ms 程度で返る。**後半の `.swp` が残る件は未着手**）閉じる処理を UI スレッドから外す（`Pty::close` は最大数秒待つ。module では Emacs を止めてしまう）。
   あわせて、閉じたときに vim の `.swp` が残る（実質の強制終了）ので、子に先に終了を促す手順を考える
@@ -291,3 +292,6 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ⬜ **T-086** copy モードで折り返しを繋げる（unwrap）。とても大きなスクロールバックを分割して渡す
 - ⬜ **T-087** ウィンドウを入れ替えたとき（`window-swap-states` など）のスクロール位置の引き継ぎ
 - ⬜ **T-088** Kitty graphics の描画（yazi の画像プレビュー。render state の画像の反復 + et-render での合成）。T-023、T-052
+- ⬜ **T-089** 非 ASCII の文字 + 修飾キー（`C-あ` `M-あ`）を送るか決める（今は束縛が無く端末に届かない）
+- ⬜ **T-090** KKP の安全策の限界: 求めたアプリの子孫が長生きすると戻せない。`CSI <99u` は今の画面だけに効く
+- ⬜ **T-091** 手元での再確認（T-069 でキーの経路が変わったので）: 実機の IME の確定文字と絵文字、claude の `Shift+Enter`・`Esc`、JP 配列の `C-@`、AltGr、マウスの形

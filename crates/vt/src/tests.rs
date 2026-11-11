@@ -607,3 +607,127 @@ fn mouse_and_paste() {
     assert!(paste_is_safe("abc"));
     assert!(!paste_is_safe("a\nb"));
 }
+
+fn mods(s: &str) -> Mods {
+    Mods { ctrl: s.contains('C'), alt: s.contains('M'), shift: s.contains('S') }
+}
+
+/// KKP のエンコード（T-069）。libghostty-vt のエンコーダの実際の出力を確かめる
+#[test]
+fn kitty_encoding() {
+    let mut t = Terminal::new(40, 5, Box::new(NoEffects)).unwrap();
+    t.vt_write(b"\x1b[>5u"); // disambiguate + alternate keys（claude と同じ）
+    assert_eq!(t.kitty_keyboard_flags(), 5);
+    let mut enc = KeyEncoder::new().unwrap();
+    let k = |enc: &mut KeyEncoder, t: &Terminal, key, m: &str, text: &str, unshifted: u32, shift_used: bool| {
+        enc.encode_input(
+            t,
+            &KeyInput { key, action: KeyAction::Press, mods: mods(m), consumed_shift: shift_used, text, unshifted },
+        )
+    };
+    let a = ffi::GHOSTTY_KEY_A;
+    assert_eq!(k(&mut enc, &t, a, "", "a", 97, false), b"a");
+    assert_eq!(k(&mut enc, &t, a, "C", "a", 97, false), b"\x1b[97;5u");
+    assert_eq!(k(&mut enc, &t, a, "S", "A", 97, true), b"A");
+    assert_eq!(k(&mut enc, &t, ffi::GHOSTTY_KEY_ENTER, "S", "", 0, false), b"\x1b[13;2u");
+    assert_eq!(k(&mut enc, &t, ffi::GHOSTTY_KEY_ENTER, "", "", 0, false), b"\r");
+    assert_eq!(k(&mut enc, &t, ffi::GHOSTTY_KEY_SPACE, "C", " ", 32, false), b"\x1b[32;5u");
+    assert_eq!(k(&mut enc, &t, ffi::GHOSTTY_KEY_ARROW_UP, "", "", 0, false), b"\x1b[A");
+    assert_eq!(k(&mut enc, &t, ffi::GHOSTTY_KEY_ARROW_LEFT, "C", "", 0, false), b"\x1b[1;5D");
+    // 物理キーが分からない文字（IME の確定文字）は文字のまま届く
+    assert_eq!(k(&mut enc, &t, ffi::GHOSTTY_KEY_UNIDENTIFIED, "", "あ", 0, false), "あ".as_bytes());
+    assert_eq!(k(&mut enc, &t, ffi::GHOSTTY_KEY_UNIDENTIFIED, "", "😀", 0, false), "😀".as_bytes());
+    // 離したときの報告は REPORT_EVENTS のときだけ
+    let release = |enc: &mut KeyEncoder, t: &Terminal| {
+        enc.encode_input(t, &KeyInput { key: a, action: KeyAction::Release, mods: mods(""), consumed_shift: false, text: "a", unshifted: 97 })
+    };
+    assert!(release(&mut enc, &t).is_empty());
+    t.vt_write(b"\x1b[=7u");
+    assert_eq!(t.kitty_keyboard_flags(), 7);
+    assert_eq!(release(&mut enc, &t), b"\x1b[97;1:3u");
+    // pop でフラグは戻る
+    t.vt_write(b"\x1b[<u");
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+}
+
+/// KKP のスタックは主画面と代替画面で別（T-069 の安全策の前提。Windows Terminal 1.25.3131 と同じ）
+#[test]
+fn kitty_flags_per_screen() {
+    let mut t = Terminal::new(40, 5, Box::new(NoEffects)).unwrap();
+    t.vt_write(b"\x1b[?1049h\x1b[>1u");
+    assert_eq!(t.kitty_keyboard_flags(), 1);
+    t.vt_write(b"\x1b[?1049l");
+    assert_eq!(t.kitty_keyboard_flags(), 0, "代替画面を抜けると主画面のフラグ（0）に戻る");
+    t.vt_write(b"\x1b[>5u\x1b[?1049h");
+    assert_eq!(t.kitty_keyboard_flags(), 1, "代替画面に戻れば、そちらのフラグ");
+    t.vt_write(b"\x1b[?1049l");
+    assert_eq!(t.kitty_keyboard_flags(), 5, "主画面のフラグは保たれる");
+    // <99u で全部 pop
+    t.vt_write(b"\x1b[>7u\x1b[<99u");
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+    assert!(t.mode(Mode::MOUSE_ALTERNATE_SCROLL), "1007 の既定は有効");
+}
+
+#[derive(Default)]
+struct RecordPty(Arc<Mutex<Vec<u8>>>);
+impl Effects for RecordPty {
+    fn write_pty(&mut self, data: &[u8]) {
+        self.0.lock().unwrap().extend_from_slice(data);
+    }
+}
+
+/// XTVERSION の答えと DA1（T-071）
+#[test]
+fn xtversion_and_da1() {
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let mut t = Terminal::new(40, 5, Box::new(RecordPty(out.clone()))).unwrap();
+    t.set_xtversion("EmbTerm 9.9 (libghostty-vt 1.0.0)").unwrap();
+    t.vt_write(b"\x1b[>0q");
+    let got = String::from_utf8_lossy(&out.lock().unwrap()).into_owned();
+    assert!(got.contains("EmbTerm 9.9 (libghostty-vt 1.0.0)"), "{got:?}");
+    assert!(!version().is_empty(), "libghostty-vt の版が取れない");
+    out.lock().unwrap().clear();
+    t.vt_write(b"\x1b[c");
+    let da = String::from_utf8_lossy(&out.lock().unwrap()).into_owned();
+    assert!(da.starts_with("\x1b[?"), "{da:?}");
+    let attrs: Vec<&str> = da.trim_start_matches("\x1b[?").trim_end_matches('c').split(';').collect();
+    assert!(!attrs.contains(&"28") && !attrs.contains(&"4"), "28 と 4 を名乗らない: {da:?}");
+}
+
+/// 同期出力の hold（T-074）。始まったときの画面が写され、時限で解ける
+#[test]
+fn render_hold() {
+    let mut t = Terminal::new(10, 2, Box::new(NoEffects)).unwrap();
+    let hold = std::time::Duration::from_secs(1);
+    t.vt_write(b"before");
+    assert!(t.render_hold(hold).is_none());
+    t.vt_write(b"\x1b[?2026h partial");
+    assert!(t.render_hold(hold).is_some());
+    let mut rs = t.take_held_render_state().expect("hold の始まりで写す");
+    assert!(t.take_held_render_state().is_none());
+    let row = |rs: &mut RenderState| -> String {
+        let mut rows = rs.all_rows();
+        let mut text = String::new();
+        if rows.next_row().is_some() {
+            let mut cells = rows.cells();
+            let mut g = Vec::new();
+            while cells.next_cell() {
+                cells.graphemes(&mut g);
+                if let Some(c) = g.first() {
+                    text.push(*c);
+                }
+            }
+        }
+        text
+    };
+    assert!(row(&mut rs).trim_end().ends_with("before"), "hold の始まりの画面（partial を含まない）");
+    // 時限を過ぎると hold は解ける
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(t.render_hold(std::time::Duration::from_millis(1)).is_none());
+    assert!(!t.mode(Mode::SYNCHRONIZED_OUTPUT));
+    // ?2026l でも解ける
+    t.vt_write(b"\x1b[?2026h");
+    assert!(t.render_hold(hold).is_some());
+    t.vt_write(b"\x1b[?2026l");
+    assert!(t.render_hold(hold).is_none());
+}

@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::*;
 use windows::Win32::Storage::FileSystem::*;
 use windows::Win32::System::Console::{COORD, HPCON};
+use windows::Win32::System::Diagnostics::ToolHelp::*;
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::JobObjects::*;
 use windows::Win32::System::LibraryLoader::{
@@ -264,6 +265,63 @@ pub struct Pty {
     /// 読みのスレッドが終わったら値が届く
     reader_done: Receiver<()>,
     warnings: Vec<String>,
+}
+
+/// プロセスの木の子孫の PID を求める（T-069 の KKP の安全策）。`root` は含めない。失敗すれば空。
+/// pwsh が起こす native command は Job から抜けることがある（T-073）ので、Job ではなく親子関係で求める
+pub fn descendant_pids(root: u32) -> Vec<u32> {
+    let mut edges = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return Vec::new() };
+        let snap = Handle(snap);
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        if Process32FirstW(snap.0, &mut e).is_ok() {
+            loop {
+                edges.push((e.th32ParentProcessID, e.th32ProcessID));
+                if Process32NextW(snap.0, &mut e).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let mut result = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(p) = frontier.pop() {
+        for &(parent, child) in &edges {
+            if parent == p && child != root && !result.contains(&child) {
+                result.push(child);
+                frontier.push(child);
+            }
+        }
+    }
+    result
+}
+
+/// プロセスの組を見張る（[`ProcessWatch::new`]）
+pub struct ProcessWatch {
+    handles: Vec<Handle>,
+}
+
+impl ProcessWatch {
+    /// PID の組を見張る（開けないものは飛ばす）
+    pub fn new(pids: &[u32]) -> Self {
+        let handles = pids
+            .iter()
+            .filter_map(|&p| unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, p) }.ok().map(Handle))
+            .collect();
+        Self { handles }
+    }
+
+    /// 見張るプロセスが無いか
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+
+    /// 見張っているプロセスがすべて終わったか（空なら false）
+    pub fn all_exited(&self) -> bool {
+        !self.handles.is_empty()
+            && self.handles.iter().all(|h| unsafe { WaitForSingleObject(h.0, 0) } == WAIT_OBJECT_0)
+    }
 }
 
 static PIPE_SERIAL: AtomicU64 = AtomicU64::new(0);

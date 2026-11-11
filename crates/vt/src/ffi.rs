@@ -279,6 +279,7 @@ pub struct GhosttyMousePosition {
 pub const GHOSTTY_TERMINAL_OPT_USERDATA: c_int = 1;
 pub const GHOSTTY_TERMINAL_OPT_WRITE_PTY: c_int = 2;
 pub const GHOSTTY_TERMINAL_OPT_BELL: c_int = 3;
+pub const GHOSTTY_TERMINAL_OPT_XTVERSION: c_int = 5;
 pub const GHOSTTY_TERMINAL_OPT_TITLE_CHANGED: c_int = 6;
 pub const GHOSTTY_TERMINAL_OPT_SIZE: c_int = 7;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND: c_int = 12;
@@ -292,6 +293,7 @@ pub const GHOSTTY_TERMINAL_OPT_TERMINFO_NAME: c_int = 38;
 pub const GHOSTTY_TERMINAL_OPT_MODE_DEFAULT: c_int = 34;
 pub const GHOSTTY_TERMINAL_OPT_MODE: c_int = 35;
 pub const GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK: c_int = 41;
+pub const GHOSTTY_TERMINAL_OPT_RENDER_HOLD: c_int = 42;
 
 // GhosttyTerminalData
 pub const GHOSTTY_TERMINAL_DATA_COLS: c_int = 1;
@@ -299,6 +301,7 @@ pub const GHOSTTY_TERMINAL_DATA_ROWS: c_int = 2;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_X: c_int = 3;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_Y: c_int = 4;
 pub const GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN: c_int = 6;
+pub const GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS: c_int = 8;
 pub const GHOSTTY_TERMINAL_DATA_SCROLLBAR: c_int = 9;
 pub const GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING: c_int = 11;
 pub const GHOSTTY_TERMINAL_DATA_TITLE: c_int = 12;
@@ -367,6 +370,9 @@ pub const GHOSTTY_MOUSE_ENCODER_OPT_SIZE: c_int = 3;
 pub const GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED: c_int = 4;
 pub const GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL: c_int = 5;
 
+// GhosttyBuildInfo（build_info.h）
+pub const GHOSTTY_BUILD_INFO_VERSION_STRING: c_int = 5;
+
 // GhosttyCellData / GhosttyCellWide（screen.h）
 pub type GhosttyCell = u64;
 pub const GHOSTTY_CELL_DATA_WIDE: c_int = 3;
@@ -382,12 +388,33 @@ pub const GHOSTTY_CURSOR_STYLE_UNDERLINE: c_int = 2;
 pub const GHOSTTY_CURSOR_STYLE_BLOCK_HOLLOW: c_int = 3;
 
 // GhosttyKeyAction / GhosttyMods / GhosttyKey（key/event.h）
+pub const GHOSTTY_KEY_ACTION_RELEASE: c_int = 0;
 pub const GHOSTTY_KEY_ACTION_PRESS: c_int = 1;
+pub const GHOSTTY_KEY_ACTION_REPEAT: c_int = 2;
 pub const GHOSTTY_MODS_SHIFT: u16 = 1 << 0;
 pub const GHOSTTY_MODS_CTRL: u16 = 1 << 1;
 pub const GHOSTTY_MODS_ALT: u16 = 1 << 2;
+pub const GHOSTTY_KEY_UNIDENTIFIED: c_int = 0;
+pub const GHOSTTY_KEY_BACKQUOTE: c_int = 1;
+pub const GHOSTTY_KEY_BACKSLASH: c_int = 2;
+pub const GHOSTTY_KEY_BRACKET_LEFT: c_int = 3;
+pub const GHOSTTY_KEY_BRACKET_RIGHT: c_int = 4;
+pub const GHOSTTY_KEY_COMMA: c_int = 5;
+/// 数字の 0。1〜9 は続く番号（9 = 15）
+pub const GHOSTTY_KEY_DIGIT_0: c_int = 6;
+pub const GHOSTTY_KEY_EQUAL: c_int = 16;
+pub const GHOSTTY_KEY_INTL_BACKSLASH: c_int = 17;
+/// 英字の A。B〜Z は続く番号（Z = 45）
+pub const GHOSTTY_KEY_A: c_int = 20;
+pub const GHOSTTY_KEY_MINUS: c_int = 46;
+pub const GHOSTTY_KEY_PERIOD: c_int = 47;
+pub const GHOSTTY_KEY_QUOTE: c_int = 48;
+pub const GHOSTTY_KEY_SEMICOLON: c_int = 49;
+pub const GHOSTTY_KEY_SLASH: c_int = 50;
 pub const GHOSTTY_KEY_BACKSPACE: c_int = 53;
+pub const GHOSTTY_KEY_CONTEXT_MENU: c_int = 55;
 pub const GHOSTTY_KEY_ENTER: c_int = 58;
+pub const GHOSTTY_KEY_SPACE: c_int = 63;
 pub const GHOSTTY_KEY_TAB: c_int = 64;
 pub const GHOSTTY_KEY_DELETE: c_int = 68;
 pub const GHOSTTY_KEY_END: c_int = 69;
@@ -399,9 +426,30 @@ pub const GHOSTTY_KEY_ARROW_DOWN: c_int = 75;
 pub const GHOSTTY_KEY_ARROW_LEFT: c_int = 76;
 pub const GHOSTTY_KEY_ARROW_RIGHT: c_int = 77;
 pub const GHOSTTY_KEY_ARROW_UP: c_int = 78;
+/// テンキーの 0。1〜9 は続く番号（9 = 89）
+pub const GHOSTTY_KEY_NUMPAD_0: c_int = 80;
+pub const GHOSTTY_KEY_NUMPAD_ADD: c_int = 90;
+pub const GHOSTTY_KEY_NUMPAD_DECIMAL: c_int = 95;
+pub const GHOSTTY_KEY_NUMPAD_DIVIDE: c_int = 96;
+pub const GHOSTTY_KEY_NUMPAD_ENTER: c_int = 97;
+pub const GHOSTTY_KEY_NUMPAD_MULTIPLY: c_int = 104;
+pub const GHOSTTY_KEY_NUMPAD_SUBTRACT: c_int = 107;
+pub const GHOSTTY_KEY_NUMPAD_HOME: c_int = 114;
+pub const GHOSTTY_KEY_NUMPAD_END: c_int = 115;
+pub const GHOSTTY_KEY_NUMPAD_INSERT: c_int = 116;
+pub const GHOSTTY_KEY_NUMPAD_DELETE: c_int = 117;
+pub const GHOSTTY_KEY_NUMPAD_PAGE_UP: c_int = 118;
+pub const GHOSTTY_KEY_NUMPAD_PAGE_DOWN: c_int = 119;
+pub const GHOSTTY_KEY_NUMPAD_UP: c_int = 109;
+pub const GHOSTTY_KEY_NUMPAD_DOWN: c_int = 110;
+pub const GHOSTTY_KEY_NUMPAD_RIGHT: c_int = 111;
+pub const GHOSTTY_KEY_NUMPAD_LEFT: c_int = 112;
 pub const GHOSTTY_KEY_ESCAPE: c_int = 120;
-/// F1。F2〜F12 は続く番号（F12 = 132）
+/// F1。F2〜F25 は続く番号（F12 = 132、F24 = 144）
 pub const GHOSTTY_KEY_F1: c_int = 121;
+pub const GHOSTTY_KEY_PRINT_SCREEN: c_int = 148;
+pub const GHOSTTY_KEY_SCROLL_LOCK: c_int = 149;
+pub const GHOSTTY_KEY_PAUSE: c_int = 150;
 
 // ---- コールバックの型（terminal.h） ----
 pub type GhosttyTerminalWritePtyFn =
@@ -409,11 +457,16 @@ pub type GhosttyTerminalWritePtyFn =
 pub type GhosttyTerminalBellFn = unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void);
 pub type GhosttyTerminalTitleChangedFn = unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void);
 pub type GhosttyTerminalPwdChangedFn = unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void);
+pub type GhosttyTerminalXtversionFn = unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void) -> GhosttyString;
+pub type GhosttyTerminalRenderHoldFn = unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, held: bool);
 pub type GhosttyTerminalSizeFn =
     unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, out: *mut GhosttySizeReportSize) -> bool;
 
 unsafe extern "C" {
     pub fn ghostty_type_json() -> *const c_char;
+
+    // build_info.h
+    pub fn ghostty_build_info(data: c_int, out: *mut c_void) -> GhosttyResult;
 
     // terminal.h
     pub fn ghostty_terminal_new(
@@ -579,6 +632,10 @@ unsafe extern "C" {
     pub fn ghostty_key_event_set_action(event: GhosttyKeyEvent, action: c_int) -> GhosttyResult;
     pub fn ghostty_key_event_set_key(event: GhosttyKeyEvent, key: c_int) -> GhosttyResult;
     pub fn ghostty_key_event_set_mods(event: GhosttyKeyEvent, mods: u16) -> GhosttyResult;
+    pub fn ghostty_key_event_set_consumed_mods(event: GhosttyKeyEvent, consumed_mods: u16) -> GhosttyResult;
+    pub fn ghostty_key_event_set_utf8(event: GhosttyKeyEvent, utf8: GhosttyString) -> GhosttyResult;
+    pub fn ghostty_key_event_set_unshifted_codepoint(event: GhosttyKeyEvent, codepoint: u32) -> GhosttyResult;
+    pub fn ghostty_key_event_set_composing(event: GhosttyKeyEvent, composing: bool) -> GhosttyResult;
 
     // unicode.h
     pub fn ghostty_unicode_codepoint_width(cp: u32) -> u8;

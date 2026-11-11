@@ -16,6 +16,7 @@ mod tests;
 use std::ffi::{CStr, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
+use std::time::{Duration, Instant};
 
 /// RGB の色
 pub type Rgb = ffi::GhosttyColorRgb;
@@ -50,6 +51,16 @@ pub fn type_json() -> &'static str {
     unsafe { CStr::from_ptr(ffi::ghostty_type_json()) }.to_str().unwrap_or("")
 }
 
+/// libghostty-vt の版（`ghostty_build_info`）。取れなければ空
+pub fn version() -> String {
+    let mut s = ffi::GhosttyString { ptr: ptr::null(), len: 0 };
+    let r = unsafe { ffi::ghostty_build_info(ffi::GHOSTTY_BUILD_INFO_VERSION_STRING, &mut s as *mut _ as *mut c_void) };
+    if r != ffi::GHOSTTY_SUCCESS || s.ptr.is_null() {
+        return String::new();
+    }
+    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr, s.len) }).into_owned()
+}
+
 /// 1 つのコードポイントが何桁か（端末が使う表と同じもの。eaw は 1）
 pub fn codepoint_width(c: char) -> u8 {
     unsafe { ffi::ghostty_unicode_codepoint_width(c as u32) }
@@ -78,6 +89,14 @@ struct Inner {
     effects: Box<dyn Effects>,
     /// `CSI 16 t` などで答えるセルの画素の大きさ。0 だと Kitty graphics を使わないアプリがあるので 1 以上にする
     cell_px: (u32, u32),
+    /// XTVERSION（`CSI > q`）の答え（T-071）。コールバックが指すので、設定したら `Terminal` が閉じるまで変えない
+    xtversion: String,
+    /// 同期出力（DEC 2026）の hold の始まった時刻（T-074）。hold の間だけ `Some`
+    hold_started: Option<Instant>,
+    /// hold が始まった瞬間に写した render state（UI が [`Terminal::take_held_render_state`] で受け取る）
+    hold_capture: Option<RenderState>,
+    /// hold の render state に写す余分の行（ペインの行が端末より多いとき）
+    hold_overscan: (u16, u16),
 }
 
 /// ビューポートのスクロールのしかた
@@ -110,6 +129,7 @@ pub struct Mode {
 
 impl Mode {
     pub const FOCUS_EVENT: Mode = Mode { value: 1004, ansi: false };
+    pub const MOUSE_ALTERNATE_SCROLL: Mode = Mode { value: 1007, ansi: false };
     pub const BRACKETED_PASTE: Mode = Mode { value: 2004, ansi: false };
     pub const SYNCHRONIZED_OUTPUT: Mode = Mode { value: 2026, ansi: false };
     pub const GRAPHEME_CLUSTER: Mode = Mode { value: 2027, ansi: false };
@@ -176,7 +196,14 @@ impl Terminal {
     pub fn new(cols: u16, rows: u16, effects: Box<dyn Effects>) -> Result<Self> {
         let mut raw = ptr::null_mut();
         check(unsafe { ffi::ghostty_terminal_new(ptr::null(), &mut raw, cols.max(1), rows.max(1)) })?;
-        let inner = Box::into_raw(Box::new(Inner { effects, cell_px: (1, 1) }));
+        let inner = Box::into_raw(Box::new(Inner {
+            effects,
+            cell_px: (1, 1),
+            xtversion: String::new(),
+            hold_started: None,
+            hold_capture: None,
+            hold_overscan: (0, 0),
+        }));
         let t = Self { raw, inner, gesture: None };
         unsafe {
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_USERDATA, inner as *const c_void))?;
@@ -185,11 +212,13 @@ impl Terminal {
             let title: ffi::GhosttyTerminalTitleChangedFn = cb_title_changed;
             let pwd: ffi::GhosttyTerminalPwdChangedFn = cb_pwd_changed;
             let size: ffi::GhosttyTerminalSizeFn = cb_size;
+            let hold: ffi::GhosttyTerminalRenderHoldFn = cb_render_hold;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_BELL, bell as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, title as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_PWD_CHANGED, pwd as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_SIZE, size as *const c_void))?;
+            check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_RENDER_HOLD, hold as *const c_void))?;
         }
         Ok(t)
     }
@@ -250,6 +279,51 @@ impl Terminal {
             ffi::ghostty_terminal_get(self.raw, ffi::GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &mut v as *mut _ as *mut c_void)
         };
         v == 1
+    }
+
+    /// 今の画面の Kitty keyboard protocol のフラグ（GhosttyKittyKeyFlags。0 なら無効）。
+    /// スタックは主画面と代替画面で別々に持つ（libghostty-vt の仕様）
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        let mut v: u8 = 0;
+        unsafe {
+            ffi::ghostty_terminal_get(self.raw, ffi::GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &mut v as *mut _ as *mut c_void)
+        };
+        v
+    }
+
+    /// 同期出力（DEC 2026）の hold の残り時間（T-074）。hold していなければ `None`。
+    /// `timeout` を過ぎていれば hold を解いて `None` を返す（アプリが落ちて `?2026l` が来ないとき）
+    pub fn render_hold(&mut self, timeout: Duration) -> Option<Duration> {
+        let inner = unsafe { &mut *self.inner };
+        let started = inner.hold_started?;
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            // このときコールバックは呼ばれない（ヘッダの注）
+            let c = ffi::GhosttyTerminalModeConfig { mode: Mode::SYNCHRONIZED_OUTPUT.raw(), value: false };
+            unsafe { ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_MODE, &c as *const _ as *const c_void) };
+            inner.hold_started = None;
+            return None;
+        }
+        Some(timeout - elapsed)
+    }
+
+    /// hold が始まった瞬間に写した render state を受け取る（無ければ `None`）。
+    /// **受け取った render state は、それまで使っていた render state の代わりにする**（端末の dirty は
+    /// この render state が受け取ったので、古い render state へ差分は来ない）
+    pub fn take_held_render_state(&mut self) -> Option<RenderState> {
+        unsafe { (*self.inner).hold_capture.take() }
+    }
+
+    /// hold の render state に写す余分の行（[`RenderState::set_overscan`] と同じ値を渡す）
+    pub fn set_hold_overscan(&mut self, above: u16, below: u16) {
+        unsafe { (*self.inner).hold_overscan = (above, below) };
+    }
+
+    /// XTVERSION（`CSI > q`）で答える文字列（T-071）。ヘッダの既定は "libghostty"
+    pub fn set_xtversion(&mut self, version: &str) -> Result<()> {
+        unsafe { (*self.inner).xtversion = version.to_string() };
+        let f: ffi::GhosttyTerminalXtversionFn = cb_xtversion;
+        check(unsafe { ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_XTVERSION, f as *const c_void) })
     }
 
     /// スクロールバックを含めた全体の行数（[`Scrollbar::total`]。[`Scroll::Row`] の行の範囲）
@@ -792,6 +866,35 @@ unsafe extern "C" fn cb_size(t: ffi::GhosttyTerminal, userdata: *mut c_void, out
     .unwrap_or(false)
 }
 
+/// XTVERSION の答え（T-071）。`Inner` の文字列を指す（呼び出しの間は有効）
+unsafe extern "C" fn cb_xtversion(_t: ffi::GhosttyTerminal, userdata: *mut c_void) -> ffi::GhosttyString {
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Some(i) = inner(userdata) else { return ffi::GhosttyString { ptr: ptr::null(), len: 0 } };
+        ffi::GhosttyString { ptr: i.xtversion.as_ptr(), len: i.xtversion.len() }
+    }))
+    .unwrap_or(ffi::GhosttyString { ptr: ptr::null(), len: 0 })
+}
+
+/// 同期出力の hold の出入り（T-074）。始まったときに、そのときの画面を写す（文書 guide-rendering の Render holds）。
+/// vt_write の中から同期で呼ばれ、端末のロックは呼ぶ側が持っている
+unsafe extern "C" fn cb_render_hold(t: ffi::GhosttyTerminal, userdata: *mut c_void, held: bool) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Some(i) = inner(userdata) else { return };
+        if held {
+            i.hold_started = Some(Instant::now());
+            if let Ok(mut rs) = RenderState::new() {
+                let (above, below) = i.hold_overscan;
+                let _ = rs.set_overscan(above, below);
+                if rs.update_raw(t).is_ok() {
+                    i.hold_capture = Some(rs);
+                }
+            }
+        } else {
+            i.hold_started = None;
+        }
+    }));
+}
+
 // ---- render state ----
 
 /// どれだけ描き直すか
@@ -945,7 +1048,11 @@ impl RenderState {
 
     /// 端末から写す。端末のロックを持っている間に呼ぶ。写したあとはロックを外して読んでよい
     pub fn update(&mut self, terminal: &Terminal) -> Result<()> {
-        check(unsafe { ffi::ghostty_render_state_update(self.raw, terminal.raw) })
+        unsafe { self.update_raw(terminal.raw) }
+    }
+
+    unsafe fn update_raw(&mut self, terminal: ffi::GhosttyTerminal) -> Result<()> {
+        check(unsafe { ffi::ghostty_render_state_update(self.raw, terminal) })
     }
 
     /// 1 フレームを描き終えたら呼ぶ（全体と行ごとの dirty を落とす）
@@ -1201,12 +1308,12 @@ pub enum Key {
     Backspace,
     Tab,
     Escape,
-    /// F1〜F12（1 始まり）
+    /// F1〜F24（1 始まり）
     F(u8),
 }
 
 /// 修飾キー
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mods {
     pub shift: bool,
     pub ctrl: bool,
@@ -1252,34 +1359,80 @@ impl KeyEncoder {
             Key::Backspace => ffi::GHOSTTY_KEY_BACKSPACE,
             Key::Tab => ffi::GHOSTTY_KEY_TAB,
             Key::Escape => ffi::GHOSTTY_KEY_ESCAPE,
-            Key::F(n) if (1..=12).contains(&n) => ffi::GHOSTTY_KEY_F1 + (n as c_int - 1),
+            Key::F(n) if (1..=24).contains(&n) => ffi::GHOSTTY_KEY_F1 + (n as c_int - 1),
             Key::F(_) => return Vec::new(),
         };
-        let mut m = 0u16;
-        if mods.shift {
-            m |= ffi::GHOSTTY_MODS_SHIFT;
-        }
-        if mods.ctrl {
-            m |= ffi::GHOSTTY_MODS_CTRL;
-        }
-        if mods.alt {
-            m |= ffi::GHOSTTY_MODS_ALT;
-        }
-        let mut buf = [0u8; 64];
+        self.encode_input(terminal, &KeyInput { key: k, action: KeyAction::Press, mods, consumed_shift: false, text: "", unshifted: 0 })
+    }
+
+    /// キーのイベントを VT の列にする（KKP でも使う。[`KeyInput`]）。端末のロックを持って呼ぶ。何も送らないときは空
+    pub fn encode_input(&mut self, terminal: &Terminal, input: &KeyInput<'_>) -> Vec<u8> {
+        let m = mods_bits(input.mods);
+        let consumed = if input.consumed_shift { ffi::GHOSTTY_MODS_SHIFT } else { 0 };
+        let action = match input.action {
+            KeyAction::Press => ffi::GHOSTTY_KEY_ACTION_PRESS,
+            KeyAction::Release => ffi::GHOSTTY_KEY_ACTION_RELEASE,
+            KeyAction::Repeat => ffi::GHOSTTY_KEY_ACTION_REPEAT,
+        };
+        let text = ffi::GhosttyString { ptr: input.text.as_ptr(), len: input.text.len() };
+        let mut buf = [0u8; 128];
         let mut written = 0usize;
         unsafe {
             ffi::ghostty_key_encoder_set_from_terminal(self.raw, terminal.raw);
-            ffi::ghostty_key_event_set_action(self.event, ffi::GHOSTTY_KEY_ACTION_PRESS);
-            ffi::ghostty_key_event_set_key(self.event, k);
+            ffi::ghostty_key_event_set_action(self.event, action);
+            ffi::ghostty_key_event_set_key(self.event, input.key);
             ffi::ghostty_key_event_set_mods(self.event, m);
+            ffi::ghostty_key_event_set_consumed_mods(self.event, consumed);
+            ffi::ghostty_key_event_set_composing(self.event, false);
+            ffi::ghostty_key_event_set_utf8(self.event, text);
+            ffi::ghostty_key_event_set_unshifted_codepoint(self.event, input.unshifted);
             if ffi::ghostty_key_encoder_encode(self.raw, self.event, buf.as_mut_ptr(), buf.len(), &mut written)
                 != ffi::GHOSTTY_SUCCESS
             {
                 return Vec::new();
             }
+            // イベントが文字列を指したままにならないよう外す
+            ffi::ghostty_key_event_set_utf8(self.event, ffi::GhosttyString { ptr: ptr::null(), len: 0 });
         }
         buf[..written.min(buf.len())].to_vec()
     }
+}
+
+fn mods_bits(mods: Mods) -> u16 {
+    let mut m = 0u16;
+    if mods.shift {
+        m |= ffi::GHOSTTY_MODS_SHIFT;
+    }
+    if mods.ctrl {
+        m |= ffi::GHOSTTY_MODS_CTRL;
+    }
+    if mods.alt {
+        m |= ffi::GHOSTTY_MODS_ALT;
+    }
+    m
+}
+
+/// キーの動き
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyAction {
+    Press,
+    Release,
+    Repeat,
+}
+
+/// キーのイベント（[`KeyEncoder::encode_input`]。KKP で使う）
+#[derive(Clone, Copy, Debug)]
+pub struct KeyInput<'a> {
+    /// GhosttyKey（key/event.h。物理キー）
+    pub key: c_int,
+    pub action: KeyAction,
+    pub mods: Mods,
+    /// `text` を作るのに Shift を使ったか（consumed mods）
+    pub consumed_shift: bool,
+    /// キーが作る文字（Ctrl / Alt を足す前。空でもよい）。C0 制御文字は入れない
+    pub text: &'a str,
+    /// Shift を外したときの文字のコードポイント（0 は無し）
+    pub unshifted: u32,
 }
 
 impl Drop for KeyEncoder {

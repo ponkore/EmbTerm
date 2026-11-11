@@ -34,13 +34,14 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use et_render::{FontSpec, Frame, FrameView, Gpu, NarrowWide, Renderer};
+use et_session::keys::{KeyEvent, KeyPhase};
 use et_session::{Event as SessionEvent, Session, SessionOptions, keys};
-use et_vt::{Geometry, GridRef, KeyEncoder, Mode, Mods, MouseAction, MouseButton, MouseEncoder, MouseGeometry, RenderState, Rgb, Scroll, Terminal, TrackedRef};
+use et_vt::{Geometry, GridRef, Key, KeyEncoder, Mode, Mods, MouseAction, MouseButton, MouseEncoder, MouseGeometry, RenderState, Rgb, Scroll, Terminal, TrackedRef};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToClient};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_MENU};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_MENU, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
@@ -63,6 +64,10 @@ const FALLBACK_CELL: (u32, u32) = (8, 16);
 const DEFAULT_SCROLLBACK: usize = 10_000;
 /// ホイール 1 ノッチで動かす行数
 const WHEEL_LINES: i64 = 3;
+/// 同期出力（DEC 2026）の hold の時限（アプリが落ちて `?2026l` が来ないときに表示を止めっぱなしにしない。T-074）
+const RENDER_HOLD_TIMEOUT: Duration = Duration::from_secs(1);
+/// 制御用のウィンドウの hold の時限のタイマー
+const TIMER_RENDER_HOLD: usize = 1;
 // マウスのメッセージの wParam の修飾キー（Win32_System_SystemServices の MK_* と同じ値）
 const MK_LBUTTON: u32 = 0x0001;
 const MK_RBUTTON: u32 = 0x0002;
@@ -492,8 +497,8 @@ impl Pane {
 enum Drag {
     /// 選択（ペインの番号）
     Selecting(i64),
-    /// アプリへ報告している（ペインの番号）
-    Reporting(i64),
+    /// アプリへ報告している（ペインの番号と押したボタン）
+    Reporting(i64, MouseButton),
 }
 
 /// UI スレッドの状態（スレッドローカル）
@@ -607,7 +612,7 @@ impl App {
             && p.view.take().is_some()
         {
             log(&format!("ペイン {id} の子 HWND が壊れた（親のフレームが消された）。端末は残す"));
-            if matches!(self.drag, Some(Drag::Selecting(p) | Drag::Reporting(p)) if p == id) {
+            if matches!(self.drag, Some(Drag::Selecting(p) | Drag::Reporting(p, _)) if p == id) {
                 self.drag = None;
             }
             self.publish_panes();
@@ -766,7 +771,7 @@ impl App {
         if self.selected == Some(id) {
             self.selected = None;
         }
-        if matches!(self.drag, Some(Drag::Selecting(p) | Drag::Reporting(p)) if p == id) {
+        if matches!(self.drag, Some(Drag::Selecting(p) | Drag::Reporting(p, _)) if p == id) {
             self.drag = None;
             unsafe {
                 let _ = ReleaseCapture();
@@ -831,6 +836,10 @@ impl App {
                     log(&format!("注意: {w}"));
                 }
                 let _ = self.shared.session.set(s.clone());
+                // すでにフォーカスがあれば知らせる（ConPTY は 1004 を必ず求める。T-070）
+                if self.focused {
+                    s.write(b"\x1b[I");
+                }
                 let (pid, kind) = (s.pid(), s.conpty_kind().to_string());
                 self.shared.update(|st| {
                     st.started = true;
@@ -1050,21 +1059,31 @@ impl App {
         let output = std::mem::take(&mut self.output_pending);
         // （ペインの番号, そのペインに写した render state, ペインの先頭が `Frame` の何行目か）
         let mut synced: Vec<(usize, RenderState, i32)> = Vec::new();
+        let hold;
         {
             let mut term = session.lock();
+            // 同期出力（T-074）: hold の間はどのペインも写し直さない。hold の始まりの画面は読みのスレッドが写してある
+            hold = term.render_hold(RENDER_HOLD_TIMEOUT);
+            if let Some(rs) = term.take_held_render_state() {
+                self.main_rs = rs;
+            }
             let (_, rows) = term.size();
             let alt = term.is_alternate_screen();
             self.alt_screen = alt;
             // 追っているペインのうち、端末より行が多いものの分だけ上の行を余分に写す
             let need_above =
                 self.panes.iter().filter(|p| p.visible() && p.follows(alt)).map(|p| p.grid.1.saturating_sub(rows)).max().unwrap_or(0);
-            if need_above != self.main_overscan {
+            if hold.is_none() && need_above != self.main_overscan {
                 self.main_overscan = need_above;
                 if let Err(e) = self.main_rs.set_overscan(need_above, 0) {
                     log(&format!("overscan を設定できません: {e}"));
                 }
+                term.set_hold_overscan(need_above, 0);
             }
-            if let Err(e) = self.main_rs.update(&term) {
+            if hold.is_some() {
+                // 出力があったことは hold が終わってから反映する
+                self.output_pending |= output;
+            } else if let Err(e) = self.main_rs.update(&term) {
                 log(&format!("render state を更新できません: {e}"));
                 return;
             }
@@ -1072,7 +1091,7 @@ impl App {
             let active_top = total - rows as i64;
             let mut moved = false;
             for (i, p) in self.panes.iter_mut().enumerate() {
-                if !p.visible() || alt {
+                if !p.visible() || alt || hold.is_some() {
                     continue;
                 }
                 let Position::Anchored(anchor) = &p.position else { continue };
@@ -1125,6 +1144,12 @@ impl App {
             if moved {
                 // ビューポートの決まりは「いちばん下」（読みのスレッドが動く前に戻す）
                 term.scroll_viewport(Scroll::Bottom);
+            }
+        }
+        // hold の時限が来たら描き直せるように、タイマーで起こす（出力が来なくなったアプリのとき）
+        if let Some(rest) = hold {
+            unsafe {
+                SetTimer(Some(self.control), TIMER_RENDER_HOLD, rest.as_millis() as u32 + 2, None);
             }
         }
         let master_changed = self.master.update(&mut self.main_rs);
@@ -1304,24 +1329,14 @@ impl App {
         self.refresh(false);
     }
 
+    /// キーを送る。送り方（KKP / win32-input-mode / レガシー）は [`Session::key_protocol`] が決める（T-069）
     fn send_key(&mut self, key: &str, mods: &str) {
-        let mut m = keys::parse_mods(mods);
-        let mut chars = key.chars();
-        let bytes = match (chars.next(), chars.next()) {
-            (Some(c), None) => keys::encode_char(c, m),
-            _ => match keys::key_by_name(key) {
-                Some((k, shift)) => {
-                    let Some(s) = self.ensure_session() else { return };
-                    m.shift |= shift;
-                    let t = s.lock();
-                    self.encoder.encode(&t, k, m)
-                }
-                None => {
-                    log(&format!("知らないキー: {key} ({mods})"));
-                    return;
-                }
-            },
+        let Some(ev) = KeyEvent::from_emacs(key, keys::parse_mods(mods)) else {
+            log(&format!("知らないキー: {key} ({mods})"));
+            return;
         };
+        let Some(s) = self.ensure_session() else { return };
+        let bytes = s.encode_key(&mut self.encoder, &ev, KeyPhase::Tap);
         self.send_input(&bytes);
     }
 
@@ -1398,6 +1413,28 @@ impl App {
                 self.send_mouse(id, MouseAction::Press, Some(button), false, client, mods);
             }
             return;
+        }
+        // 代替画面（報告なし）: Ghostty と同じく、DEC 1007（alternate scroll。既定で有効）なら矢印キーにする。
+        // 代替画面にスクロールバックは無いので、Shift のときは何もしない
+        if let Some(s) = self.session.clone() {
+            let (alt, alt_scroll) = {
+                let t = s.lock();
+                (t.is_alternate_screen(), t.mode(Mode::MOUSE_ALTERNATE_SCROLL))
+            };
+            if alt {
+                if alt_scroll && !mods.shift {
+                    let key = if notches > 0 { Key::Up } else { Key::Down };
+                    let mut bytes = Vec::new();
+                    {
+                        let t = s.lock();
+                        for _ in 0..notches.unsigned_abs() as i64 * WHEEL_LINES {
+                            bytes.extend(self.encoder.encode(&t, key, Mods::default()));
+                        }
+                    }
+                    s.write(&bytes);
+                }
+                return;
+            }
         }
         // WM_MOUSEWHEEL は上（遠ざける）が正。スクロールバックの行は上（古いほう）が負
         self.scroll_pane(id, ScrollAmount::Lines(-(notches as i64) * WHEEL_LINES));
@@ -1551,7 +1588,7 @@ impl App {
         let client = point_of(lparam);
         let mods = mods_of(wparam);
         if self.should_report(id, mods.shift) {
-            self.drag = Some(Drag::Reporting(id));
+            self.drag = Some(Drag::Reporting(id, MouseButton::Left));
             unsafe { SetCapture(hwnd) };
             self.send_mouse(id, MouseAction::Press, Some(MouseButton::Left), true, client, mods);
             return;
@@ -1619,8 +1656,8 @@ impl App {
                 self.mark_selection_changed();
                 self.refresh(false);
             }
-            Some(Drag::Reporting(p)) if p == id => {
-                self.send_mouse(id, MouseAction::Motion, Some(MouseButton::Left), true, client, mods);
+            Some(Drag::Reporting(p, b)) if p == id => {
+                self.send_mouse(id, MouseAction::Motion, Some(b), true, client, mods);
             }
             // 押していない動き（any-event トラッキング）。どのボタンも押していなければボタンなしで送る
             None if self.should_report(id, mods.shift) => {
@@ -1638,9 +1675,9 @@ impl App {
                 let _ = ReleaseCapture();
                 self.finish_selection(id, client);
             },
-            Some(Drag::Reporting(p)) if p == id => unsafe {
+            Some(Drag::Reporting(p, b)) if p == id && b == MouseButton::Left => unsafe {
                 let _ = ReleaseCapture();
-                self.send_mouse(id, MouseAction::Release, Some(MouseButton::Left), false, client, mods);
+                self.send_mouse(id, MouseAction::Release, Some(b), false, client, mods);
             },
             other => {
                 self.drag = other;
@@ -1695,16 +1732,36 @@ impl App {
                 let mods = mods_of(wparam);
                 if self.should_report(id, mods.shift) {
                     let b = if msg == WM_RBUTTONDOWN { MouseButton::Right } else { MouseButton::Middle };
+                    self.drag = Some(Drag::Reporting(id, b));
+                    unsafe { SetCapture(hwnd) };
                     self.send_mouse(id, MouseAction::Press, Some(b), true, point_of(lparam), mods);
                 }
                 // 右クリックはそれ以上何もしない（メニューも貼り付けも無し）
             }
             WM_RBUTTONUP | WM_MBUTTONUP => {
                 let mods = mods_of(wparam);
-                if self.should_report(id, mods.shift) {
-                    let b = if msg == WM_RBUTTONUP { MouseButton::Right } else { MouseButton::Middle };
+                let b = if msg == WM_RBUTTONUP { MouseButton::Right } else { MouseButton::Middle };
+                if matches!(self.drag, Some(Drag::Reporting(p, d)) if p == id && d == b) {
+                    self.drag = None;
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                    self.send_mouse(id, MouseAction::Release, Some(b), false, point_of(lparam), mods);
+                } else if self.should_report(id, mods.shift) {
                     self.send_mouse(id, MouseAction::Release, Some(b), false, point_of(lparam), mods);
                 }
+            }
+            WM_SETCURSOR => {
+                // マウスの形（T-038）: テキストの上は I ビーム、アプリへ報告しているときは矢印
+                if (lparam.0 & 0xffff) as u32 == HTCLIENT {
+                    let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                    let name = if self.should_report(id, shift) { IDC_ARROW } else { IDC_IBEAM };
+                    unsafe {
+                        SetCursor(LoadCursorW(None, name).ok());
+                    }
+                    return Some(LRESULT(1));
+                }
+                return None;
             }
             WM_MOUSEMOVE => self.mouse_move(id, wparam, lparam),
             WM_LBUTTONUP => self.lbutton_up(id, wparam, lparam),
@@ -1750,6 +1807,12 @@ extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
         })
         .map(|_| LRESULT(0)),
         WM_APP_SESSION => with_app(|a| a.session_changed()).map(|_| LRESULT(0)),
+        WM_TIMER if wparam.0 == TIMER_RENDER_HOLD => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), TIMER_RENDER_HOLD);
+            }
+            with_app(|a| a.refresh(false)).map(|_| LRESULT(0))
+        }
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             Some(LRESULT(0))

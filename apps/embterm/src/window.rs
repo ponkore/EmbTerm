@@ -11,19 +11,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use et_render::{FontSpec, Frame, Renderer};
-use et_vt::{KeyEncoder, RenderState, Rgb, Scroll};
+use et_vt::{Key, KeyEncoder, MouseAction, MouseButton, MouseEncoder, MouseGeometry, Mode, Mods, RenderState, Rgb, Scroll};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_F4, VK_PROCESSKEY, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::args::Args;
 use crate::log;
+use et_session::keys::{KeyEvent, KeyPhase, KeyProtocol};
 use et_session::{Event, Session, SessionOptions, keys};
 
 const CLASS: PCWSTR = w!("EmbTermWindow");
@@ -35,6 +36,11 @@ const TIMER_SCREENSHOT: usize = 2;
 const TIMER_EXIT: usize = 3;
 const TIMER_CONPTY_CHECK: usize = 4;
 const TIMER_RESIZE: usize = 5;
+const TIMER_RENDER_HOLD: usize = 6;
+/// 同期出力（DEC 2026）の hold の時限（T-074）
+const RENDER_HOLD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// ホイール 1 ノッチで動かす行数
+const WHEEL_LINES: isize = 3;
 
 const DEFAULT_FG: Rgb = Rgb { r: 0xd4, g: 0xd4, b: 0xd4 };
 const DEFAULT_BG: Rgb = Rgb { r: 0x1e, g: 0x1e, b: 0x1e };
@@ -56,6 +62,9 @@ struct App {
     rs: RenderState,
     frame: Frame,
     encoder: KeyEncoder,
+    mouse: MouseEncoder,
+    /// マウスをアプリへ報告している（押したボタン。T-038）
+    mouse_report: Option<MouseButton>,
     grid: (u16, u16),
     cell: (u32, u32),
     focused: bool,
@@ -73,6 +82,21 @@ struct App {
     scroll_up: Option<u16>,
     screenshot: Option<PathBuf>,
     base_title: String,
+}
+
+/// lParam のスキャンコード（`WM_KEYDOWN` など）
+fn scan_of(lparam: LPARAM) -> u16 {
+    ((lparam.0 >> 16) & 0xff) as u16
+}
+
+/// lParam の拡張キーのビット
+fn extended_of(lparam: LPARAM) -> bool {
+    (lparam.0 >> 24) & 1 != 0
+}
+
+/// lParam の繰り返しの回数
+fn repeat_of(lparam: LPARAM) -> u16 {
+    (lparam.0 & 0xffff) as u16
 }
 
 fn client_size(hwnd: HWND) -> (u32, u32) {
@@ -220,6 +244,8 @@ pub fn run(args: Args) -> Result<(), String> {
         rs: RenderState::new().map_err(|e| e.to_string())?,
         frame: Frame::default(),
         encoder: KeyEncoder::new().map_err(|e| e.to_string())?,
+        mouse: MouseEncoder::new().map_err(|e| e.to_string())?,
+        mouse_report: None,
         grid,
         cell,
         focused: false,
@@ -291,11 +317,23 @@ impl App {
     fn refresh(&mut self, force: bool) {
         self.sync_size();
         self.session.take_output();
-        {
-            let term = self.session.lock();
-            if let Err(e) = self.rs.update(&term) {
+        let hold = {
+            let mut term = self.session.lock();
+            // 同期出力（T-074）: hold の間は写し直さない。hold の始まりの画面は読みのスレッドが写してある
+            let hold = term.render_hold(RENDER_HOLD_TIMEOUT);
+            if let Some(rs) = term.take_held_render_state() {
+                self.rs = rs;
+            }
+            if hold.is_none() && let Err(e) = self.rs.update(&term) {
                 log(&format!("render state を更新できません: {e}"));
                 return;
+            }
+            hold
+        };
+        // hold の時限が来たら描き直せるように、タイマーで起こす
+        if let Some(rest) = hold {
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_RENDER_HOLD, rest.as_millis() as u32 + 2, None);
             }
         }
         let changed = self.frame.update(&mut self.rs);
@@ -345,21 +383,61 @@ impl App {
         self.session.write(data);
     }
 
-    fn key_down(&mut self, vk: u16, sys: bool) -> bool {
-        let Some(key) = keys::special_key(vk) else { return false };
+    /// キーを押した（`WM_KEYDOWN` / `WM_SYSKEYDOWN`）。処理したら true
+    fn key_down(&mut self, vk: u16, lparam: LPARAM, sys: bool) -> bool {
+        let special = keys::special_key(vk);
         let mods = keys::mods(sys);
         // Shift+PageUp / PageDown はスクロールバック
-        if mods.shift && !mods.ctrl && matches!(key, et_vt::Key::PageUp | et_vt::Key::PageDown) {
+        if let Some(key) = special
+            && mods.shift
+            && !mods.ctrl
+            && matches!(key, Key::PageUp | Key::PageDown)
+        {
             let page = self.grid.1 as isize - 1;
-            self.session.lock().scroll_viewport(Scroll::Delta(if key == et_vt::Key::PageUp { -page } else { page }));
+            self.session.lock().scroll_viewport(Scroll::Delta(if key == Key::PageUp { -page } else { page }));
             self.refresh(false);
             return true;
         }
-        let bytes = {
+        // IME が処理しているキーは送らない（確定した文字は WM_CHAR で来る）
+        if vk == VK_PROCESSKEY.0 {
+            return false;
+        }
+        let protocol = {
             let t = self.session.lock();
-            self.encoder.encode(&t, key, mods)
+            self.session.key_protocol(&t)
         };
-        self.skip_char = keys::produces_char(key);
+        // レガシーの VT は文字のキーを WM_CHAR に任せ、特殊キーだけエンコーダで送る
+        if protocol == KeyProtocol::Legacy {
+            let Some(key) = special else { return false };
+            let bytes = {
+                let t = self.session.lock();
+                self.encoder.encode(&t, key, mods)
+            };
+            self.skip_char = keys::produces_char(key);
+            self.send(&bytes);
+            return true;
+        }
+        let repeat = lparam.0 as u32 >> 30 & 1 != 0;
+        let ev = KeyEvent::from_win32(vk, scan_of(lparam), extended_of(lparam), repeat_of(lparam));
+        let phase = if repeat { KeyPhase::Repeat } else { KeyPhase::Press };
+        let bytes = self.session.encode_key(&mut self.encoder, &ev, phase);
+        // WM_CHAR も来るキーは二重に送らない
+        self.skip_char = ev.produces_char;
+        self.send(&bytes);
+        true
+    }
+
+    /// キーを離した（`WM_KEYUP` / `WM_SYSKEYUP`）。KKP と win32-input-mode だけ離したことも送る
+    fn key_up(&mut self, vk: u16, lparam: LPARAM) -> bool {
+        let protocol = {
+            let t = self.session.lock();
+            self.session.key_protocol(&t)
+        };
+        if protocol == KeyProtocol::Legacy || vk == VK_PROCESSKEY.0 {
+            return false;
+        }
+        let ev = KeyEvent::from_win32(vk, scan_of(lparam), extended_of(lparam), 1);
+        let bytes = self.session.encode_key(&mut self.encoder, &ev, KeyPhase::Release);
         self.send(&bytes);
         true
     }
@@ -378,24 +456,100 @@ impl App {
             char::from_u32(unit as u32)
         };
         let Some(ch) = ch else { return };
-        let mut buf = Vec::with_capacity(5);
-        if sys {
-            // Alt+文字は ESC を前に付ける（レガシーの meta）
-            buf.push(0x1b);
-        }
-        let mut tmp = [0u8; 4];
-        buf.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
-        self.send(&buf);
+        // WM_CHAR で来るのはレガシーの VT のキーか、IME の確定文字。送り方は [`KeyEvent`] に任せる
+        let ev = KeyEvent::from_char(ch, Mods { alt: sys, ..Default::default() });
+        let bytes = self.session.encode_key(&mut self.encoder, &ev, KeyPhase::Tap);
+        self.send(&bytes);
     }
 
-    fn wheel(&mut self, delta: i32) {
+    /// マウスをアプリへ報告するか（Shift なしで、報告が有効）
+    fn reporting(&self, shift: bool) -> bool {
+        !shift && self.session.lock().mouse_tracking()
+    }
+
+    fn mouse_geometry(&self) -> MouseGeometry {
+        let (w, h) = client_size(self.hwnd);
+        let (cw, ch) = self.renderer.cell_size();
+        MouseGeometry { screen_width: w, screen_height: h, cell_width: cw, cell_height: ch, padding: self.renderer.padding() }
+    }
+
+    fn send_mouse(&mut self, action: MouseAction, button: Option<MouseButton>, any: bool, lparam: LPARAM) {
+        let x = (lparam.0 & 0xffff) as i16 as f32;
+        let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32;
+        let geo = self.mouse_geometry();
+        let bytes = {
+            let t = self.session.lock();
+            self.mouse.encode(&t, geo, action, button, any, (x, y), keys::mods(false))
+        };
+        if !bytes.is_empty() {
+            self.session.write(&bytes);
+        }
+    }
+
+    fn button_down(&mut self, button: MouseButton, lparam: LPARAM) -> bool {
+        if !self.reporting(keys::mods(false).shift) {
+            return false;
+        }
+        self.mouse_report = Some(button);
+        unsafe { SetCapture(self.hwnd) };
+        self.send_mouse(MouseAction::Press, Some(button), true, lparam);
+        true
+    }
+
+    fn button_up(&mut self, button: MouseButton, lparam: LPARAM) -> bool {
+        if self.mouse_report != Some(button) {
+            return false;
+        }
+        self.mouse_report = None;
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        self.send_mouse(MouseAction::Release, Some(button), false, lparam);
+        true
+    }
+
+    fn wheel(&mut self, delta: i32, lparam: LPARAM) {
         self.wheel += delta;
         let notches = self.wheel / WHEEL_DELTA as i32;
-        if notches != 0 {
-            self.wheel -= notches * WHEEL_DELTA as i32;
-            self.session.lock().scroll_viewport(Scroll::Delta(-(notches as isize) * 3));
-            self.refresh(false);
+        if notches == 0 {
+            return;
         }
+        self.wheel -= notches * WHEEL_DELTA as i32;
+        let shift = keys::mods(false).shift;
+        if self.reporting(shift) {
+            let button = if notches > 0 { MouseButton::WheelUp } else { MouseButton::WheelDown };
+            // lparam はスクリーン座標（WM_MOUSEWHEEL）。クライアント座標に直す
+            let mut pt = POINT { x: (lparam.0 & 0xffff) as i16 as i32, y: ((lparam.0 >> 16) & 0xffff) as i16 as i32 };
+            let client = unsafe {
+                let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut pt);
+                LPARAM((pt.y as isize) << 16 | (pt.x as isize & 0xffff))
+            };
+            for _ in 0..notches.unsigned_abs() {
+                self.send_mouse(MouseAction::Press, Some(button), false, client);
+            }
+            return;
+        }
+        // 代替画面（報告なし）: Ghostty と同じく、DEC 1007 なら矢印キーにする
+        let (alt, alt_scroll) = {
+            let t = self.session.lock();
+            (t.is_alternate_screen(), t.mode(Mode::MOUSE_ALTERNATE_SCROLL))
+        };
+        if alt {
+            if alt_scroll && !shift {
+                let key = if notches > 0 { Key::Up } else { Key::Down };
+                let mut bytes = Vec::new();
+                {
+                    let t = self.session.lock();
+                    for _ in 0..notches.unsigned_abs() as isize * WHEEL_LINES {
+                        bytes.extend(self.encoder.encode(&t, key, Mods::default()));
+                    }
+                }
+                self.session.write(&bytes);
+            }
+            return;
+        }
+        self.session.lock().scroll_viewport(Scroll::Delta(-(notches as isize) * WHEEL_LINES));
+        self.refresh(false);
     }
 
     fn set_selection(&mut self, a: (u16, u16), b: (u16, u16)) {
@@ -481,6 +635,12 @@ impl App {
                     post(self.hwnd.0 as isize, WM_APP_OUTPUT);
                 }
             },
+            TIMER_RENDER_HOLD => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_RENDER_HOLD);
+                }
+                self.refresh(false);
+            }
             TIMER_CONPTY_CHECK => {
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_CONPTY_CHECK);
@@ -531,35 +691,71 @@ impl App {
                 self.refresh(true);
             }
             WM_KEYDOWN => {
-                if !self.key_down(wparam.0 as u16, false) {
+                if !self.key_down(wparam.0 as u16, lparam, false) {
                     return None;
                 }
             }
             WM_SYSKEYDOWN => {
                 // Alt+F4 などはウィンドウの操作に任せる
-                if wparam.0 as u16 == windows::Win32::UI::Input::KeyboardAndMouse::VK_F4.0 || !self.key_down(wparam.0 as u16, true) {
+                if wparam.0 as u16 == VK_F4.0 || !self.key_down(wparam.0 as u16, lparam, true) {
+                    return None;
+                }
+            }
+            WM_KEYUP | WM_SYSKEYUP => {
+                if !self.key_up(wparam.0 as u16, lparam) {
                     return None;
                 }
             }
             WM_CHAR => self.char_input(wparam.0 as u16, false),
             WM_SYSCHAR => self.char_input(wparam.0 as u16, true),
-            WM_MOUSEWHEEL => self.wheel(((wparam.0 >> 16) & 0xffff) as i16 as i32),
+            WM_MOUSEWHEEL => self.wheel(((wparam.0 >> 16) & 0xffff) as i16 as i32, lparam),
+            WM_SETCURSOR if (lparam.0 & 0xffff) as u32 == HTCLIENT => {
+                // マウスの形（T-038）
+                let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                let name = if self.reporting(shift) { IDC_ARROW } else { IDC_IBEAM };
+                unsafe {
+                    SetCursor(LoadCursorW(None, name).ok());
+                }
+                return Some(LRESULT(1));
+            }
             WM_LBUTTONDOWN => unsafe {
+                if self.button_down(MouseButton::Left, lparam) {
+                    return Some(LRESULT(0));
+                }
                 let c = self.mouse_cell(lparam);
                 self.drag_anchor = Some(c);
                 SetCapture(self.hwnd);
                 let _ = self.session.lock().set_selection(None);
                 self.refresh(false);
             },
+            WM_RBUTTONDOWN => {
+                self.button_down(MouseButton::Right, lparam);
+            }
+            WM_MBUTTONDOWN => {
+                self.button_down(MouseButton::Middle, lparam);
+            }
+            WM_RBUTTONUP => {
+                self.button_up(MouseButton::Right, lparam);
+            }
+            WM_MBUTTONUP => {
+                self.button_up(MouseButton::Middle, lparam);
+            }
             WM_MOUSEMOVE => {
-                if let Some(a) = self.drag_anchor {
+                if let Some(b) = self.mouse_report {
+                    self.send_mouse(MouseAction::Motion, Some(b), true, lparam);
+                } else if let Some(a) = self.drag_anchor {
                     let c = self.mouse_cell(lparam);
                     if c != a {
                         self.set_selection(a, c);
                     }
+                } else if self.reporting(keys::mods(false).shift) {
+                    self.send_mouse(MouseAction::Motion, None, false, lparam);
                 }
             }
             WM_LBUTTONUP => unsafe {
+                if self.button_up(MouseButton::Left, lparam) {
+                    return Some(LRESULT(0));
+                }
                 self.drag_anchor = None;
                 let _ = ReleaseCapture();
             },
