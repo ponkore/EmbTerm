@@ -1,0 +1,23 @@
+ここは、EmbTerm の開発ディレクトリです。
+
+EmbTerm --- Embedded Term (for Emacs On Windows)
+
+* Emacs から terminal を組み込むモジュール
+* GenPreview と同様に、Emacs のバッファ内にウィンドウを重ね、その Window ハンドルを module で扱う
+* 基本は emacs から呼び出す module の形だが、単独デバッグ用の .exe も作る（ただし feature や設定項目等は多くない）
+* 逆に module に対しては font や色、テーマ等 elisp から各種設定可能（Windows Terminal の設定画面・コマンドパレットや、WezTerm の lua のようなカスタマイズ・機能強化の feature はもたず、elisp でがんばる形）
+* emacs からの使用を想定したスレッドのハンドリング
+* 当面の目標は、「emacs 内から以下のアプリケーションがターミナルと同様に使えること」とする
+  - cmd、PowerShell、pwsh、nyagos、wsl bash、git bash
+  - claude
+  - yazi
+  - vim
+* claude では、①が半角１文字幅相当になるなど、eaw の文字の扱いが emacs では実現できないような形になっているので、そこに注意する
+* ターミナルハンドリングで libghostty-vt が使えるのなら使う
+* このプロジェクトがうまくいけば、ghostel はやめる
+* 実装言語は rust が望ましい（が制約があるなら他も検討）
+
+(参考)
+* ~/.emacs.d
+* ~/Projects/GenPreview/
+* C:/Apps/emacs/src/emacs-31.1/

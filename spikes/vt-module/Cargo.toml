@@ -1,0 +1,14 @@
+[package]
+name = "spike-vt-module"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# T-020: libghostty-vt を静的リンクした Emacs module（cdylib）を Emacs 31.1 に読み込めるか
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+emacs.workspace = true

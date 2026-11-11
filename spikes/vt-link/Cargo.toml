@@ -1,0 +1,8 @@
+[package]
+name = "spike-vt-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# T-020: Zig でビルドした libghostty-vt の静的ライブラリを、Rust（MSVC、CRT 静的）からリンクして呼べるか

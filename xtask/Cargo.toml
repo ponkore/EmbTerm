@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+description = "開発用のタスク（cargo xtask <task>）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

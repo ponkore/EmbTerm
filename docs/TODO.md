@@ -1,0 +1,238 @@
+# EmbTerm TODO（課題・検討事項）
+
+要件は [requirements.md](requirements.md)。ここは「やること・決めること・調べること」の一覧。
+
+## 書き方
+
+| 印 | 意味 |
+|---|---|
+| ⬜ | 未着手 |
+| 🔄 | 作業中 |
+| ✅ | 完了 |
+| ⏸ | 保留（理由を書く） |
+| ❌ | やらない（理由を書く） |
+
+- 終わったら印を ✅ にして、行末に **日付と結論を 1 行**、詳しい記録があればその場所を書く
+  - 例: `- ✅ **T-020** libghostty-vt を Windows でビルドする（2026-11-12）→ 静的ライブラリで通った。docs/spikes/libghostty-build.md`
+- 番号は通し番号。**付け直さない**（requirements.md や記録から参照するため）
+- 新しい課題は、合う節の末尾に次の番号で足す。どこにも合わなければ「§8 発生した課題」に足す
+- 決定したことが requirements.md の【案】に関わるなら、requirements.md も直す
+
+---
+
+## 0. 進め方
+
+- ✅ **T-001** project-memo.txt を requirements.md / TODO.md に整理する（2026-11-11）
+- ✅ **T-002** requirements.md の【案】を見直す（要らないもの・足りないもの・優先度）（2026-11-11）→ 【案】はすべて了承。split と複数フレームの扱いを足した（T-016）
+- ✅ **T-003** リポジトリを用意する（`git init`、Cargo の workspace、`.gitignore`）（2026-11-11）→ ブランチ `main`。設定は GenPreview にそろえた（edition 2024、CRT の静的リンク、release は LTO・`panic = "unwind"` のまま）。members はクレートを作るたびに足す（中身の無いディレクトリを glob で指すと Cargo がエラーにする）
+- ✅ **T-004** 名前を決める（DLL・elisp の接頭辞・exe・クレート）（2026-11-11）→ GenPreview の慣習にそろえた。下の表
+
+  | もの | 名前 | GenPreview での対応 |
+  |---|---|---|
+  | module の DLL | `embterm_module.dll`（クレート `embterm-module`、`(require 'embterm-module)`） | `genpreview_module.dll` |
+  | elisp | `embterm.el`、接頭辞 `embterm-`（内部は `embterm--`） | `genpreview.el` |
+  | module の関数 | `embterm-module-*` | `genpreview-module-*` |
+  | デバッグ用 exe | `embterm.exe` | `genpreview.exe` |
+  | 内部のクレート | `et-*`（例: `et-vt`、`et-pty`、`et-render`、`et-window`） | `gp-*` |
+
+## 1. 大きな決定（実装の前に決める）
+
+- ✅ **T-005** VT の解釈に libghostty-vt を使えるか（2026-11-11）→ **使う。1.0 の C ABI を静的リンクする。** docs/research/libghostty-vt-build.md
+  - Zig 0.17.1 でソースからビルドし、静的ライブラリを Rust（MSVC、CRT 静的）の exe にも Emacs module にもリンクできた（T-020）
+  - 1.0 の C ABI で、必要なものが揃っている: PTY への書き戻し、ベル、タイトル、cwd（OSC 7）、
+    クリップボード（OSC 52 の読み書き）、デスクトップ通知、進捗、OSC 133、未知のシーケンス、
+    同期出力（render hold）、reflow、render state（dirty の行だけの反復、画像）、キー・マウスのエンコーダ、selection、search
+  - ghostel が C API で OSC を拾えず自前で走査していたのは 1.0 より前の C API の話（docs/research/ghostel.md §2）
+  - ライセンス: 本体は MIT。同梱される highway・simdutf・wuffs・uucode も MIT / Apache-2.0 / BSD 系。配布物に表記を入れる
+  - **eaw の幅を切り替える設定は無い**（幅 1 で固定）→ T-012
+- ⬜ **T-006** スレッドの構成を決める
+  - 端末 1 つにつき: UI（子 HWND のメッセージ）・PTY の読み・VT の解釈・描画をどう分けるか
+  - 子 HWND のスレッドは詰まらせない（入力キューが Emacs と連結する）
+  - Lisp → module は `PostMessage` のみ、module → Lisp はポーリング（GenPreview ADR 0006）
+  - 材料: GenPreview は「ビューア 1 枚 = UI スレッド 1 本、頼みごとの列 + `PostThreadMessage`、
+    Mutex の共有状態を 100 ms ごとにポーリング」。ghostel は「端末ごとに読みのスレッド 1 本が
+    ロックを取って VT の解釈まで行い、描画は Lisp スレッド」。EmbTerm では読み・解釈・描画を
+    すべて Lisp スレッドの外に出す
+  - `PostThreadMessage` はモーダルループ（リサイズのドラッグ中など）で取りこぼすおそれ → HWND 宛ての `PostMessage` にする（推測。GenPreview の調査より）
+- ✅ **T-007** PTY の実装を決める（2026-11-11）→ **ConPTY を `windows` クレートで直接叩く。再配布版 1.25 以降
+  （NuGet `Microsoft.Windows.Console.ConPTY` 1.25.260930003）を同梱して優先し、OS 同梱版は退避先にする。**
+  OS 同梱版（26300）は画面を作り直す旧式で、Kitty graphics（APC）と Sixel を捨て、OSC 52 / 9 / 777 / 7 と同期出力の位置をずらす。
+  再配布版 1.22 以降は全部をその場で素通しする。passthrough のフラグはもう無い（0x8 は書記素の幅の意味に変わった）。
+  docs/research/conpty.md §2、§5。ghostel の同梱は 1.24.2605
+  - ConPTY を `windows` クレートで直接叩く / `portable-pty` などを使う
+  - 再配布版 `conpty.dll` + `OpenConsole.exe` を同梱するか（ghostel は同梱して優先的に使う）
+  - 材料: ghostel の手順（overlapped の名前付きパイプ、子のハンドルで終了を知る、`ClosePseudoConsole` は
+    別スレッドで呼んで EOF まで読む、Windows では `RESIZE_PULL_SCROLLBACK` を false）はそのまま移せる。
+    足りないもの: **Job Object**（孫プロセスを残さない）と、時限付きの終了待ち
+- ⬜ **T-008** 描画の方式を決める
+  - Direct2D / DirectWrite（GenPreview と共通）か、Direct3D + グリフのアトラスか
+  - GenPreview で子ウィンドウが真っ黒になった件（DXGI のフリップモデル）の結果を確かめてから
+  - 1 秒に何十回も描き直す前提での負荷
+- 🔄 **T-009** キー入力の経路を決める（2026-11-11: **最小構成を A で作り、実測してから決める**。
+  測るもの: IME の P1〜P6（T-010）、PSReadLine の Ctrl+Space・Shift+Enter、claude の Shift+Enter・`Esc`）
+  - A: フォーカスを Emacs に残し、Emacs のキーマップで受けて module に送る（GenPreview・ghostel の形）
+  - B: 子 HWND がフォーカスを取り、`WM_KEYDOWN` / `WM_CHAR` を自分で処理する。Emacs に戻すキーをどうするか
+  - Emacs に残すキー（`C-x`、`M-x`、ウィンドウ移動）と端末に送るキーの分け方。
+    eat の semi-char / char / emacs モードのような切り替えが要るか
+  - `Esc`・`C-[`・`M-` の区別、`C-@`、ファンクションキー、修飾キーの組み合わせ
+  - 材料: GenPreview と ghostel はどちらも A。ghostel の semi-char / char / copy の入力モードと、
+    Emacs に残すキーの既定（`C-c` `C-x` `C-u` `C-h` `M-x` `M-:` `C-\`）は流用できる。
+    ghostel は押したときしか送らないので、Kitty keyboard の「離したとき」の報告は満たせない
+  - cua-mode に負けないよう、キーマップは `emulation-mode-map-alists` の先頭に置く（GenPreview f8a509f）
+  - **ConPTY は win32-input-mode（`CSI ?9001h`）を必ず求める**（T-022）。cmd・PSReadLine・ネイティブ vim の
+    修飾キーの区別（Ctrl+Space、Shift+Enter など）には、仮想キー・スキャンコード・文字・修飾キーの状態を送る必要がある
+    - B なら `WM_KEYDOWN` からそのまま揃う
+    - A では Emacs のイベントから `VkKeyScanW` / `MapVirtualKeyW` で作り直す。キーを離したイベント・AltGr・テンキーの区別は失われるが、
+      「押した + 離した」を合成すれば実用上は足りる見込み（推測）
+  - 送り方の切り替えは Windows Terminal と同じにする: アプリが KKP を求めた → libghostty-vt の KKP エンコーダ、
+    そうでなく ConPTY が 9001 を求めている → win32-input-mode（自前）、それ以外 → レガシーの VT（T-069）
+- ⬜ **T-010** IME（日本語入力）をどう扱うか
+  - A のとき: Emacs（tr-ime / w32-ime）が受けた確定文字列を送る。変換中の文字列は Emacs が
+    バッファに描くが、**子 HWND の下に隠れて見えないおそれ**。候補ウィンドウの位置も端末のカーソルに合わせる必要がある
+  - B のとき: 子 HWND で IMM32 / TSF を自分で扱う
+  - claude のプロンプトで日本語を打つのが主な用途
+  - 材料（T-024）: **A の心配は外れる見込み。** W32-IME では変換中の文字列を IME 自身のウィンドウが描く
+    （隠れるのは quail などの Lisp の input method だけ）。位置は tr-ime の
+    `tr-ime-modadv--set-composition-window` で画素指定できる。B は IME の状態が別の HIMC になり重い
+  - 注意: tr-ime の再変換が隠れた端末バッファで `delete-char` を実行する。isearch を抜けると位置の上書きが外れる
+    → 端末のバッファではフックをバッファローカルに差し替える
+  - まず実測するもの: docs/research/emacs-ime.md §7 の P1（変換ウィンドウが子 HWND の上に出るか）、
+    P3（tr-ime の上書き）、P5（確定文字の届き方）、P6（claude が入力位置に本物のカーソルを置くか）
+- ✅ **T-011** 文字幅を ConPTY（conhost）・VT ライブラリ・アプリの 3 者で揃える方法（2026-11-11）→ **再配布版の ConPTY を使えば揃う。**
+  再配布版は既定で書記素クラスタ単位・eaw 1 桁で数え、libghostty-vt（mode 2027）・claude と一致する。
+  OS 同梱の conhost は結合文字・ZWJ の列をまとめないのでずれる（docs/research/conpty.md §2.6）。アプリでの実測は T-025
+  - ConPTY は自分の幅の判断で画面を組み直して送ってくる。ずれると桁が崩れる
+  - ghostel（同じ ConPTY + libghostty-vt）では桁ずれが起きなかった実測がある（ghostel.md）
+  - ghostel は mode 2027（書記素クラスタ）を既定で有効にしている。conhost は 2027 を知らないので、
+    絵文字の ZWJ 列などで桁が食い違うおそれがある（推測）→ T-025 で測る
+- ✅ **T-012** eaw の既定と設定を決める（2026-11-11）→ **幅 1 で固定。** 幅 2 にする設定は持たない（requirements.md §5.5）
+  - **libghostty-vt の幅表は固定で、eaw は幅 1**（T-020 で実測。`①` `★` `※` `─` `○` `…` がすべて 1）。
+    幅 2 を選べるようにするには libghostty-vt に手を入れる必要がある。ConPTY 側も幅 1 で数える前提
+  - 案: 要件を「eaw は幅 1 で固定」に変える（claude・conhost・libghostty-vt の 3 者が揃う）
+  - ConPTY 側には 1.25 から eaw を 2 桁にするフラグ 0x20 がある。ただしそれでも conhost は罫線 `─` を 1 桁のままにするので、
+    libghostty-vt にも同じ例外を入れる必要がある
+- ⬜ **T-013** 1 桁と数えたのにフォントのグリフが全角の文字（`①` `★` `※` など）の描き方
+  - 縮める / はみ出させる / 切る / 半角のグリフを持つフォント（HackGen Console NF など）に逃がす
+  - WezTerm + HackGen Console NF では `①` が半角で出る（`~/.emacs.d/docs/claude/emacs-claude-pty-proxy-study.md`）
+  - 材料: ghostel はセル幅に合わせて幅・ascent・descent の比の小さいほうで縮める。前後が空白で孤立しているときだけ
+    右隣の空白を借りて 2 桁で描く（`Renderer.zig:699-812`）。この規則は自前の描画でもそのまま使える
+- ⬜ **T-014** module → Lisp の通知の形を決める（ポーリングの間隔、イベントの種類、共有の状態の中身）
+  - ghostel は CRT を静的リンクしたまま `open_channel` に書く回避策を持つ（emacs.exe の import 表から
+    `_dup` を持つ CRT を探し、その `_write` / `_close` を使う。`ConPtyProcess.zig:78-219`）。
+    ポーリングの代わりになるか検討する。emacs クレートが生の `emacs_value` を出さない点（ADR 0006）が障害
+- ⬜ **T-015** GenPreview とのコードの共有の仕方（コピー / path 依存 / 共通のクレートに切り出す）
+  - 材料: path 依存は `gp-core` ごと引き込むので避ける。**薄い層（約 1,000 行）をコピーして作り替える**のが勧め。
+    出発点は GenPreview の `spikes/embed-surface/src/lib.rs`（435 行で自己完結）
+- ✅ **T-016** 同じ端末のバッファを 2 つのウィンドウに出したときの扱い（2026-11-11）→ split には対応し、ウィンドウごとに別のスクロール位置で見られること。複数フレームはきれいに見えなくてよい。requirements.md §5.2。実装は T-063
+- ⬜ **T-017** 端末の内容を Emacs のテキストとして扱う方法
+  - 子 HWND の下のバッファは見えないので、`C-s` / `M-w` / occur がそのままでは効かない
+  - 例: 画面とスクロールバックのテキストをバッファに写しておく（GenPreview と同じ）/
+    コピーモードに入ったときだけ写す / 端末の中に検索を持つ
+- ⬜ **T-063** split の実装方式を決める（T-016 の要件を満たす形）
+  - 候補 A: **1 つの HWND の中を複数のペインに分けて描く**（落としどころの候補）。HWND の範囲と
+    ペインの位置を Emacs のウィンドウ構成からどう決めるか（間のモードライン・境界線を覆わないか）
+  - 候補 B: Emacs のウィンドウごとに HWND を 1 枚ずつ作り、同じ端末の状態を共有して描く
+  - **端末の大きさ（桁数・行数）は ConPTY に 1 つしか伝えられない。** 大きさの違う 2 つのウィンドウに
+    出したとき、どちらに合わせるか（選んでいるウィンドウ / 最後に選んだ / 小さいほう）と、合わないほうの描き方
+  - ウィンドウごとのスクロール位置をどこで持つか（module のペイン / Emacs の window-parameter）
+  - キー入力・カーソル・選択範囲は、どのペインのものとして扱うか
+  - 複数フレームのとき: 最初のフレームにだけ出す、などの簡単な扱いでよい
+  - 材料: GenPreview は同じバッファを 2 つのウィンドウに出してもビューアは 1 枚だけ（選んでいるウィンドウ →
+    前に出していたウィンドウ → 最初のウィンドウの順）。複数フレームは `SetParent` で付け替える。
+    候補 A は上下の split でモードラインを、左右の split で境界線を覆うおそれがある（推測）
+
+## 2. 調査・スパイク
+
+- ✅ **T-018** GenPreview の埋め込みの実装と、その後に分かったことを読む（2026-11-11）→ docs/research/genpreview-embedding.md。段階 A〜C まで実装済み。子ウィンドウでフリップモデルを使っても真っ黒にならない（50 回中 50 回正常）。split ではビューアは 1 枚だけで、ウィンドウごとのスクロール位置の前例は無い
+- ✅ **T-019** ghostel の実装を読む（2026-11-11）→ docs/research/ghostel.md。今の ghostel は Zig の API を使う。ConPTY の手順はそのまま移せるが、Job Object が無く孫プロセスが残りうる。描画を Lisp スレッドがロックを持ったまま行う点は真似しない
+- ✅ **T-020** libghostty-vt を Windows でビルドし、Rust から呼ぶ最小のスパイク（2026-11-11）→ 通った。docs/research/libghostty-vt-build.md、spikes/vt-link、spikes/vt-module
+- ✅ **T-021** ConPTY がどのシーケンスを素通しするか調べる（2026-11-11）→ docs/research/conpty.md §2。OS 同梱版と再配布版 1.22 / 1.24 / 1.25 / 1.26 を実測した。
+  再配布版はすべてをその場で素通しし、問い合わせへの端末の応答もアプリに届く（T-007）。
+  1.25 以降は未知のシーケンスとリサイズの後に `CSI 6n` で位置を取り直す → 端末は正しくすぐに答える必要がある（T-070）。
+  実測の道具は docs/research/conpty-probe/
+- ✅ **T-022** キーの送り方を調べる（2026-11-11）→ docs/research/conpty.md §3。ConPTY は win32-input-mode と
+  フォーカスの報告（`?1004h`）を必ず求める。コンソールのアプリに KKP の列を送ると、再配布版ではゴミ文字になる。マウスは ConPTY を通る。
+  アプリごとの入力モード（claude・nyagos・git bash・yazi）は未実測 → T-045〜T-052 で確かめる
+- ✅ **T-023** yazi の画像プレビューが Windows + ConPTY で出る経路を調べる（2026-11-11）→ docs/research/conpty.md §4。
+  **再配布版の ConPTY なら Kitty graphics を通せる。** yazi の画像の問い合わせと `CSI 16t`（セルの画素の大きさ）に答える必要がある。
+  ConPTY にいちばん合う Unicode プレースホルダ方式は、XTVERSION の応答に "ghostty" を含むときだけ yazi が選ぶ（T-071）。
+  ghostel の Windows で画像が出た報告は見つからなかった
+- ✅ **T-024** Emacs 31.1 の w32 の IME の扱いを読む（2026-11-11）→ docs/research/emacs-ime.md。変換中の文字列は IME 自身のウィンドウが描くので、子 HWND の下には隠れない見込み。位置は Emacs がポイントから決め、tr-ime の画素指定で上書きできる。確定した文字列は 1 文字ずつキーイベントで届く。**案 A + tr-ime で成り立つ見込み**。実測は P1〜P9（文書の §7）
+- ⬜ **T-025** claude の文字幅を実測する（Windows Terminal / WezTerm / ghostel で `①` `★` `※` 罫線 スピナー）
+- ✅ **T-026** `emacs` クレートの版と Emacs 31.1 の module API の確認（2026-11-11）→ GenPreview と同じ `emacs` 0.23（feature `emacs-28`）で、Emacs 31.1 に読み込めた（spikes/vt-module）。`open_channel` を使うかどうかは T-014
+
+## 3. 最小構成（一本通す）
+
+- ⬜ **T-027** デバッグ用 exe: トップレベルのウィンドウ + ConPTY + VT + 描画で cmd が動く
+- ⬜ **T-028** module: 同じものを Emacs のフレームの子 HWND として出し、pwsh が動く
+- ⬜ **T-029** `embterm.el`: 起動・位置合わせ（フック 2 つ）・キーの送信・終了
+- ⬜ **T-030** DLL の更新の手順（読み込み済みの DLL は消せない。版ごとにファイル名を変える等）
+  - GenPreview の方式: 更新時刻とサイズを名前に入れて一時ディレクトリにコピーしてから読む。新しい版を使うには Emacs の再起動が要る
+- ⬜ **T-031** module の境界で panic を止める（Emacs を落とさない）
+  - `#[defun]` は emacs クレートが Lisp のエラーに変える。**user-ptr の finalizer（`Drop`）と、自前のスレッドの本体と、
+    wndproc は守られない**ので自分で `catch_unwind` する（GenPreview の調査より）
+
+## 4. 機能
+
+- ⬜ **T-032** リサイズ（ウィンドウの大きさ → 桁数・行数 → ConPTY）と reflow
+- ⬜ **T-033** フォントの設定とフォールバック（日本語、Nerd Font のアイコン）
+- ⬜ **T-034** 色とテーマ（16 色のパレット、前景・背景、Emacs の face に追従する設定）
+- ⬜ **T-035** カーソル（形・点滅・アプリからの指定・フォーカスが無いときの表示）
+- ⬜ **T-036** 選択・コピー（kill-ring にも入れる）・貼り付け（ブラケットペースト）
+- ⬜ **T-037** スクロールバック（行数の設定、ホイール、キーでのスクロール）
+- ⬜ **T-038** マウスの報告（vim / yazi）と、Emacs 側の選択との切り替え
+- ⬜ **T-039** OSC の扱い（タイトル、カレントディレクトリ → `default-directory`、ハイパーリンク、通知、クリップボード）
+- ⬜ **T-040** ベル
+- ⬜ **T-041** 後始末（プロセスの終了、バッファの削除、Emacs の終了。子プロセスまで止める）
+- ⬜ **T-042** 複数の端末（新しく開く、一覧、プロジェクトのディレクトリで開く）
+- ⬜ **T-043** DPI（150% のモニタ、モニタをまたいだ移動）
+- ⬜ **T-044** Emacs 側の操作との組み合わせ（タブ、子フレーム（corfu）との重なり、最小化、フレームの削除）
+
+## 5. 目標のアプリで確かめる
+
+requirements.md §4 の「とくに確かめること」を見ながら。
+
+- ⬜ **T-045** cmd
+- ⬜ **T-046** PowerShell 5.1
+- ⬜ **T-047** pwsh（PSReadLine、starship）
+- ⬜ **T-048** nyagos
+- ⬜ **T-049** wsl bash
+- ⬜ **T-050** git bash
+- ⬜ **T-051** claude（桁ずれ、日本語入力、長い出力、通知）
+- ⬜ **T-052** yazi（画像のプレビュー、マウス）
+- ⬜ **T-053** vim（代替画面、カーソルの形、`Esc`、色）
+- ⬜ **T-054** 性能を測る（大量の出力、入力の遅れ、端末を何個も開いたとき）
+- ⬜ **T-055** 端末としての適合を測る（vttest など）
+
+## 6. ghostel からの移行
+
+- ⬜ **T-056** ghostel で使っている機能とキー割り当てを洗い出す（`C-c s s` / `n` / `p` / `b`、`my-ghostel.el`）
+- ⬜ **T-057** `~/.emacs.d` に `my-embterm.el` を作り、ghostel と並べて使ってみる
+- ⬜ **T-058** ghostel をやめる判断と撤去（`my-ghostel.el`、`~/.emacs.d/ghostel/`、ドキュメント）
+- ⬜ **T-059** `my-pty`（ptyd + eat）も一緒にやめられるか判断する
+
+## 7. ドキュメント（ある程度進んでから）
+
+- ⬜ **T-060** 設計が固まり始めたら `docs/architecture.md` と `docs/adr/` を作る（GenPreview と同じ形）
+- ⬜ **T-061** CLAUDE.md を作る
+- ⬜ **T-062** README.md を作る
+
+## 8. 発生した課題（随時追加）
+
+- ✅ **T-064** libghostty-vt の取得とビルドを `cargo xtask` にする（2026-11-11）→ `cargo xtask fetch-ghostty-vt [--force]`。
+  `vendor/ghostty-vt` に置く。`-Dtarget=x86_64-windows-msvc` を明示しても結果は同じ。リンカの警告は出ない
+- ⬜ **T-065** libghostty-vt の Rust の宣言を bindgen で作るか、使う範囲だけ手で書くか（bindgen には libclang が要るが、入っていない）
+- ⬜ **T-066** 端末の状態を HWND より長生きさせる（フレームを消すと子 HWND とそのスレッドも消える。
+  GenPreview は文書を読み直して作り直すが、端末は作り直せない）
+- ⬜ **T-067** GPU のデバイスを端末どうしで共有し、デバイスを失ったときは全員で作り直す（GenPreview はビューアごとに作っている）
+- ⬜ **T-068** 描き直しの負荷を測る（GenPreview のスパイクは「1 回塗る」だけ。垂直同期を待つ `Present(1)` で UI スレッドが止まる量は未測定）
+- ⬜ **T-069** win32-input-mode のエンコーダを自前で作る（libghostty-vt には無い。`CSI Vk;Sc;Uc;Kd;Cs;Rc _`）。
+  KKP / win32-input-mode / レガシーの切り替え。KKP のフラグが残ったままコンソールのアプリに戻ったときにゴミ文字を入れない安全策。
+  IME の確定文字列は `Vk = 0` + `Uc` の形でよいか、サロゲートペア、長い貼り付けの速さ（docs/research/conpty.md §3.5）
+- ⬜ **T-070** ConPTY が端末に求める応答をそろえる: `CSI 6n`（カーソル位置）にすぐ正しく答える、フォーカスの出入りで
+  `CSI I` / `CSI O` を必ず送る、`CSI 16t`（セルの画素の大きさ）に答える
+- ⬜ **T-071** DA1 と XTVERSION で何を名乗るか決める。DA1 には libghostty-vt が本当に対応するものだけを出す
+  （28 を出すと conhost が DECCRA / DECFRA を使い、4 を出すと yazi が Sixel を選ぶ）。
+  XTVERSION に "ghostty" を含めると yazi が Kitty graphics の Unicode プレースホルダ方式を選ぶ（含めないと直接配置方式になる）
+- ⬜ **T-072** 再配布版 ConPTY の取得を `cargo xtask` にする（NuGet 1.25.260930003、署名の確認）。
+  `OpenConsole.exe` が `conpty.dll` の隣か `x64\` に無いと黙って OS 同梱版になるので、起動時に `CSI c` が届くかで見分けてログに出す
