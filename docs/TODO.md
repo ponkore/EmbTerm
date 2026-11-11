@@ -73,8 +73,8 @@
   - Direct2D / DirectWrite（GenPreview と共通）か、Direct3D + グリフのアトラスか
   - GenPreview で子ウィンドウが真っ黒になった件（DXGI のフリップモデル）の結果を確かめてから
   - 1 秒に何十回も描き直す前提での負荷
-- 🔄 **T-009** キー入力の経路を決める（2026-11-11: **最小構成を A で作り、実測してから決める**。
-  測るもの: IME の P1〜P6（T-010）、PSReadLine の Ctrl+Space・Shift+Enter、claude の Shift+Enter・`Esc`）
+- ✅ **T-009** キー入力の経路を決める（2026-11-11）→ **案 A（フォーカスは Emacs に残し、キーマップで受けて送る）に確定。**
+  ユーザーが手元の Emacs で確認: IME に違和感なし、claude で日本語入力と `Shift+Enter` が動く。`Ctrl+Space` は未確認（修飾キーの区別は T-069）
   - A: フォーカスを Emacs に残し、Emacs のキーマップで受けて module に送る（GenPreview・ghostel の形）
   - B: 子 HWND がフォーカスを取り、`WM_KEYDOWN` / `WM_CHAR` を自分で処理する。Emacs に戻すキーをどうするか
   - Emacs に残すキー（`C-x`、`M-x`、ウィンドウ移動）と端末に送るキーの分け方。
@@ -91,7 +91,8 @@
       「押した + 離した」を合成すれば実用上は足りる見込み（推測）
   - 送り方の切り替えは Windows Terminal と同じにする: アプリが KKP を求めた → libghostty-vt の KKP エンコーダ、
     そうでなく ConPTY が 9001 を求めている → win32-input-mode（自前）、それ以外 → レガシーの VT（T-069）
-- 🔄 **T-010** IME（日本語入力）をどう扱うか
+- ✅ **T-010** IME（日本語入力）をどう扱うか（2026-11-11）→ **案 A + tr-ime の位置の上書きで成り立った。** ユーザーが手元の Emacs で確認: 変換ウィンドウに違和感なし、文字の確定と claude のプロンプトでの日本語入力も OK。
+  残る注意点（tr-ime の再変換が隠れたバッファに効く件）は T-083
   - A のとき: Emacs（tr-ime / w32-ime）が受けた確定文字列を送る。変換中の文字列は Emacs が
     バッファに描くが、**子 HWND の下に隠れて見えないおそれ**。候補ウィンドウの位置も端末のカーソルに合わせる必要がある
   - B のとき: 子 HWND で IMM32 / TSF を自分で扱う
@@ -176,7 +177,7 @@
   ConPTY にいちばん合う Unicode プレースホルダ方式は、XTVERSION の応答に "ghostty" を含むときだけ yazi が選ぶ（T-071）。
   ghostel の Windows で画像が出た報告は見つからなかった
 - ✅ **T-024** Emacs 31.1 の w32 の IME の扱いを読む（2026-11-11）→ docs/research/emacs-ime.md。変換中の文字列は IME 自身のウィンドウが描くので、子 HWND の下には隠れない見込み。位置は Emacs がポイントから決め、tr-ime の画素指定で上書きできる。確定した文字列は 1 文字ずつキーイベントで届く。**案 A + tr-ime で成り立つ見込み**。実測は P1〜P9（文書の §7）
-- ⬜ **T-025** claude の文字幅を実測する（Windows Terminal / WezTerm / ghostel で `①` `★` `※` 罫線 スピナー）
+- ✅ **T-025** claude の文字幅を確かめる（2026-11-11）→ EmbTerm の中の claude で、`①②③` を入れた罫線の表が崩れないことをユーザーが確認した。Windows Terminal などとの見比べと、ZWJ の絵文字は確かめていない
 - ✅ **T-026** `emacs` クレートの版と Emacs 31.1 の module API の確認（2026-11-11）→ GenPreview と同じ `emacs` 0.23（feature `emacs-28`）で、Emacs 31.1 に読み込めた（spikes/vt-module）。`open_channel` を使うかどうかは T-014
 
 ## 3. 最小構成（一本通す）
@@ -279,3 +280,4 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ⬜ **T-081** Emacs での自動確認を `cargo xtask` から呼ぶ（`cargo xtask dist` → `emacs -Q -l test/smoke.el` → ログの確認。T-078 と合わせる）。
   子 HWND のホイール・ドラッグでの選択・Emacs 側に来たホイールの転送も `PostMessage` で送って確かめる
 - ⬜ **T-082** 子プロセスは最初にウィンドウに出したときに起動する（大きさが決まってから起こすため）。表示しないまま起動する用途（バックグラウンドでコマンドを走らせる）が要るかを決める
+- ⬜ **T-083** tr-ime の再変換（RECONVERSION）が、隠れた端末のバッファの `delete-char` を実行する件。端末のバッファでは止める（docs/research/emacs-ime.md §3.5）
