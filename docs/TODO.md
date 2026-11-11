@@ -45,7 +45,11 @@
   - ghostel が C API で OSC を拾えず自前で走査していたのは 1.0 より前の C API の話（docs/research/ghostel.md §2）
   - ライセンス: 本体は MIT。同梱される highway・simdutf・wuffs・uucode も MIT / Apache-2.0 / BSD 系。配布物に表記を入れる
   - **eaw の幅を切り替える設定は無い**（幅 1 で固定）→ T-012
-- ⬜ **T-006** スレッドの構成を決める
+- 🔄 **T-006** スレッドの構成を決める（2026-11-11: **初版の構成で T-027 を作り、T-068 で測って確定する**）
+  - 初版: 端末ごとに **PTY の読みのスレッド**（読む → 端末をロックして `vt_write` → 描き直しを UI スレッドに知らせる。
+    知らせは AtomicBool でまとめて `PostMessage` 1 回）、**書きのスレッド**（チャネルで受けて PTY に書く。
+    端末の応答（`WRITE_PTY` のコールバック）もここへ積む。ロックを持ったまま PTY に書かない）、
+    **UI スレッド**（HWND を持つ。ロック → `render_state_update` → ロックを外す → 描く）
   - 端末 1 つにつき: UI（子 HWND のメッセージ）・PTY の読み・VT の解釈・描画をどう分けるか
   - 子 HWND のスレッドは詰まらせない（入力キューが Emacs と連結する）
   - Lisp → module は `PostMessage` のみ、module → Lisp はポーリング（GenPreview ADR 0006）
@@ -64,7 +68,8 @@
   - 材料: ghostel の手順（overlapped の名前付きパイプ、子のハンドルで終了を知る、`ClosePseudoConsole` は
     別スレッドで呼んで EOF まで読む、Windows では `RESIZE_PULL_SCROLLBACK` を false）はそのまま移せる。
     足りないもの: **Job Object**（孫プロセスを残さない）と、時限付きの終了待ち
-- ⬜ **T-008** 描画の方式を決める
+- 🔄 **T-008** 描画の方式を決める（2026-11-11: **初版は Direct2D / DirectWrite + DXGI のフリップモデル**（GenPreview と同じ）。
+  負荷を T-068 で測り、足りなければグリフのアトラスに移る）
   - Direct2D / DirectWrite（GenPreview と共通）か、Direct3D + グリフのアトラスか
   - GenPreview で子ウィンドウが真っ黒になった件（DXGI のフリップモデル）の結果を確かめてから
   - 1 秒に何十回も描き直す前提での負荷
@@ -116,11 +121,13 @@
   - WezTerm + HackGen Console NF では `①` が半角で出る（`~/.emacs.d/docs/claude/emacs-claude-pty-proxy-study.md`）
   - 材料: ghostel はセル幅に合わせて幅・ascent・descent の比の小さいほうで縮める。前後が空白で孤立しているときだけ
     右隣の空白を借りて 2 桁で描く（`Renderer.zig:699-812`）。この規則は自前の描画でもそのまま使える
+  - T-027 で ghostel の規則をそのまま入れた。**`①②③` が 1 セルに縮んで小さく、読みにくい**（HackGen Console NF、セル 8x18 px）。
+    縦は縮めずに横だけ詰める、半角の `①` を持つフォントを優先して探す、などを試す
 - ⬜ **T-014** module → Lisp の通知の形を決める（ポーリングの間隔、イベントの種類、共有の状態の中身）
   - ghostel は CRT を静的リンクしたまま `open_channel` に書く回避策を持つ（emacs.exe の import 表から
     `_dup` を持つ CRT を探し、その `_write` / `_close` を使う。`ConPtyProcess.zig:78-219`）。
     ポーリングの代わりになるか検討する。emacs クレートが生の `emacs_value` を出さない点（ADR 0006）が障害
-- ⬜ **T-015** GenPreview とのコードの共有の仕方（コピー / path 依存 / 共通のクレートに切り出す）
+- ✅ **T-015** GenPreview とのコードの共有の仕方（2026-11-11）→ **必要な薄い層をコピーして作り替える。** path 依存はしない
   - 材料: path 依存は `gp-core` ごと引き込むので避ける。**薄い層（約 1,000 行）をコピーして作り替える**のが勧め。
     出発点は GenPreview の `spikes/embed-surface/src/lib.rs`（435 行で自己完結）
 - ✅ **T-016** 同じ端末のバッファを 2 つのウィンドウに出したときの扱い（2026-11-11）→ split には対応し、ウィンドウごとに別のスクロール位置で見られること。複数フレームはきれいに見えなくてよい。requirements.md §5.2。実装は T-063
@@ -163,7 +170,10 @@
 
 ## 3. 最小構成（一本通す）
 
-- ⬜ **T-027** デバッグ用 exe: トップレベルのウィンドウ + ConPTY + VT + 描画で cmd が動く
+- ✅ **T-027** デバッグ用 exe: トップレベルのウィンドウ + ConPTY + VT + 描画で cmd が動く（2026-11-11）→ **cmd・pwsh・vim が動いた。**
+  クレート `et-vt`（手書きの FFI、型の配置を `ghostty_type_json()` と照合するテスト）・`et-pty`（再配布版優先、Job Object）・
+  `et-render`（D2D / DirectWrite、T-013 の縮め方）と `apps/embterm`。自動確認の引数（`--input` `--screenshot` `--exit-after` など）付き。
+  docs/notes/t027-debug-exe.md
 - ⬜ **T-028** module: 同じものを Emacs のフレームの子 HWND として出し、pwsh が動く
 - ⬜ **T-029** `embterm.el`: 起動・位置合わせ（フック 2 つ）・キーの送信・終了
 - ⬜ **T-030** DLL の更新の手順（読み込み済みの DLL は消せない。版ごとにファイル名を変える等）
@@ -221,7 +231,8 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 
 - ✅ **T-064** libghostty-vt の取得とビルドを `cargo xtask` にする（2026-11-11）→ `cargo xtask fetch-ghostty-vt [--force]`。
   `vendor/ghostty-vt` に置く。`-Dtarget=x86_64-windows-msvc` を明示しても結果は同じ。リンカの警告は出ない
-- ⬜ **T-065** libghostty-vt の Rust の宣言を bindgen で作るか、使う範囲だけ手で書くか（bindgen には libclang が要るが、入っていない）
+- ✅ **T-065** libghostty-vt の Rust の宣言を bindgen で作るか、使う範囲だけ手で書くか（2026-11-11）→ **使う範囲だけ手で書く。**
+  構造体の大きさとフィールドの位置は、libghostty-vt が返す `ghostty_type_json()` とテストで照合する（libclang は入れない）
 - ⬜ **T-066** 端末の状態を HWND より長生きさせる（フレームを消すと子 HWND とそのスレッドも消える。
   GenPreview は文書を読み直して作り直すが、端末は作り直せない）
 - ⬜ **T-067** GPU のデバイスを端末どうしで共有し、デバイスを失ったときは全員で作り直す（GenPreview はビューアごとに作っている）
@@ -234,5 +245,15 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ⬜ **T-071** DA1 と XTVERSION で何を名乗るか決める。DA1 には libghostty-vt が本当に対応するものだけを出す
   （28 を出すと conhost が DECCRA / DECFRA を使い、4 を出すと yazi が Sixel を選ぶ）。
   XTVERSION に "ghostty" を含めると yazi が Kitty graphics の Unicode プレースホルダ方式を選ぶ（含めないと直接配置方式になる）
-- ⬜ **T-072** 再配布版 ConPTY の取得を `cargo xtask` にする（NuGet 1.25.260930003、署名の確認）。
-  `OpenConsole.exe` が `conpty.dll` の隣か `x64\` に無いと黙って OS 同梱版になるので、起動時に `CSI c` が届くかで見分けてログに出す
+- ✅ **T-072** 再配布版 ConPTY の取得を `cargo xtask` にする（2026-11-11）→ `cargo xtask fetch-conpty`。NuGet 1.25.260930003 を
+  SHA256 と Authenticode の署名（Microsoft）で確かめ、`vendor/conpty/conpty.dll` + `x64/OpenConsole.exe` に置く。
+  embterm.exe は起動直後に `CSI c` が届くかで再配布版か OS 同梱版かを見分けてログに出す
+- ⬜ **T-073** Job から抜けるプロセス: 外側の Job が breakaway を許すとき、pwsh の `Start-Process` で起こした孫が Job から抜けた。
+  原因と、抜けさせない方法を決める（T-041 の一部）
+- ⬜ **T-074** 同期出力（DEC 2026）: `GHOSTTY_TERMINAL_OPT_RENDER_HOLD` を登録し、hold の間は render state を写し直さない（時限 1 秒）
+- ⬜ **T-075** `apps/embterm/src/session.rs`（端末 + PTY + 読み書きのスレッド + 知らせ）を、Emacs module と共有するクレート（`et-session`）に移す。T-028 の前にやる
+- ⬜ **T-076** 閉じる処理を UI スレッドから外す（`Pty::close` は最大数秒待つ。module では Emacs を止めてしまう）。
+  あわせて、閉じたときに vim の `.swp` が残る（実質の強制終了）ので、子に先に終了を促す手順を考える
+- ⬜ **T-077** 変わった行だけ描き直すか（今は毎回全体を描き、`Present(1)` で垂直同期を待つ）→ T-068 の測定で決める
+- ⬜ **T-078** 自動確認の道具をリポジトリに入れる（キーを送るスクリプト、画面の `.txt` を期待値と比べる回帰テストを `cargo xtask` から）
+- ⬜ **T-079** 150% の DPI で embterm.exe を確かめる

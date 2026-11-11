@@ -4,6 +4,11 @@
 //! cargo xtask fetch-ghostty-vt [--force]
 //!     libghostty-vt のソースと依存を取得し、Zig で静的ライブラリをビルドして vendor/ghostty-vt に置く。
 //!     要るもの: zig 0.17.x、curl、tar、certutil（後ろ 3 つは Windows に入っている）
+//!
+//! cargo xtask fetch-conpty [--force]
+//!     再配布版の ConPTY（NuGet の Microsoft.Windows.Console.ConPTY）を nuget.org から取り、
+//!     SHA256 と Authenticode の署名を確かめて、x64 の conpty.dll と OpenConsole.exe を vendor/conpty に置く。
+//!     要るもの: curl、tar、certutil、PowerShell（どれも Windows に入っている）
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -14,6 +19,10 @@ use std::process::{Command, ExitCode};
 const GHOSTTY_VT_VERSION: &str = "1.0.0";
 const GHOSTTY_VT_SHA256: &str = "4a6ef758be721923e1969e7b81b443dcc92d8dd3fb5a39600c03a8817a753676";
 const GHOSTTY_VT_DEPS_SHA256: &str = "4d5ea5e448e4c7ea8fb55ccbaa8668f2a97d44f438cee831e2b7ecd162d85c29";
+/// 再配布版 ConPTY の版（docs/research/conpty.md §1.2）。上げるときは下の SHA256 も書き換える
+/// （nuget.org の .nupkg を落として `certutil -hashfile <file> SHA256` で求めた値。2026-11-11 に取ったもの）
+const CONPTY_VERSION: &str = "1.25.260930003";
+const CONPTY_NUPKG_SHA256: &str = "02b07b349af66d801159bdf9e440d4a1ce78bb951f37fc8609731665afdae7ee";
 /// Zig の版は libghostty-vt の build.zig.zon の minimum_zig_version と minor まで一致させる
 const ZIG_MINOR: &str = "0.17.";
 
@@ -23,8 +32,9 @@ fn main() -> ExitCode {
     let force = args.any(|a| a == "--force");
     let result = match task.as_str() {
         "fetch-ghostty-vt" => fetch_ghostty_vt(force),
+        "fetch-conpty" => fetch_conpty(force),
         _ => {
-            eprintln!("使い方: cargo xtask <fetch-ghostty-vt [--force]>");
+            eprintln!("使い方: cargo xtask <fetch-ghostty-vt | fetch-conpty> [--force]");
             return ExitCode::from(2);
         }
     };
@@ -118,5 +128,84 @@ fn fetch_ghostty_vt(force: bool) -> Result<(), String> {
         .current_dir(&src))?;
 
     eprintln!("できた: {}", prefix.join("lib/ghostty-vt-static.lib").display());
+    Ok(())
+}
+
+/// Windows に付いている tar（bsdtar）。zip 形式の .nupkg も展開できる。
+/// Git for Windows の tar（GNU tar）が PATH の先にあっても取り違えないよう、フルパスで呼ぶ
+fn system_tar() -> PathBuf {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    Path::new(&root).join("System32").join("tar.exe")
+}
+
+/// PowerShell の Get-AuthenticodeSignature で、署名が有効で署名者が Microsoft であることを確かめる
+fn verify_authenticode(file: &Path) -> Result<(), String> {
+    let script = format!(
+        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; Write-Output $s.Status; Write-Output $s.SignerCertificate.Subject",
+        file.display().to_string().replace('\'', "''")
+    );
+    let out = output(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]))?;
+    let mut lines = out.lines();
+    let status = lines.next().unwrap_or_default().trim().to_string();
+    let subject = lines.next().unwrap_or_default().trim().to_string();
+    if status == "Valid" && subject.contains("O=Microsoft Corporation") {
+        eprintln!("署名 OK: {} ({subject})", file.display());
+        Ok(())
+    } else {
+        Err(format!("{} の署名を確かめられません（Status = {status}, Subject = {subject}）", file.display()))
+    }
+}
+
+/// T-072: 再配布版の ConPTY を取る。
+///
+/// .nupkg の中身は `runtimes/win-x64/native/conpty.dll` と `build/native/runtimes/x64/OpenConsole.exe`。
+/// conpty.dll は自分の隣か `x64\` の下の OpenConsole.exe を使い、どちらにも無いと黙って OS 同梱の conhost を
+/// 使う（docs/research/conpty.md §1.3）ので、`vendor/conpty/conpty.dll` と `vendor/conpty/x64/OpenConsole.exe` に並べ直す
+fn fetch_conpty(force: bool) -> Result<(), String> {
+    let vendor = root().join("vendor");
+    let dest = vendor.join("conpty");
+    let dll = dest.join("conpty.dll");
+    let exe = dest.join("x64").join("OpenConsole.exe");
+    if dll.exists() && exe.exists() && !force {
+        eprintln!("{} は用意済み（作り直すなら --force）", dest.display());
+        return Ok(());
+    }
+
+    let v = CONPTY_VERSION;
+    let dl = vendor.join("dl");
+    std::fs::create_dir_all(&dl).map_err(|e| e.to_string())?;
+    let nupkg = dl.join(format!("microsoft.windows.console.conpty.{v}.nupkg"));
+    download(
+        &format!(
+            "https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/{v}/microsoft.windows.console.conpty.{v}.nupkg"
+        ),
+        &nupkg,
+        CONPTY_NUPKG_SHA256,
+    )?;
+
+    // 展開は毎回新しい空のディレクトリに行う
+    let extract = dl.join(format!("conpty-{v}"));
+    if extract.exists() {
+        std::fs::remove_dir_all(&extract).map_err(|e| format!("{}: {e}", extract.display()))?;
+    }
+    std::fs::create_dir_all(&extract).map_err(|e| e.to_string())?;
+    run(Command::new(system_tar()).arg("-xf").arg(&nupkg).arg("-C").arg(&extract))?;
+
+    let src_dll = extract.join("runtimes/win-x64/native/conpty.dll");
+    let src_exe = extract.join("build/native/runtimes/x64/OpenConsole.exe");
+    for f in [&src_dll, &src_exe] {
+        if !f.exists() {
+            return Err(format!("パッケージに {} がありません（中の配置が変わった？）", f.display()));
+        }
+        verify_authenticode(f)?;
+    }
+
+    std::fs::create_dir_all(dest.join("x64")).map_err(|e| e.to_string())?;
+    std::fs::copy(&src_dll, &dll).map_err(|e| format!("{} へのコピー: {e}", dll.display()))?;
+    std::fs::copy(&src_exe, &exe).map_err(|e| format!("{} へのコピー: {e}", exe.display()))?;
+    std::fs::write(dest.join("VERSION.txt"), format!("Microsoft.Windows.Console.ConPTY {v}\n"))
+        .map_err(|e| e.to_string())?;
+    std::fs::remove_dir_all(&extract).ok();
+    eprintln!("できた: {} と {}", dll.display(), exe.display());
     Ok(())
 }

@@ -1,0 +1,11 @@
+[package]
+name = "et-vt"
+description = "libghostty-vt の FFI（使う範囲だけ手書き）と安全なラッパ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+links = "ghostty-vt"
+
+[dependencies]
