@@ -241,7 +241,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 ## 6. ghostel からの移行
 
 - ✅ **T-056** ghostel で使っている機能とキー割り当てを洗い出す（`C-c s s` / `n` / `p` / `b`、`my-ghostel.el`）（2026-11-11）→ 4 つのコマンド・pwsh の起動・module の置き場はすべて EmbTerm にある。足りなかった `setenv` の受け渡し（T-109）と `embterm-run`（T-110）を足した。docs/notes/t056-ghostel-migration.md
-- 🔄 **T-057** `~/.emacs.d` に `my-embterm.el` を作り、ghostel と並べて使ってみる（2026-11-11: `my-embterm.el` と関連の変更をパッチにした（`~/.emacs.d` への書き込みは権限の判定で止まった）。`emacs -Q` で動作を確認済み。利用者がパッチを当てて使う段階）
+- 🔄 **T-057** `~/.emacs.d` に `my-embterm.el` を作り、ghostel と並べて使ってみる（2026-11-11: `my-embterm.el` と関連の変更をパッチにした（`~/.emacs.d` への書き込みは権限の判定で止まった）。`emacs -Q` で動作を確認済み。利用者がパッチを当て、~/.emacs.d の e2abb3e としてコミット・プッシュした。普段の Emacs で ghostel（C-c S）と並べて使う段階）
 - ⬜ **T-058** ghostel をやめる判断と撤去（`my-ghostel.el`、`~/.emacs.d/ghostel/`、ドキュメント）
 - ⬜ **T-059** `my-pty`（ptyd + eat）も一緒にやめられるか判断する
 
