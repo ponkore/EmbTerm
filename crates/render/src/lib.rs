@@ -9,9 +9,11 @@
 //! - 文字は 1 セルずつ決まった位置に置く（フォントの送り幅には頼らない）。主フォントが持つ文字は
 //!   同じ色・同じフェイスが続く範囲を 1 回の `DrawGlyphRun` にまとめる。持たない文字は DirectWrite の
 //!   レイアウトに任せる（システムのフォールバック、色付きの絵文字）
-//! - **幅 2 のセルは 2 セル分**の枠に、**幅 1 と数えたのにグリフが広い文字（`①` `★` `※`）は 1 セルの枠に
-//!   収まるよう縮める**（T-013。幅・上・下の比の最小）。前後が空白で孤立しているときは右隣の空白を借りて
-//!   2 セル分の枠にする（ghostel と同じ規則）
+//! - **幅 2 のセルは 2 セル分**の枠に描く。**幅 1 と数えたのにグリフが広い文字（`①` `★` `※`）**は
+//!   [`NarrowWide`] で選ぶ（T-013）
+//!   - `Overlap`（既定）: 縮めずにセルの左端から描き、右隣へはみ出させる（WezTerm と同じ見え方）
+//!   - `Shrink`: 1 セルの枠に収まるよう縮める（幅・上・下の比の最小）。前後が空白で孤立しているときは
+//!     右隣の空白を借りて 2 セル分の枠にする（ghostel と同じ規則）
 //! - 描くのは呼ばれたときだけ。呼ぶ側は render state が dirty のときだけ呼ぶ
 //!
 //! unsafe（COM の呼び出し）はこのクレートの中に閉じ込める。
@@ -53,8 +55,32 @@ pub struct Theme {
     pub cursor_text: Option<Rgb>,
     /// 端末の周りの余白（px、DPI 96 のとき。DPI に合わせて拡大する）
     pub padding: u32,
-    /// 孤立した広いグリフに右隣の空白を貸すか（T-013 の ghostel の規則）
+    /// 幅 1 と数えたのにグリフが広い文字（`①` `★` `※`）の描き方（T-013）
+    pub narrow_wide: NarrowWide,
+    /// 孤立した広いグリフに右隣の空白を貸すか（T-013 の ghostel の規則。`NarrowWide::Shrink` のときだけ効く）
     pub borrow_right: bool,
+}
+
+/// 幅 1 と数えたのにグリフが広い文字（East Asian Ambiguous の `①` `★` `※` など）の描き方（T-013）
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NarrowWide {
+    /// 1 セルの枠に収まるよう縮める（ghostel と同じ）
+    Shrink,
+    /// 縮めずに元の大きさのまま、セルの左端から描いて右隣へはみ出させる（WezTerm と同じ見え方）。
+    /// 桁送りは 1 セルのままなので、続けて並ぶと後の文字が前の文字の右半分に重なる
+    #[default]
+    Overlap,
+}
+
+impl std::str::FromStr for NarrowWide {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "shrink" => Ok(Self::Shrink),
+            "overlap" => Ok(Self::Overlap),
+            _ => Err(format!("shrink か overlap を指定する（{s}）")),
+        }
+    }
 }
 
 impl Default for Theme {
@@ -65,6 +91,7 @@ impl Default for Theme {
             cursor: Rgb { r: 0xff, g: 0xcc, b: 0x00 },
             cursor_text: None,
             padding: 4,
+            narrow_wide: NarrowWide::default(),
             borrow_right: true,
         }
     }
@@ -321,8 +348,12 @@ impl Renderer {
                         }
                     }
                 };
+                // 幅 1 のセルに広いグリフ。Overlap なら縮めず、セルの左端から右隣へはみ出させる
+                // （背景は手順 2 で先に塗ってあるので、はみ出した部分は隣のセルの上に重なる）
+                let overlap = span == 1 && advance > cw + 0.5 && self.theme.narrow_wide == NarrowWide::Overlap;
                 // 孤立した広いグリフは右隣の空白を借りて 2 セル分の枠にする
                 if span == 1
+                    && !overlap
                     && self.theme.borrow_right
                     && advance > cw + 0.5
                     && x + 1 < cols
@@ -335,12 +366,12 @@ impl Renderer {
                 let slot = span as f32 * cw;
                 // 主フォントのグリフで幅が枠に収まるなら縮めない。罫線（┌─┐）や Powerline の記号は
                 // 上下いっぱいに描かれていて、縮めると隣とつながらなくなる（上下のはみ出しは許す）
-                let scale = if glyph.is_some() && advance <= slot + 0.5 {
+                let scale = if overlap || (glyph.is_some() && advance <= slot + 0.5) {
                     1.0
                 } else {
                     fit_scale(advance, ink_a, ink_d, slot, asc, desc)
                 };
-                let gx = left + (slot - advance * scale) / 2.0;
+                let gx = if overlap { left } else { left + (slot - advance * scale) / 2.0 };
 
                 match glyph {
                     Some(g) => {

@@ -156,6 +156,9 @@ pub fn run(args: Args) -> Result<(), String> {
     }
     let (w, h) = client_size(hwnd);
     let mut renderer = Renderer::new(hwnd, w, h, dpi, spec).map_err(|e| format!("描画の準備ができません: {e}"))?;
+    if let Some(n) = args.narrow_wide {
+        renderer.theme.narrow_wide = n;
+    }
     let cell = renderer.cell_size();
     log(&format!(
         "フォント {} / セル {}x{} px / DPI {dpi}{}",

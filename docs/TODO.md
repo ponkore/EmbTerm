@@ -116,7 +116,10 @@
   - 案: 要件を「eaw は幅 1 で固定」に変える（claude・conhost・libghostty-vt の 3 者が揃う）
   - ConPTY 側には 1.25 から eaw を 2 桁にするフラグ 0x20 がある。ただしそれでも conhost は罫線 `─` を 1 桁のままにするので、
     libghostty-vt にも同じ例外を入れる必要がある
-- ⬜ **T-013** 1 桁と数えたのにフォントのグリフが全角の文字（`①` `★` `※` など）の描き方
+- ✅ **T-013** 1 桁と数えたのにフォントのグリフが全角の文字（`①` `★` `※` など）の描き方（2026-11-11）→ **2 つの方式を持ち、切り替えられるようにした。**
+  既定は **overlap**（縮めずにセルの左端から描き、右隣へはみ出させる。WezTerm と同じ見え方。ユーザーの希望）。
+  **shrink** は 1 セルに縮める（ghostel の規則）。`et_render::NarrowWide`、embterm.exe では `--narrow-wide shrink|overlap`。
+  elisp からの切り替えは T-028 / T-029 で module の設定として出す
   - 縮める / はみ出させる / 切る / 半角のグリフを持つフォント（HackGen Console NF など）に逃がす
   - WezTerm + HackGen Console NF では `①` が半角で出る（`~/.emacs.d/docs/claude/emacs-claude-pty-proxy-study.md`）
   - 材料: ghostel はセル幅に合わせて幅・ascent・descent の比の小さいほうで縮める。前後が空白で孤立しているときだけ
