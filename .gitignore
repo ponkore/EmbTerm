@@ -10,3 +10,7 @@ zig-out/
 
 # Claude Code のローカル設定
 /.claude/settings.local.json
+
+# vim の swap（試験で vim を動かしたときに残ることがある）
+*.swp
+*.swo
