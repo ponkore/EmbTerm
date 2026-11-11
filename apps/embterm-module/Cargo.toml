@@ -1,0 +1,29 @@
+[package]
+name = "embterm-module"
+description = "EmbTerm の Emacs dynamic module（embterm_module.dll。T-028）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "embterm_module"
+crate-type = ["cdylib"]
+
+[dependencies]
+emacs.workspace = true
+et-vt = { path = "../../crates/vt" }
+et-render = { path = "../../crates/render" }
+et-session = { path = "../../crates/session" }
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]

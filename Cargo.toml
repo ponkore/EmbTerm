@@ -3,8 +3,10 @@ resolver = "3"
 # クレートを作ったら足す（中身の無いディレクトリを glob で指すと Cargo がエラーにする）
 members = [
     "apps/embterm",
+    "apps/embterm-module",
     "crates/pty",
     "crates/render",
+    "crates/session",
     "crates/vt",
     "spikes/vt-link",
     "spikes/vt-module",

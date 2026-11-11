@@ -103,6 +103,8 @@
     → 端末のバッファではフックをバッファローカルに差し替える
   - まず実測するもの: docs/research/emacs-ime.md §7 の P1（変換ウィンドウが子 HWND の上に出るか）、
     P3（tr-ime の上書き）、P5（確定文字の届き方）、P6（claude が入力位置に本物のカーソルを置くか）
+  - 実装の材料（T-028）: 確定した文字は `self-insert-command` の remap で 1 文字ずつ届く見込み。カーソルの矩形は `embterm-module-cursor` で取れる。
+    これを tr-ime の `tr-ime-modadv--set-composition-window` に渡せば変換ウィンドウを端末のカーソルに合わせられる（未実装）
 - ✅ **T-011** 文字幅を ConPTY（conhost）・VT ライブラリ・アプリの 3 者で揃える方法（2026-11-11）→ **再配布版の ConPTY を使えば揃う。**
   再配布版は既定で書記素クラスタ単位・eaw 1 桁で数え、libghostty-vt（mode 2027）・claude と一致する。
   OS 同梱の conhost は結合文字・ZWJ の列をまとめないのでずれる（docs/research/conpty.md §2.6）。アプリでの実測は T-025
@@ -119,14 +121,17 @@
 - ✅ **T-013** 1 桁と数えたのにフォントのグリフが全角の文字（`①` `★` `※` など）の描き方（2026-11-11）→ **2 つの方式を持ち、切り替えられるようにした。**
   既定は **overlap**（縮めずにセルの左端から描き、右隣へはみ出させる。WezTerm と同じ見え方。ユーザーの希望）。
   **shrink** は 1 セルに縮める（ghostel の規則）。`et_render::NarrowWide`、embterm.exe では `--narrow-wide shrink|overlap`。
-  elisp からの切り替えは T-028 / T-029 で module の設定として出す
+  elisp からの切り替えは T-028 / T-029 で module の設定として出す（→ `embterm-narrow-wide`）
+  - 既知の見え方（不具合ではない）: overlap では広いグリフが右隣のセルまで描かれるので、`★─` のように同じ色の文字が続くと
+    `─` が `★` の腕に重なって見分けられない（WezTerm も同じ）。気になるときは shrink にする
   - 縮める / はみ出させる / 切る / 半角のグリフを持つフォント（HackGen Console NF など）に逃がす
   - WezTerm + HackGen Console NF では `①` が半角で出る（`~/.emacs.d/docs/claude/emacs-claude-pty-proxy-study.md`）
   - 材料: ghostel はセル幅に合わせて幅・ascent・descent の比の小さいほうで縮める。前後が空白で孤立しているときだけ
     右隣の空白を借りて 2 桁で描く（`Renderer.zig:699-812`）。この規則は自前の描画でもそのまま使える
   - T-027 で ghostel の規則をそのまま入れた。**`①②③` が 1 セルに縮んで小さく、読みにくい**（HackGen Console NF、セル 8x18 px）。
     縦は縮めずに横だけ詰める、半角の `①` を持つフォントを優先して探す、などを試す
-- ⬜ **T-014** module → Lisp の通知の形を決める（ポーリングの間隔、イベントの種類、共有の状態の中身）
+- ✅ **T-014** module → Lisp の通知の形を決める（2026-11-11）→ **初版は世代付きの共有の状態を Lisp のタイマーで 50 ms ごとにポーリング**（端末があるときだけ）。
+  中身はタイトル・cwd・ベル・終了・クリック・桁数と行数・カーソルの矩形。クリックからウィンドウが選ばれるまで最大 50 ms 遅れる。`open_channel` は使っていない（docs/notes/t028-module.md）
   - ghostel は CRT を静的リンクしたまま `open_channel` に書く回避策を持つ（emacs.exe の import 表から
     `_dup` を持つ CRT を探し、その `_write` / `_close` を使う。`ConPtyProcess.zig:78-219`）。
     ポーリングの代わりになるか検討する。emacs クレートが生の `emacs_value` を出さない点（ADR 0006）が障害
@@ -138,6 +143,7 @@
   - 子 HWND の下のバッファは見えないので、`C-s` / `M-w` / occur がそのままでは効かない
   - 例: 画面とスクロールバックのテキストをバッファに写しておく（GenPreview と同じ）/
     コピーモードに入ったときだけ写す / 端末の中に検索を持つ
+  - T-029 の copy モード（`C-c C-k`）は**画面だけ**を写す。スクロールバックも写すかをここで一緒に決める
 - ⬜ **T-063** split の実装方式を決める（T-016 の要件を満たす形）
   - 候補 A: **1 つの HWND の中を複数のペインに分けて描く**（落としどころの候補）。HWND の範囲と
     ペインの位置を Emacs のウィンドウ構成からどう決めるか（間のモードライン・境界線を覆わないか）
@@ -177,11 +183,18 @@
   クレート `et-vt`（手書きの FFI、型の配置を `ghostty_type_json()` と照合するテスト）・`et-pty`（再配布版優先、Job Object）・
   `et-render`（D2D / DirectWrite、T-013 の縮め方）と `apps/embterm`。自動確認の引数（`--input` `--screenshot` `--exit-after` など）付き。
   docs/notes/t027-debug-exe.md
-- ⬜ **T-028** module: 同じものを Emacs のフレームの子 HWND として出し、pwsh が動く
-- ⬜ **T-029** `embterm.el`: 起動・位置合わせ（フック 2 つ）・キーの送信・終了
-- ⬜ **T-030** DLL の更新の手順（読み込み済みの DLL は消せない。版ごとにファイル名を変える等）
+- ✅ **T-028** module: 同じものを Emacs のフレームの子 HWND として出し、pwsh が動く（2026-11-11）→ `apps/embterm-module`（`embterm_module.dll`）。
+  端末ごとに UI スレッド 1 本。頼みごとは端末が生きている間ずっと残るメッセージ専用ウィンドウ宛ての `PostMessage`。
+  別に起動した `emacs -Q` で cmd・pwsh・分割・リサイズ・バッファの切り替え・別フレームへの付け替え・フレームを消した後の作り直しを確かめた。
+  30,000 行の出力の最中も Emacs の 10 ms タイマーの間隔は最大 20〜29 ms。docs/notes/t028-module.md、画面は target/t028/
+- ✅ **T-029** `embterm.el`: 起動・位置合わせ（フック 2 つ）・キーの送信・終了（2026-11-11）→ `lisp/embterm.el`。`M-x embterm`、semi-char の入力（`embterm-keymap-exceptions`）、
+  copy モード（`C-c C-k` で画面のテキストをバッファに写す / `C-c C-j` で戻る）、タイトル・cwd の反映、終了でバッファを消す、
+  defcustom（`embterm-font-family` `embterm-font-size` `embterm-narrow-wide` `embterm-shell` `embterm-module-directory`）。
+  子プロセスは最初にウィンドウに出したときに起動する。試験は test/smoke.el（`emacs -Q -l test/smoke.el`）
+- ✅ **T-030** DLL の更新の手順（2026-11-11）→ GenPreview と同じく、更新時刻とサイズを名前に入れて一時ディレクトリにコピーしてから読む。
+  conpty.dll と `x64/OpenConsole.exe` は元の場所のものを使う。新しい版を使うには Emacs の再起動が要る。配布物は `cargo xtask dist`（`target/dist/`）
   - GenPreview の方式: 更新時刻とサイズを名前に入れて一時ディレクトリにコピーしてから読む。新しい版を使うには Emacs の再起動が要る
-- ⬜ **T-031** module の境界で panic を止める（Emacs を落とさない）
+- ✅ **T-031** module の境界で panic を止める（2026-11-11）→ wndproc・自前のスレッドの本体・user-ptr の `Drop` を `catch_unwind` で包んだ（`#[defun]` は emacs クレートが守る）
   - `#[defun]` は emacs クレートが Lisp のエラーに変える。**user-ptr の finalizer（`Drop`）と、自前のスレッドの本体と、
     wndproc は守られない**ので自分で `catch_unwind` する（GenPreview の調査より）
 
@@ -236,7 +249,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   `vendor/ghostty-vt` に置く。`-Dtarget=x86_64-windows-msvc` を明示しても結果は同じ。リンカの警告は出ない
 - ✅ **T-065** libghostty-vt の Rust の宣言を bindgen で作るか、使う範囲だけ手で書くか（2026-11-11）→ **使う範囲だけ手で書く。**
   構造体の大きさとフィールドの位置は、libghostty-vt が返す `ghostty_type_json()` とテストで照合する（libclang は入れない）
-- ⬜ **T-066** 端末の状態を HWND より長生きさせる（フレームを消すと子 HWND とそのスレッドも消える。
+- ✅ **T-066** 端末の状態を HWND より長生きさせる（2026-11-11）→ session（端末 + PTY）と view（子 HWND）を分けた。フレームを消しても session は残り、次の置き場所の指示で作り直すか `SetParent` で付け替える。（フレームを消すと子 HWND とそのスレッドも消える。
   GenPreview は文書を読み直して作り直すが、端末は作り直せない）
 - ⬜ **T-067** GPU のデバイスを端末どうしで共有し、デバイスを失ったときは全員で作り直す（GenPreview はビューアごとに作っている）
 - ⬜ **T-068** 描き直しの負荷を測る（GenPreview のスパイクは「1 回塗る」だけ。垂直同期を待つ `Present(1)` で UI スレッドが止まる量は未測定）
@@ -254,9 +267,13 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ⬜ **T-073** Job から抜けるプロセス: 外側の Job が breakaway を許すとき、pwsh の `Start-Process` で起こした孫が Job から抜けた。
   原因と、抜けさせない方法を決める（T-041 の一部）
 - ⬜ **T-074** 同期出力（DEC 2026）: `GHOSTTY_TERMINAL_OPT_RENDER_HOLD` を登録し、hold の間は render state を写し直さない（時限 1 秒）
-- ⬜ **T-075** `apps/embterm/src/session.rs`（端末 + PTY + 読み書きのスレッド + 知らせ）を、Emacs module と共有するクレート（`et-session`）に移す。T-028 の前にやる
-- ⬜ **T-076** 閉じる処理を UI スレッドから外す（`Pty::close` は最大数秒待つ。module では Emacs を止めてしまう）。
+- ✅ **T-075**（2026-11-11）→ `crates/session`（`et-session`）に移し、embterm.exe と module の両方が使う。`apps/embterm/src/session.rs`（端末 + PTY + 読み書きのスレッド + 知らせ）を、Emacs module と共有するクレート（`et-session`）に移す。T-028 の前にやる
+- 🔄 **T-076**（2026-11-11: 前半は済み。閉じる待ちは別スレッドで行い、終わったら `Closed` を知らせる。`kill-buffer` は 1 ms 程度で返る。**後半の `.swp` が残る件は未着手**）閉じる処理を UI スレッドから外す（`Pty::close` は最大数秒待つ。module では Emacs を止めてしまう）。
   あわせて、閉じたときに vim の `.swp` が残る（実質の強制終了）ので、子に先に終了を促す手順を考える
 - ⬜ **T-077** 変わった行だけ描き直すか（今は毎回全体を描き、`Present(1)` で垂直同期を待つ）→ T-068 の測定で決める
 - ⬜ **T-078** 自動確認の道具をリポジトリに入れる（キーを送るスクリプト、画面の `.txt` を期待値と比べる回帰テストを `cargo xtask` から）
 - ⬜ **T-079** 150% の DPI で embterm.exe を確かめる
+- ⬜ **T-080** バッファ名の付け方（タイトルが長いときの短縮。cmd は `C:\WINDOWS\SYSTEM32\cmd.exe` になる。タイトルが無いときはコマンド名）
+- ⬜ **T-081** Emacs での自動確認を `cargo xtask` から呼ぶ（`cargo xtask dist` → `emacs -Q -l test/smoke.el` → ログの確認。T-078 と合わせる）。
+  子 HWND のホイール・ドラッグでの選択・Emacs 側に来たホイールの転送も `PostMessage` で送って確かめる
+- ⬜ **T-082** 子プロセスは最初にウィンドウに出したときに起動する（大きさが決まってから起こすため）。表示しないまま起動する用途（バックグラウンドでコマンドを走らせる）が要るかを決める

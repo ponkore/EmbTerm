@@ -112,6 +112,18 @@ version = "0.1.0"
 dependencies = [
  "et-pty",
  "et-render",
+ "et-session",
+ "et-vt",
+ "windows",
+]
+
+[[package]]
+name = "embterm-module"
+version = "0.1.0"
+dependencies = [
+ "emacs",
+ "et-render",
+ "et-session",
  "et-vt",
  "windows",
 ]
@@ -130,6 +142,15 @@ dependencies = [
  "et-vt",
  "windows",
  "windows-numerics",
+]
+
+[[package]]
+name = "et-session"
+version = "0.1.0"
+dependencies = [
+ "et-pty",
+ "et-vt",
+ "windows",
 ]
 
 [[package]]

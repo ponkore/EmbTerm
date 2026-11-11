@@ -192,6 +192,13 @@ impl Renderer {
         Ok(())
     }
 
+    /// フォントを替える（セルの大きさが変わる）。作れなければ今のフォントのまま
+    pub fn set_font(&mut self, spec: FontSpec) -> Result<()> {
+        self.font = FontSet::new(&self.gpu.dwrite, &spec, self.dpi)?;
+        self.spec = spec;
+        Ok(())
+    }
+
     /// クライアント領域の大きさが変わった（物理ピクセル）
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.surface.resize(width, height)

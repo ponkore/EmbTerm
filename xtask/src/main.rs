@@ -9,6 +9,11 @@
 //!     再配布版の ConPTY（NuGet の Microsoft.Windows.Console.ConPTY）を nuget.org から取り、
 //!     SHA256 と Authenticode の署名を確かめて、x64 の conpty.dll と OpenConsole.exe を vendor/conpty に置く。
 //!     要るもの: curl、tar、certutil、PowerShell（どれも Windows に入っている）
+//!
+//! cargo xtask dist
+//!     release でビルドし、target/dist/ に配布物を集める（T-028 / T-030）:
+//!     embterm_module.dll、embterm.el、embterm.exe、conpty.dll、x64/OpenConsole.exe
+//!     （ConPTY は vendor/conpty から。無ければ先に `cargo xtask fetch-conpty`）
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -33,8 +38,9 @@ fn main() -> ExitCode {
     let result = match task.as_str() {
         "fetch-ghostty-vt" => fetch_ghostty_vt(force),
         "fetch-conpty" => fetch_conpty(force),
+        "dist" => dist(),
         _ => {
-            eprintln!("使い方: cargo xtask <fetch-ghostty-vt | fetch-conpty> [--force]");
+            eprintln!("使い方: cargo xtask <fetch-ghostty-vt | fetch-conpty> [--force] | cargo xtask dist");
             return ExitCode::from(2);
         }
     };
@@ -207,5 +213,34 @@ fn fetch_conpty(force: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     std::fs::remove_dir_all(&extract).ok();
     eprintln!("できた: {} と {}", dll.display(), exe.display());
+    Ok(())
+}
+
+/// release でビルドし、target/dist/ に配布物を集める。embterm.el は自分の隣の module と conpty.dll を使う
+fn dist() -> Result<(), String> {
+    let root = root();
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    run(Command::new(&cargo)
+        .args(["build", "--release", "-p", "embterm", "-p", "embterm-module"])
+        .current_dir(&root))?;
+    let release = root.join("target/release");
+    let dist = root.join("target/dist");
+    std::fs::create_dir_all(dist.join("x64")).map_err(|e| e.to_string())?;
+    let conpty = root.join("vendor/conpty");
+    let files = [
+        (release.join("embterm_module.dll"), dist.join("embterm_module.dll")),
+        (release.join("embterm.exe"), dist.join("embterm.exe")),
+        (root.join("lisp/embterm.el"), dist.join("embterm.el")),
+        (conpty.join("conpty.dll"), dist.join("conpty.dll")),
+        (conpty.join("x64/OpenConsole.exe"), dist.join("x64/OpenConsole.exe")),
+    ];
+    for (src, dst) in &files {
+        if !src.exists() {
+            return Err(format!("{} がありません（ConPTY なら `cargo xtask fetch-conpty`）", src.display()));
+        }
+        std::fs::copy(src, dst).map_err(|e| format!("{} → {}: {e}", src.display(), dst.display()))?;
+        eprintln!("{}", dst.display());
+    }
+    eprintln!("できた: {}", dist.display());
     Ok(())
 }

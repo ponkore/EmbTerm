@@ -1,37 +1,53 @@
-//! 端末 1 つ分の VT と PTY のつなぎ（スレッドの構成は docs/TODO.md T-006 の初版）。
+//! et-session: 端末 1 つ分の VT と PTY のつなぎ（T-075。スレッドの構成は docs/TODO.md T-006 の初版）。
 //!
 //! ```text
 //! PTY の読みのスレッド ── 読む → 端末をロックして vt_write → ロックを外す
 //!                         └ 描き直しの知らせ（AtomicBool でまとめて 1 回だけ）→ notify(Event::Output)
 //! 端末の応答（WRITE_PTY）── 書きのスレッドのチャネルに積むだけ（ロックを持ったまま PTY に書かない）
 //! UI スレッド ── take_output() → 端末をロック → render state を update → ロックを外して描く
+//! 閉じる ── 別のスレッド（session-close）で Pty::close を待ち、終わったら notify(Event::Closed)（T-076）
 //! ```
 //!
-//! HWND には依存しない（知らせ方は `notify` に任せる）ので、Emacs module（T-028）でもそのまま使える見込み。
-//! そのときは共有のクレートへ移す。
+//! - HWND には依存しない（知らせ方は `notify` に任せる）。embterm.exe と Emacs module の両方が使う
+//! - **端末の状態（[`Session`]）は表示（HWND）より長生きにする**（T-066）。メソッドはすべて `&self` なので、
+//!   `Arc<Session>` にして UI スレッドと呼び出し側（Lisp のスレッド）で分け合える
+//! - キーの変換（レガシーの VT）は [`keys`]
+
+pub mod keys;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use et_pty::{ConptyKind, ExitStatus, Pty, PtyOptions, PtyWriter};
 use et_vt::{Effects, Mode, Rgb, Terminal};
 
-/// UI に知らせること
-#[derive(Clone, Copy, Debug)]
+/// 呼び出し側（UI）に知らせること
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     /// 端末の中身が変わった（描き直す）
     Output,
     /// タイトルが変わった
     Title,
+    /// カレントディレクトリ（OSC 7 など）が変わった
+    Pwd,
     /// ベル
     Bell,
     /// 子プロセスが終わった
     Exited,
+    /// [`Session::close`] の後始末が終わった（PTY のスレッドも止まった）
+    Closed,
 }
 
+/// 知らせを受ける関数。**PTY の読みのスレッドや閉じるスレッドから呼ばれる**（端末のロックを持ったままのこともある）。
+/// `PostMessage` するか、フラグを立てるくらいにとどめる
 pub type Notify = Arc<dyn Fn(Event) + Send + Sync>;
+
+/// 端末を閉じるときに後始末を待つ時間（ClosePseudoConsole → EOF。過ぎたら Job ごと止める）
+pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct SessionOptions {
     pub argv: Vec<OsString>,
@@ -69,11 +85,12 @@ impl Effects for TermEffects {
     }
     fn pwd_changed(&mut self, pwd: &str) {
         *self.pwd.lock().unwrap_or_else(|e| e.into_inner()) = pwd.to_string();
+        (self.notify)(Event::Pwd);
     }
 }
 
 /// 読みのスレッドと UI スレッドで共有するもの
-pub struct Shared {
+struct Shared {
     term: Mutex<Terminal>,
     /// 描き直しの知らせを出したまま、UI がまだ受け取っていない
     pending: AtomicBool,
@@ -83,12 +100,33 @@ pub struct Shared {
     exit: Mutex<Option<ExitStatus>>,
 }
 
+/// 閉じる処理の待ち合わせ。待たなくてよい（終わると [`Event::Closed`] も届く）
+pub struct Closing {
+    done: Option<Receiver<()>>,
+}
+
+impl Closing {
+    /// 後始末が終わるまで最大 `timeout` 待つ。終わっていれば true
+    pub fn wait(&self, timeout: Duration) -> bool {
+        match &self.done {
+            None => true,
+            Some(rx) => !matches!(rx.recv_timeout(timeout), Err(mpsc::RecvTimeoutError::Timeout)),
+        }
+    }
+}
+
+/// 端末 1 つ（VT + PTY + 読み書きのスレッド）
 pub struct Session {
     shared: Arc<Shared>,
     title: Arc<Mutex<String>>,
     pwd: Arc<Mutex<String>>,
     writer: PtyWriter,
-    pty: Option<Pty>,
+    /// 閉じたら `None`。閉じる処理は別のスレッドへ持っていく
+    pty: Mutex<Option<Pty>>,
+    kind: ConptyKind,
+    pid: u32,
+    warnings: Vec<String>,
+    notify: Notify,
 }
 
 impl Session {
@@ -150,7 +188,10 @@ impl Session {
         let pty = Pty::spawn(&pty_opts, on_output, on_exit).map_err(|e| format!("子プロセスを起動できません: {e}"))?;
         let writer = pty.writer();
         let _ = writer_cell.set(writer.clone());
-        Ok(Session { shared, title, pwd, writer, pty: Some(pty) })
+        let kind = pty.kind().clone();
+        let pid = pty.pid();
+        let warnings = pty.warnings().to_vec();
+        Ok(Session { shared, title, pwd, writer, pty: Mutex::new(Some(pty)), kind, pid, warnings, notify })
     }
 
     /// 描き直しの知らせを受け取った（次の出力でまた知らせが来るようにする）。端末をロックする前に呼ぶ
@@ -171,9 +212,14 @@ impl Session {
     /// 端末と ConPTY の両方の大きさを変える（ghostel と同じく端末が先）
     pub fn resize(&self, cols: u16, rows: u16, cell_px: (u32, u32)) {
         let _ = self.lock().resize(cols, rows, cell_px.0, cell_px.1);
-        if let Some(p) = &self.pty {
+        if let Some(p) = self.pty.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             let _ = p.resize(cols, rows);
         }
+    }
+
+    /// 端末の桁数と行数
+    pub fn size(&self) -> (u16, u16) {
+        self.lock().size()
     }
 
     pub fn title(&self) -> String {
@@ -192,28 +238,49 @@ impl Session {
         self.shared.saw_da1.load(Ordering::Relaxed)
     }
 
-    pub fn conpty_kind(&self) -> Option<&ConptyKind> {
-        self.pty.as_ref().map(|p| p.kind())
+    pub fn conpty_kind(&self) -> &ConptyKind {
+        &self.kind
     }
 
-    pub fn warnings(&self) -> Vec<String> {
-        self.pty.as_ref().map(|p| p.warnings().to_vec()).unwrap_or_default()
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     pub fn pid(&self) -> u32 {
-        self.pty.as_ref().map_or(0, |p| p.pid())
+        self.pid
     }
 
-    /// 閉じる（ClosePseudoConsole → EOF まで読む → 子が残っていれば Job ごと止める。時限付き）
-    pub fn close(&mut self) {
-        if let Some(mut p) = self.pty.take() {
-            p.close(std::time::Duration::from_secs(3));
+    /// 閉じているか（[`Session::close`] を呼んだあと）
+    pub fn is_closed(&self) -> bool {
+        self.pty.lock().unwrap_or_else(|e| e.into_inner()).is_none()
+    }
+
+    /// 閉じる（T-076）。**待たない。** ClosePseudoConsole → EOF まで読む → 子が残っていれば Job ごと止める、を
+    /// 別のスレッドで行い（時限 [`CLOSE_TIMEOUT`]）、終わったら [`Event::Closed`] を知らせる。
+    /// 待ちたいときは戻り値の [`Closing::wait`]。2 回目以降は何もしない（すぐ終わった扱いの `Closing`）
+    pub fn close(&self) -> Closing {
+        let Some(mut pty) = self.pty.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return Closing { done: None };
+        };
+        let (tx, rx) = mpsc::channel();
+        let notify = self.notify.clone();
+        let spawned = std::thread::Builder::new().name("session-close".into()).spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pty.close(CLOSE_TIMEOUT)));
+            drop(pty);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify(Event::Closed)));
+            let _ = tx.send(());
+        });
+        match spawned {
+            Ok(_) => Closing { done: Some(rx) },
+            // スレッドを作れないときだけ、ここで待つ（Pty はクロージャごと捨てられて Drop で閉じる）
+            Err(_) => Closing { done: None },
         }
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.close();
+        // 待たない（UI スレッドや Emacs の GC から落とされても止まらないように）
+        let _ = self.close();
     }
 }

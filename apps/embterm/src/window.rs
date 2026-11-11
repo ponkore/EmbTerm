@@ -23,9 +23,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::args::Args;
-use crate::keys;
 use crate::log;
-use crate::session::{Event, Session, SessionOptions};
+use et_session::{Event, Session, SessionOptions, keys};
 
 const CLASS: PCWSTR = w!("EmbTermWindow");
 const WM_APP_OUTPUT: u32 = WM_APP + 1;
@@ -182,7 +181,7 @@ pub fn run(args: Args) -> Result<(), String> {
         Event::Output => post(hwnd_raw, WM_APP_OUTPUT),
         Event::Title => post(hwnd_raw, WM_APP_TITLE),
         Event::Exited => post(hwnd_raw, WM_APP_EXITED),
-        Event::Bell => {}
+        Event::Bell | Event::Pwd | Event::Closed => {}
     });
     let session = Session::start(
         SessionOptions {
@@ -204,7 +203,7 @@ pub fn run(args: Args) -> Result<(), String> {
         grid.0,
         grid.1,
         session.pid(),
-        session.conpty_kind().map(|k| k.to_string()).unwrap_or_default()
+        session.conpty_kind()
     ));
     for w in session.warnings() {
         log(&format!("注意: {w}"));
@@ -269,12 +268,15 @@ pub fn run(args: Args) -> Result<(), String> {
     }
     // ウィンドウを閉じたあと。PTY を閉じる（ClosePseudoConsole → EOF → Job で子を止める。時限付き）
     let app = APP.with(|a| a.borrow_mut().take());
-    if let Some(mut app) = app {
+    if let Some(app) = app {
         let pwd = app.session.pwd();
         if !pwd.is_empty() {
             log(&format!("最後のカレントディレクトリ（OSC 7 など）: {pwd}"));
         }
-        app.session.close();
+        // 閉じる処理は別のスレッドで進む（T-076）。exe はそれを待ってから終わる
+        if !app.session.close().wait(et_session::CLOSE_TIMEOUT + std::time::Duration::from_secs(3)) {
+            log("PTY の後始末が時間内に終わらなかった");
+        }
         log("終了");
     }
     Ok(())

@@ -1,13 +1,11 @@
 //! embterm.exe: EmbTerm のデバッグ用 exe（T-027）。
 //!
 //! トップレベルのウィンドウ 1 枚に端末 1 つ。描画・VT・PTY は Emacs module（T-028）と同じクレート
-//! （et-render・et-vt・et-pty）を使う。設定はコマンドライン引数だけ（args.rs）。
+//! （et-render・et-session（et-vt・et-pty のつなぎとキーの変換））を使う。設定はコマンドライン引数だけ（args.rs）。
 
 #![windows_subsystem = "windows"]
 
 mod args;
-mod keys;
-mod session;
 mod window;
 
 use std::io::Write;

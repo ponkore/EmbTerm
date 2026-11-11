@@ -1,0 +1,18 @@
+[package]
+name = "et-session"
+description = "端末 1 つ分の VT（et-vt）と PTY（et-pty）のつなぎ。読み書きのスレッドと知らせ。HWND には依存しない（T-075）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+et-vt = { path = "../vt" }
+et-pty = { path = "../pty" }
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+]

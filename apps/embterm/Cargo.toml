@@ -15,6 +15,7 @@ path = "src/main.rs"
 et-vt = { path = "../../crates/vt" }
 et-pty = { path = "../../crates/pty" }
 et-render = { path = "../../crates/render" }
+et-session = { path = "../../crates/session" }
 
 [dependencies.windows]
 workspace = true
