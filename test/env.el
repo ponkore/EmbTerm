@@ -9,7 +9,7 @@
 ;; 確かめること:
 ;;   - `setenv' した変数が `embterm-new' の子に届く（`make-process' と同じ）
 ;;   - `embterm-run' の ENVIRONMENT で、起動時の環境にある変数を消せる・非 ASCII の値を渡せる
-;;   - `process-environment' の TERM は端末の値（xterm-256color）に負ける
+;;   - `process-environment' の TERM は端末の値（xterm-256color）に負ける。PWD は子に渡さない
 ;;   - NAME のバッファ名がタイトルで付け替わらない、DISPLAY の関数で出る、作業ディレクトリ
 ;; 結果は target/t109/env.log（OK / NG）。最後に Emacs を終える。
 ;; 注意: `sit-for' は使わない（待ちはすべて `run-at-time' の間隔で作る）
@@ -47,7 +47,7 @@
 
 ;; 子が環境を表示して待つコマンド（cmd の %VAR% は未定義ならそのまま残る）
 (defconst env-echo
-  '("cmd.exe" "/d" "/k" "echo" "L=[%LANG%]" "R=[%ET_REMOVE%]" "X=[%ET_X%]" "T=[%TERM%]" "D=[%CD%]"))
+  '("cmd.exe" "/d" "/k" "echo" "L=[%LANG%]" "R=[%ET_REMOVE%]" "X=[%ET_X%]" "T=[%TERM%]" "D=[%CD%]" "P=[%PWD%]"))
 
 (defvar env-buf1 nil)
 (defvar env-buf2 nil)
@@ -58,6 +58,7 @@
   ;; 1. setenv が embterm-new の子に届く（TERM=dumb は端末の値に負ける）
   (setenv "LANG" "ja_JP.UTF-8")
   (setenv "TERM" "dumb")
+  (setenv "PWD" "C:/Windows")
   (let ((embterm-shell env-echo)
         (default-directory (file-name-as-directory env-root)))
     (setq env-buf1 (embterm-new)))
@@ -85,6 +86,7 @@
     (env-log "embterm-run の画面:\n%s" (string-trim t2))
     (env-check "setenv の LANG が子に届く" (string-search "L=[ja_JP.UTF-8]" t1))
     (env-check "TERM は端末の値" (string-search "T=[xterm-256color]" t1))
+    (env-check "PWD は子に渡さない" (string-search "P=[%PWD%]" t1))
     (when env-had-remove
       (env-check "embterm-new の子には ET_REMOVE が残る" (string-search (format "R=[%s]" env-had-remove) t1))
       (env-check "embterm-run で ET_REMOVE を消せる" (string-search "R=[%ET_REMOVE%]" t2)))
@@ -92,6 +94,7 @@
     (env-check "embterm-run で非 ASCII の値を渡せる" (string-search "X=[あ①]" t2))
     (env-check "embterm-run の LANG（呼び出し時の process-environment）" (string-search "L=[ja_JP.UTF-8]" t2))
     (env-check "DIRECTORY で起動した" (string-search "\\target]" t2))
+    (env-check "作業ディレクトリのドライブレターは大文字" (string-match-p "D=\\[[A-Z]:" t1))
     (env-check "NAME のバッファ名のまま" (equal (buffer-name env-buf2) "*env-test*") (buffer-name env-buf2))
     (env-check "embterm-new はタイトルで名前が付く" (not (equal (buffer-name env-buf1) "*embterm*"))
                (buffer-name env-buf1))))

@@ -199,10 +199,15 @@ pub fn default_conpty_search(preferred: Option<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// 端末用に足す環境変数（`TERM=xterm-256color`、`COLORTERM=truecolor`、`TERM_PROGRAM=EmbTerm`）
+///
+/// あわせて `PWD` と `OLDPWD` を消す。Git Bash などから起動した親（Emacs）の `PWD` が残っていると、
+/// starship（nyagos・pwsh のプロンプト）や yazi は実際の作業ディレクトリより `PWD` を信じるので、
+/// 親を起動したディレクトリで開いたように見える。正しい値を入れても、nyagos のように `cd` で
+/// `PWD` を書き換えないシェルでは古くなるので、入れずに消す（POSIX のシェルは自分で設定する）
 pub fn terminal_env() -> Vec<(OsString, Option<OsString>)> {
-    [("TERM", "xterm-256color"), ("COLORTERM", "truecolor"), ("TERM_PROGRAM", "EmbTerm")]
+    [("TERM", Some("xterm-256color")), ("COLORTERM", Some("truecolor")), ("TERM_PROGRAM", Some("EmbTerm")), ("PWD", None), ("OLDPWD", None)]
         .into_iter()
-        .map(|(k, v)| (k.into(), Some(v.into())))
+        .map(|(k, v)| (k.into(), v.map(Into::into)))
         .collect()
 }
 

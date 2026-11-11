@@ -287,8 +287,14 @@ nil ならベルを鳴らさない。"
   "読み込んだ module の版。nil ならまだ読み込んでいない。")
 
 (defun embterm--native-path (dir)
-  "DIR を `\\' 区切りの絶対パスにする（Windows の API に渡すため）。"
-  (subst-char-in-string ?/ ?\\ (directory-file-name (expand-file-name dir))))
+  "DIR を `\\' 区切りの絶対パスにする（Windows の API に渡すため）。ドライブレターは大文字にする。
+Emacs は `~' の展開や `directory-file-name' でドライブレターを小文字に落とすが、子の作業
+ディレクトリはほかの端末と同じ大文字にそろえる（プロンプトの表示や、claude が cwd を
+プロジェクトの名前に使うため）。"
+  (let ((path (subst-char-in-string ?/ ?\\ (directory-file-name (expand-file-name dir)))))
+    (if (string-match-p "\\`[a-z]:" path)
+        (concat (upcase (substring path 0 1)) (substring path 1))
+      path)))
 
 (defun embterm--load-module ()
   "module を読み込む（一度だけ）。
