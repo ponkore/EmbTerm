@@ -226,15 +226,15 @@
 
 requirements.md §4 の「とくに確かめること」を見ながら。
 
-- ⬜ **T-045** cmd
-- ⬜ **T-046** PowerShell 5.1
-- ⬜ **T-047** pwsh（PSReadLine、starship）
-- ⬜ **T-048** nyagos
-- ⬜ **T-049** wsl bash
-- ⬜ **T-050** git bash
+- ✅ **T-045** cmd（2026-11-11）→ 日本語・`dir`・eaw の表示 OK（入力は PTY へ直接送ったので、キーのエンコードは T-091 / test/keys.el の確認に任せる）
+- ✅ **T-046** PowerShell 5.1（2026-11-11）→ 5.1.26100 で日本語の表示・Tab 補完・履歴・行内の移動 OK（入力は PTY へ直接送ったので、キーのエンコードは T-091 / test/keys.el の確認に任せる）
+- ✅ **T-047** pwsh（PSReadLine、starship）（2026-11-11）→ 7.6.9 で日本語・Tab 補完 OK。キーはユーザーが手元で確認（T-091）。starship は nyagos のプロンプトで確認
+- ✅ **T-048** nyagos（2026-11-11）→ 4.4.20 で Powerline のプロンプト・Nerd Font・履歴・色付き `ls`・eaw の表示 OK（`M-x shell` では使えなかったもの）（入力は PTY へ直接送ったので、キーのエンコードは T-091 / test/keys.el の確認に任せる）
+- ✅ **T-049** wsl bash（2026-11-11）→ Ubuntu で `TERM=xterm-256color` / `COLORTERM=truecolor`、日本語、`Ctrl+C`（終了コード 130）、less の検索 OK（入力は PTY へ直接送ったので、キーのエンコードは T-091 / test/keys.el の確認に任せる）
+- ✅ **T-050** git bash（2026-11-11）→ `--login -i`（UCRT64）で日本語、履歴と Backspace、`Ctrl+C`、less、true color・波線の下線・太字斜体 OK（入力は PTY へ直接送ったので、キーのエンコードは T-091 / test/keys.el の確認に任せる）
 - 🔄 **T-051** claude（2026-11-11: 桁ずれ・日本語入力・`Shift+Enter`・`C-c C-c` はユーザーが確認。長い出力と通知が残り）
 - ✅ **T-052** yazi（画像のプレビュー、マウス）（2026-11-11）→ embterm.exe と別起動の `emacs -Q` で、プレビュー・`j` での切り替え・`q` で画面が戻る・クリック・ホイールを確認。`Drivers.matches: Kgp`。手元での確認は T-091
-- ⬜ **T-053** vim（代替画面、カーソルの形、`Esc`、色）
+- ✅ **T-053** vim（2026-11-11）→ 日本語入力の表示・`:set number`・`Esc`（T-069 の `:set mouse=a` のクリックも確認済み）OK。`-u NONE` の MSYS 版 vim は encoding が latin1 になり化けるが vim の設定の問題
 - ⬜ **T-054** 性能を測る（大量の出力、入力の遅れ、端末を何個も開いたとき）
 - ⬜ **T-055** 端末としての適合を測る（vttest など）
 
@@ -301,4 +301,4 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ⬜ **T-095** 親の端末の環境変数（`WEZTERM_*`、`TERM_PROGRAM_VERSION`）が子に伝わる件。`et_pty` で落とすか決める（yazi の判定は XTVERSION で上書きされるので害は無い）
 - ⬜ **T-096** 大きな画像の PNG のデコードが端末のロックの中で走る時間を測る（T-054）
 - ⬜ **T-097** embterm.exe のウィンドウが一瞬画面いっぱい（`319x75`）にリサイズされて戻るログが数回あった。原因を調べる
-- 🔄 **T-098** 他のアプリが前面のとき、端末のペインをクリックしても Emacs にフォーカスが入らない（ユーザーの報告。カーソルが枠のまま）（2026-11-11: 子 HWND は `WM_MOUSEACTIVATE` にいつも `MA_NOACTIVATE` を返していた。**フレームが前面でなければ `MA_ACTIVATE` を返す**ように直した。`test/activate.el` で戻り値を確認。**本物のクリックでの確認は手元で**）
+- ✅ **T-098** 他のアプリが前面のとき、端末のペインをクリックしても Emacs にフォーカスが入らない（2026-11-11）→ フレームが前面でなければ `WM_MOUSEACTIVATE` に `MA_ACTIVATE` を返すようにした。本物のクリックでの動作をユーザーが確認した
