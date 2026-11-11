@@ -91,7 +91,7 @@
       「押した + 離した」を合成すれば実用上は足りる見込み（推測）
   - 送り方の切り替えは Windows Terminal と同じにする: アプリが KKP を求めた → libghostty-vt の KKP エンコーダ、
     そうでなく ConPTY が 9001 を求めている → win32-input-mode（自前）、それ以外 → レガシーの VT（T-069）
-- ⬜ **T-010** IME（日本語入力）をどう扱うか
+- 🔄 **T-010** IME（日本語入力）をどう扱うか
   - A のとき: Emacs（tr-ime / w32-ime）が受けた確定文字列を送る。変換中の文字列は Emacs が
     バッファに描くが、**子 HWND の下に隠れて見えないおそれ**。候補ウィンドウの位置も端末のカーソルに合わせる必要がある
   - B のとき: 子 HWND で IMM32 / TSF を自分で扱う
@@ -104,7 +104,9 @@
   - まず実測するもの: docs/research/emacs-ime.md §7 の P1（変換ウィンドウが子 HWND の上に出るか）、
     P3（tr-ime の上書き）、P5（確定文字の届き方）、P6（claude が入力位置に本物のカーソルを置くか）
   - 実装の材料（T-028）: 確定した文字は `self-insert-command` の remap で 1 文字ずつ届く見込み。カーソルの矩形は `embterm-module-cursor` で取れる。
-    これを tr-ime の `tr-ime-modadv--set-composition-window` に渡せば変換ウィンドウを端末のカーソルに合わせられる（未実装）
+    これを tr-ime の `tr-ime-modadv--set-composition-window` に渡せば変換ウィンドウを端末のカーソルに合わせられる
+  - 2026-11-11: **位置合わせを embterm.el に実装した**（`embterm-ime-position`、既定 t。ポーリングのたびに、選んでいるウィンドウが端末なら
+    カーソルの位置を STYLE 1 で渡し、離れたら STYLE 0 で戻す。isearch の後は入れ直す）。tr-ime の無い `emacs -Q` では何もしない。**手で打っての実測は未**
 - ✅ **T-011** 文字幅を ConPTY（conhost）・VT ライブラリ・アプリの 3 者で揃える方法（2026-11-11）→ **再配布版の ConPTY を使えば揃う。**
   再配布版は既定で書記素クラスタ単位・eaw 1 桁で数え、libghostty-vt（mode 2027）・claude と一致する。
   OS 同梱の conhost は結合文字・ZWJ の列をまとめないのでずれる（docs/research/conpty.md §2.6）。アプリでの実測は T-025

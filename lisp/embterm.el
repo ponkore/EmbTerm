@@ -98,6 +98,12 @@ nil なら `embterm-module-directory'。見つからなければ OS 同梱の Co
   :type '(choice (const overlap) (const shrink))
   :set #'embterm--set-and-apply)
 
+(defcustom embterm-ime-position t
+  "non-nil なら、IME の変換ウィンドウを端末のカーソルの位置に出す（T-010）。
+tr-ime advanced（`tr-ime-modadv--set-composition-window'）があるときだけ効く。
+無ければ変換ウィンドウは Emacs のポイント（隠れたバッファ）の位置に出る。"
+  :type 'boolean)
+
 (defcustom embterm-kill-buffer-on-exit t
   "non-nil なら、プロセスが終わったら端末のバッファを消す。"
   :type 'boolean)
@@ -285,6 +291,8 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
     (setq embterm--timer (run-with-timer embterm-poll-interval embterm-poll-interval #'embterm--poll))))
 
 (defun embterm--deactivate ()
+  (embterm--ime-reset)
+  (remove-hook 'isearch-mode-end-hook #'embterm--ime-forget)
   (remove-hook 'window-size-change-functions #'embterm--sync)
   (remove-hook 'window-buffer-change-functions #'embterm--sync)
   (remove-hook 'window-selection-change-functions #'embterm--sync)
@@ -342,6 +350,52 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
             (setq embterm--focused f)
             (ignore-errors (embterm-module-focus embterm--term f))))))))
 
+;;;; IME の変換ウィンドウの位置（T-010。docs/research/emacs-ime.md の A-2）
+
+(declare-function tr-ime-modadv--set-composition-window "tr-ime-modadv"
+                  (arg1 arg2 arg3 arg4 arg5 arg6 arg7 arg8))
+
+(defvar embterm--ime-last nil
+  "最後に tr-ime に渡した位置の引数。nil なら上書きしていない。同じなら呼び直さない。")
+
+(defun embterm--ime-available-p ()
+  (and embterm-ime-position (fboundp 'tr-ime-modadv--set-composition-window)))
+
+(defun embterm--update-ime ()
+  "選んでいるウィンドウが端末なら、変換ウィンドウを端末のカーソルに合わせる。
+そうでなければ上書きをやめる。カーソルの矩形（子 HWND の中の画素）に、子 HWND を置いた
+ウィンドウの本文の左上を足すとフレームの中の画素になる。"
+  (when (embterm--ime-available-p)
+    (let* ((win (selected-window))
+           (args
+            (with-current-buffer (window-buffer win)
+              (when (and embterm--term
+                         (eq embterm--window win)
+                         (eq embterm--input-mode 'semi-char))
+                (pcase (ignore-errors (embterm-module-cursor embterm--term))
+                  (`(,x ,y ,_w ,_h)
+                   (pcase-let ((`(,l ,tp ,r ,b) (window-inside-pixel-edges win)))
+                     (list (string-to-number (frame-parameter (window-frame win) 'window-id))
+                           1 (+ l x) (+ tp y) l tp r b))))))))
+      (cond
+       (args
+        (unless (equal args embterm--ime-last)
+          (setq embterm--ime-last args)
+          (add-hook 'isearch-mode-end-hook #'embterm--ime-forget)
+          (apply #'tr-ime-modadv--set-composition-window args)))
+       (embterm--ime-last (embterm--ime-reset))))))
+
+(defun embterm--ime-reset ()
+  "変換ウィンドウの位置の上書きをやめる（Emacs のポイントの位置に戻す）。"
+  (when (and embterm--ime-last (fboundp 'tr-ime-modadv--set-composition-window))
+    (ignore-errors
+      (tr-ime-modadv--set-composition-window (car embterm--ime-last) 0 0 0 0 0 0 0)))
+  (setq embterm--ime-last nil))
+
+(defun embterm--ime-forget (&rest _)
+  "tr-ime が isearch の終わりに上書きを戻すので、次のポーリングで入れ直させる。"
+  (setq embterm--ime-last nil))
+
 ;;;; ポーリング
 
 (defun embterm--poll ()
@@ -355,6 +409,7 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
             (embterm--poll-1)
           (error (message "embterm: %s" (error-message-string err)))))))
   (embterm--update-focus)
+  (embterm--update-ime)
   (unless embterm--buffers
     (embterm--deactivate)))
 
