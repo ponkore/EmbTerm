@@ -181,6 +181,35 @@ def scene_scroll():
         out(f"line {i}\r\n")
 
 
+def png_big(w, h):
+    """大きな PNG（8 ビット RGBA のグラデーション）。行ごとにまとめて作るので 4000x4000 でも数秒で済む"""
+    row = bytearray(w * 4)
+    row[0::4] = bytes(x * 255 // max(w - 1, 1) for x in range(w))
+    row[2::4] = bytes((96,)) * w
+    row[3::4] = bytes((255,)) * w
+    raw = bytearray()
+    for y in range(h):
+        row[1::4] = bytes((y * 255 // max(h - 1, 1),)) * w
+        raw.append(0)
+        raw += row
+
+    def chunk(tag, body):
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body))
+
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b"")
+
+
+def scene_big():
+    """大きな PNG（既定 4000x4000。2 番目の引数で 1 辺の画素数）を 1 枚、40 桁 x 20 行に縮めて置く（T-096 のデコードの時間の測定）"""
+    n = next((int(a) for a in sys.argv[2:] if a.isdigit()), 4000)
+    t0 = time.perf_counter()
+    png = png_big(n, n)
+    out(f"big: {n}x{n} PNG {len(png)} bytes (made in {time.perf_counter() - t0:.1f} s)\r\n")
+    t1 = time.perf_counter()
+    apc("a=T,f=100,t=d,i=201,c=40,r=20,q=2", png)
+    out(f"\r\nend of big (sent in {time.perf_counter() - t1:.1f} s)\r\n")
+
+
 def main():
     setup_console()
     scene = sys.argv[1] if len(sys.argv) > 1 else "basic"

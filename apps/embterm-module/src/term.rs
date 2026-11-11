@@ -21,6 +21,11 @@
 //! - 子 HWND は作ったら `HWND_BOTTOM`、動かすときは `SWP_NOZORDER`。`WS_EX_NOACTIVATE` と `MA_NOACTIVATE` で
 //!   フォーカスを取らない（キーは Emacs が受けて module に送る。T-009 の案 A）
 //! - UI スレッドの wndproc とスレッドの本体は `catch_unwind` で包む（T-031）
+//! - **UI スレッドは `Present` で止まらない**（T-068）。ペインのスワップチェーンが次のフレームを受け付けるまで描くのを後回しにし、
+//!   メッセージのループ（[`message_loop`]）がそのハンドルもメッセージと一緒に待つ。描けるペインが無い間は出力の知らせでも写さない
+//!   （読みのスレッドの「知らせを出した」印を立てたままにして、知らせを止める）。描くのは画面の更新の速さ（60 Hz）まで
+//! - GPU デバイスはプロセスで 1 つを分け合う（T-067）。失ったら作り直して、ほかの端末にも [`WM_APP_DEVICE`] で知らせる
+//! - 測定（T-054）: [`Perf`]（UI スレッドの 1 フレームの内訳・頼みごとの遅れ・入力から表示まで）。`embterm-module-perf` で読む
 //! - 色（T-034）・カーソルの既定（T-035）・クリップボードの許可（T-039）は Lisp が頼みごとで送る。子プロセスを起動する前に
 //!   届いたものは [`SessionOptions`] に入れ、起動後のものは [`Session`] に反映する
 //! - カーソルの点滅（T-035）は制御用のウィンドウのタイマー。**選んでいるペインが見えていて、フォーカスがあり、カーソルが
@@ -40,11 +45,13 @@ use std::time::{Duration, Instant};
 
 use et_render::{FontSpec, Frame, FrameView, Gpu, NarrowWide, Renderer, Theme};
 use et_session::keys::{KeyEvent, KeyPhase};
+use et_session::perf::Samples;
 use et_session::{Colors, CursorDefault, Event as SessionEvent, Session, SessionOptions, keys};
 use et_vt::{Geometry, GridRef, Key, KeyEncoder, Mode, Mods, MouseAction, MouseButton, MouseEncoder, MouseGeometry, RenderState, Rgb, Scroll, Terminal, TrackedRef};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToClient};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::INFINITE;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -60,6 +67,10 @@ const WM_APP_REQUEST: u32 = WM_APP + 1;
 const WM_APP_OUTPUT: u32 = WM_APP + 2;
 /// セッションからの知らせ（wParam が [`SessionEvent`] の番号）
 const WM_APP_SESSION: u32 = WM_APP + 3;
+/// 分け合う GPU デバイスが替わった（ほかの端末がデバイスを失って作り直した。T-067）
+const WM_APP_DEVICE: u32 = WM_APP + 4;
+/// スワップチェーンがフレームを受け付けるのを待つ時間の上限（ms）。過ぎたら待たずに描く（T-068）
+const FRAME_WAIT_TIMEOUT_MS: u32 = 250;
 
 const DEFAULT_FG: Rgb = Rgb { r: 0xd4, g: 0xd4, b: 0xd4 };
 const DEFAULT_BG: Rgb = Rgb { r: 0x1e, g: 0x1e, b: 0x1e };
@@ -141,6 +152,8 @@ pub enum Request {
     LinkAt { pane: i64, x: i32, y: i32, reply: mpsc::Sender<Option<String>> },
     /// 描画とカーソルの状態（デバッグ・自動確認用）
     DebugInfo(mpsc::Sender<DebugInfo>),
+    /// 性能の測定の報告（T-054。`reset` なら報告のあと消す）
+    Perf { reset: bool, reply: mpsc::Sender<String> },
     Close,
 }
 
@@ -284,7 +297,8 @@ pub struct CopyText {
 pub struct Shared {
     state: Mutex<State>,
     events: Mutex<Vec<Event>>,
-    requests: Mutex<Vec<Request>>,
+    /// 頼みごとと、積んだ時刻（UI スレッドが取り出すまでの遅れを測る。T-054）
+    requests: Mutex<Vec<(Instant, Request)>>,
     /// WM_APP_REQUEST を投げたまま、UI スレッドがまだ列を取り出していない（投げすぎない）
     request_posted: AtomicBool,
     /// 制御用のウィンドウ（0 なら UI スレッドが終わった）
@@ -294,6 +308,17 @@ pub struct Shared {
     selection: Mutex<Option<String>>,
     /// copy モードのテキスト
     copy: Mutex<Option<CopyText>>,
+    /// 入力から表示までの遅れの測定（T-054）
+    probe: Mutex<LatencyProbe>,
+}
+
+/// 入力から表示までの遅れの測定（T-054）。キーを 1 つ追いかける:
+/// Lisp が頼んだ → UI スレッドが PTY へ書いた → 読みのスレッドがエコーを端末に書いた → UI スレッドが描いて Present を終えた
+#[derive(Default)]
+struct LatencyProbe {
+    sent: Option<Instant>,
+    ui: Option<Instant>,
+    output: Option<Instant>,
 }
 
 impl Shared {
@@ -357,6 +382,49 @@ impl Shared {
     }
 }
 
+/// 生きている端末の制御用のウィンドウ（GPU デバイスが替わったことを全員に知らせる。T-067）
+static CONTROLS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+
+/// 分け合う GPU デバイスが替わったことを、`except` 以外の端末に知らせる
+fn broadcast_device_changed(except: HWND) {
+    let controls = CONTROLS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for h in controls {
+        if h != except.0 as isize {
+            post(h, WM_APP_DEVICE, 0);
+        }
+    }
+}
+
+/// 動いている端末（Emacs を終えるときに閉じる。T-076）
+static SESSIONS: Mutex<Vec<Weak<Session>>> = Mutex::new(Vec::new());
+
+/// Emacs を終えるとき（`kill-emacs-hook`）に、全部の端末を閉じる（T-076）。**Lisp のスレッドで最大 `grace` + 0.3 秒待つ。**
+///
+/// 待たずに Emacs が終わると、Job のハンドルが閉じて中のアプリが**いきなり**止められる（CTRL_CLOSE_EVENT も届かない）うえ、
+/// Job の外の子孫は残る。ここでは各端末で ClosePseudoConsole（アプリに CTRL_CLOSE_EVENT）を送り、`grace` まで穏やかに終わるのを
+/// 待ち、過ぎたら Job の外の子孫も含めて止める。戻り値は（時間内に閉じ終えた数, 端末の数）
+pub fn shutdown(grace: Duration) -> (usize, usize) {
+    let sessions: Vec<Arc<Session>> = SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter_map(Weak::upgrade).collect();
+    let closings: Vec<_> = sessions.iter().map(|s| s.close_with(grace)).collect();
+    let deadline = Instant::now() + grace + Duration::from_millis(300);
+    let done = closings.iter().filter(|c| c.wait(deadline.saturating_duration_since(Instant::now()))).count();
+    for s in &sessions {
+        if let Some(r) = s.close_report() {
+            log(&format!("Emacs を終える前に閉じた: {r}"));
+        }
+    }
+    (done, closings.len())
+}
+
+/// デバイスを失ったことにする（デバッグ・自動確認用。T-067）。分け合うデバイスを捨て、全部の端末に載せ替えさせる
+pub fn debug_lose_device() {
+    if let Ok(g) = Gpu::shared() {
+        log(&format!("GPU デバイスの世代 {} を失ったことにする", g.generation()));
+        g.invalidate();
+    }
+    broadcast_device_changed(HWND(std::ptr::null_mut()));
+}
+
 fn post(hwnd: isize, msg: u32, wparam: usize) -> bool {
     hwnd != 0 && unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(wparam), LPARAM(0)) }.is_ok()
 }
@@ -374,6 +442,13 @@ impl Term {
     /// 頼みごとを積んで、UI スレッドを起こす（待たない）。UI スレッドがもういなければ、
     /// 文字の送信だけはここで書く（PTY への書き込みはチャネルに積むだけなので待たない）
     pub fn request(&self, r: Request) {
+        if matches!(r, Request::SendKey { .. } | Request::SendString(_) | Request::Paste(_)) {
+            let mut p = self.shared.probe.lock().unwrap_or_else(|e| e.into_inner());
+            // エコーが来なかった（表示の変わらないキー）ものは 1 秒で捨てて測り直す
+            if p.sent.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
+                *p = LatencyProbe { sent: Some(Instant::now()), ..Default::default() };
+            }
+        }
         let control = self.shared.control.load(Ordering::Acquire);
         if control == 0 {
             if let (Some(s), Request::SendString(text)) = (self.shared.session(), &r) {
@@ -381,7 +456,7 @@ impl Term {
             }
             return;
         }
-        self.shared.requests.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+        self.shared.requests.lock().unwrap_or_else(|e| e.into_inner()).push((Instant::now(), r));
         if !self.shared.request_posted.swap(true, Ordering::AcqRel) && !post(control, WM_APP_REQUEST, 0) {
             self.shared.request_posted.store(false, Ordering::Release);
         }
@@ -408,6 +483,7 @@ pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
         session: OnceLock::new(),
         selection: Mutex::new(None),
         copy: Mutex::new(None),
+        probe: Mutex::new(LatencyProbe::default()),
     });
     let (tx, rx) = mpsc::channel();
     let s = shared.clone();
@@ -492,23 +568,18 @@ fn term_main(shared: Arc<Shared>, opts: SpawnOptions, ready: mpsc::Sender<Result
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         shared.control.store(control.0 as isize, Ordering::Release);
+        CONTROLS.lock().unwrap_or_else(|e| e.into_inner()).push(control.0 as isize);
         shared.update(|s| s.alive = true);
         let _ = ready.send(Ok(()));
-
-        let mut msg = MSG::default();
-        unsafe {
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
+        message_loop();
     }));
     if r.is_err() {
         let _ = ready2.send(Err("端末のスレッドで panic".into()));
         log("端末のスレッドで panic（スレッドを終える）");
         shared.emit(Event::Error("端末のスレッドで panic しました".into()));
     }
-    shared.control.store(0, Ordering::Release);
+    let control = shared.control.swap(0, Ordering::AcqRel);
+    CONTROLS.lock().unwrap_or_else(|e| e.into_inner()).retain(|&h| h != control);
     // App（描画の資源と、端末への参照）を落とす。端末を閉じていなければ閉じる（待たない）
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(mut app) = APP.with(|a| a.borrow_mut().take()) {
@@ -528,6 +599,36 @@ fn term_main(shared: Arc<Shared>, opts: SpawnOptions, ready: mpsc::Sender<Result
         s.hwnd = 0;
         s.panes.clear();
     });
+}
+
+/// メッセージのループ。描くのを待っているペインのスワップチェーンのハンドル（フレームを受け付けると知らせる）も一緒に待つ。
+/// 知らされたらそのペインを描く。[`FRAME_WAIT_TIMEOUT_MS`] を過ぎても来なければ待たずに描く（T-068）
+fn message_loop() {
+    let mut msg = MSG::default();
+    loop {
+        let waiting = with_app(|a| a.waiting_frames()).unwrap_or_default();
+        let handles: Vec<HANDLE> = waiting.iter().map(|w| w.1).collect();
+        let timeout = if handles.is_empty() { INFINITE } else { FRAME_WAIT_TIMEOUT_MS };
+        let r = unsafe { MsgWaitForMultipleObjectsEx(Some(&handles), timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE) };
+        let signaled = r.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+        if signaled < handles.len() {
+            let id = waiting[signaled].0;
+            with_app(|a| a.frame_signaled(id, false));
+        } else if r == WAIT_TIMEOUT {
+            for (id, _) in &waiting {
+                with_app(|a| a.frame_signaled(*id, true));
+            }
+        }
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                return;
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
 }
 
 /// 表示用の子 HWND と、それに描くもの
@@ -568,6 +669,8 @@ struct Pane {
     needs_sync: bool,
     /// 描き直す必要がある
     needs_draw: bool,
+    /// 描こうとしたが、スワップチェーンが次のフレームをまだ受け付けない（知らせを待っている。T-068）
+    waiting_frame: bool,
 }
 
 impl Pane {
@@ -614,8 +717,6 @@ struct App {
     active: Option<i64>,
     /// 端末のウィンドウを選んでいるか（カーソルの塗りつぶしと IME の位置合わせ）
     selected: Option<i64>,
-    /// GPU デバイス（端末につき 1 つ。ペインで分け合う。T-067 の第一歩）
-    gpu: Option<Gpu>,
     font: FontSpec,
     narrow_wide: NarrowWide,
     /// いちばん下を追っているペインが見る render state（端末全体で 1 つ）。overscan でスクロールバックを補う
@@ -650,6 +751,65 @@ struct App {
     blink_ticks: u64,
     /// 前に描いたカーソルの位置（動いたら点滅をやり直して点ける）
     blink_pos: Option<(u16, u16)>,
+    /// 性能の測定（T-054）
+    perf: Perf,
+}
+
+/// UI スレッドの測定（T-054 / T-068）。`refresh` 1 回ごとと、ペインを 1 枚描くごと
+struct Perf {
+    /// 端末のロックを待った時間
+    lock_wait: Samples,
+    /// 端末のロックを持っていた時間（render state の更新・画像の写し・遡ったペインの写し）
+    lock_hold: Samples,
+    /// render state から `Frame` へ写した時間（ロックの外）
+    frame_update: Samples,
+    /// ペイン 1 枚の `BeginDraw` 〜 `EndDraw`
+    draw: Samples,
+    /// ペイン 1 枚の `Present`
+    present: Samples,
+    /// `refresh` 全体（下を追うペインを描いたときだけ）
+    refresh: Samples,
+    /// Lisp が頼みごとを積んでから UI スレッドが取り出すまで（UI スレッドがほかの仕事で塞がっている時間）
+    request_delay: Samples,
+    /// 入力から表示まで（[`LatencyProbe`]）: Lisp → UI スレッドが書いた / → エコーが端末に入った / → 描き終えた / 全体
+    input_ui: Samples,
+    input_echo: Samples,
+    input_draw: Samples,
+    input_total: Samples,
+}
+
+impl Perf {
+    fn new() -> Self {
+        Self {
+            lock_wait: Samples::new("ui.lock_wait"),
+            lock_hold: Samples::new("ui.lock_hold"),
+            frame_update: Samples::new("ui.frame_update"),
+            draw: Samples::new("ui.draw"),
+            present: Samples::new("ui.present"),
+            refresh: Samples::new("ui.refresh"),
+            request_delay: Samples::new("ui.request_delay"),
+            input_ui: Samples::new("input.to_ui"),
+            input_echo: Samples::new("input.to_echo"),
+            input_draw: Samples::new("input.to_drawn"),
+            input_total: Samples::new("input.total"),
+        }
+    }
+
+    fn all(&self) -> [&Samples; 11] {
+        [
+            &self.request_delay,
+            &self.lock_wait,
+            &self.lock_hold,
+            &self.frame_update,
+            &self.draw,
+            &self.present,
+            &self.refresh,
+            &self.input_ui,
+            &self.input_echo,
+            &self.input_draw,
+            &self.input_total,
+        ]
+    }
 }
 
 fn client_size(hwnd: HWND) -> (u32, u32) {
@@ -683,7 +843,6 @@ impl App {
             panes: Vec::new(),
             active: None,
             selected: None,
-            gpu: None,
             font,
             main_rs: RenderState::new().map_err(|e| e.to_string())?,
             main_overscan: 0,
@@ -704,6 +863,7 @@ impl App {
             blink_on: true,
             blink_ticks: 0,
             blink_pos: None,
+            perf: Perf::new(),
         })
     }
 
@@ -773,7 +933,9 @@ impl App {
     fn drain_requests(&mut self) {
         self.shared.request_posted.store(false, Ordering::Release);
         let requests = std::mem::take(&mut *self.shared.requests.lock().unwrap_or_else(|e| e.into_inner()));
-        for r in requests {
+        let now = Instant::now();
+        for (at, r) in requests {
+            self.perf.request_delay.add(now - at);
             self.apply(r);
         }
     }
@@ -916,6 +1078,9 @@ impl App {
                 }
                 let _ = reply.send(info);
             }
+            Request::Perf { reset, reply } => {
+                let _ = reply.send(self.perf_report(reset));
+            }
             Request::Close => self.close(),
         }
     }
@@ -977,11 +1142,21 @@ impl App {
         let weak: Weak<Shared> = Arc::downgrade(&self.shared);
         let notify = Arc::new(move |e: SessionEvent| match e {
             SessionEvent::Output => {
+                // 入力から表示までの測定: UI スレッドが書いたあとの最初の出力（エコー）
+                if let Some(s) = weak.upgrade() {
+                    let mut p = s.probe.lock().unwrap_or_else(|e| e.into_inner());
+                    if p.ui.is_some() && p.output.is_none() {
+                        p.output = Some(Instant::now());
+                    }
+                }
                 post(control, WM_APP_OUTPUT, 0);
             }
             // UI スレッドがもう終わっていても届くように、ここで書く（Weak: 端末 → notify → Shared の循環を作らない）
             SessionEvent::Closed => {
                 if let Some(s) = weak.upgrade() {
+                    if let Some(r) = s.session().and_then(|sess| sess.close_report()) {
+                        log(&format!("閉じた: {r}"));
+                    }
                     s.update(|st| st.closed = true);
                 }
             }
@@ -1034,6 +1209,11 @@ impl App {
                     log(&format!("注意: {w}"));
                 }
                 let _ = self.shared.session.set(s.clone());
+                {
+                    let mut all = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+                    all.retain(|w| w.strong_count() > 0);
+                    all.push(Arc::downgrade(&s));
+                }
                 // すでにフォーカスがあれば知らせる（ConPTY は 1004 を必ず求める。T-070）
                 if self.focused {
                     s.write(b"\x1b[I");
@@ -1086,19 +1266,16 @@ impl App {
         }
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
         let (cw, ch) = client_size(hwnd);
-        // GPU デバイスは端末につき 1 つ。最初のペインのときだけ作る（T-067 の第一歩）
-        if self.gpu.is_none() {
-            match Gpu::create() {
-                Ok(g) => self.gpu = Some(g),
-                Err(e) => {
-                    unsafe {
-                        let _ = DestroyWindow(hwnd);
-                    }
-                    return Err(format!("GPU デバイスを作れません: {e}"));
+        // GPU デバイスはプロセスで 1 つを分け合う（T-067）
+        let gpu = match Gpu::shared() {
+            Ok(g) => g,
+            Err(e) => {
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
                 }
+                return Err(format!("GPU デバイスを作れません: {e}"));
             }
-        }
-        let gpu = self.gpu.clone().expect("直前に作った");
+        };
         match Renderer::with_gpu(gpu, hwnd, cw.max(1), ch.max(1), dpi, self.font.clone()) {
             Ok(mut renderer) => {
                 renderer.theme.narrow_wide = self.narrow_wide;
@@ -1138,6 +1315,7 @@ impl App {
                 wheel: 0,
                 needs_sync: false,
                 needs_draw: true,
+                waiting_frame: false,
             });
             if self.active.is_none() {
                 self.active = Some(id);
@@ -1254,13 +1432,17 @@ impl App {
         self.check_views();
         self.sync_sizes();
         let Some(session) = self.session.clone() else { return };
+        let t_start = Instant::now();
         session.take_output();
         let output = std::mem::take(&mut self.output_pending);
         // （ペインの番号, そのペインに写した render state, ペインの先頭が `Frame` の何行目か）
         let mut synced: Vec<(usize, RenderState, i32)> = Vec::new();
         let hold;
+        let t_locked;
         {
             let mut term = session.lock();
+            t_locked = Instant::now();
+            self.perf.lock_wait.add(t_locked - t_start);
             // 同期出力（T-074）: hold の間はどのペインも写し直さない。hold の始まりの画面は読みのスレッドが写してある
             hold = term.render_hold(RENDER_HOLD_TIMEOUT);
             if let Some(rs) = term.take_held_render_state() {
@@ -1349,6 +1531,8 @@ impl App {
                 term.scroll_viewport(Scroll::Bottom);
             }
         }
+        let t_unlocked = Instant::now();
+        self.perf.lock_hold.add(t_unlocked - t_locked);
         // hold の時限が来たら描き直せるように、タイマーで起こす（出力が来なくなったアプリのとき）
         if let Some(rest) = hold {
             unsafe {
@@ -1363,18 +1547,70 @@ impl App {
             frame.top = top;
             p.needs_draw = true;
         }
+        self.perf.frame_update.add(t_unlocked.elapsed());
         self.publish_cursor();
         self.update_blink();
+        let mut drew_follow = false;
         for i in 0..self.panes.len() {
             let p = &self.panes[i];
             if !p.visible() {
                 continue;
             }
             let follows = p.follows(self.alt_screen);
-            if force || p.needs_draw || (follows && master_changed) {
-                self.draw_pane(i, None);
+            if (force || p.needs_draw || (follows && master_changed)) && self.draw_pane(i, None) {
+                drew_follow |= follows;
             }
         }
+        if drew_follow {
+            self.perf.refresh.add(t_start.elapsed());
+            self.finish_probe();
+        }
+    }
+
+    /// 入力から表示までの測定（T-054）: エコーが届いたあとで、下を追うペインを描き終えたら 1 件記録する
+    fn finish_probe(&mut self) {
+        let mut p = self.shared.probe.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(sent), Some(ui), Some(output)) = (p.sent, p.ui, p.output) {
+            let now = Instant::now();
+            self.perf.input_ui.add(ui - sent);
+            self.perf.input_echo.add(output - ui);
+            self.perf.input_draw.add(now - output);
+            self.perf.input_total.add(now - sent);
+            *p = LatencyProbe::default();
+        }
+    }
+
+    /// 測定の報告（T-054）
+    fn perf_report(&mut self, reset: bool) -> String {
+        let mut out = String::new();
+        for s in self.perf.all() {
+            out.push_str(&s.line());
+            out.push('\n');
+        }
+        if let Some(s) = &self.session {
+            out.push_str(&s.perf_report(reset));
+        }
+        let png = et_vt::png_decode_stats();
+        out.push_str(&format!(
+            "png.decode n={} total={:.1}ms max={:.1}ms last={:.1}ms last_pixels={}\n",
+            png.count,
+            png.total_us as f64 / 1000.0,
+            png.max_us as f64 / 1000.0,
+            png.last_us as f64 / 1000.0,
+            png.last_pixels
+        ));
+        let generations: Vec<u64> = self.panes.iter().filter_map(|p| p.view.as_ref().map(|v| v.renderer.gpu_generation())).collect();
+        out.push_str(&format!(
+            "gpu.live_devices={} generations={:?} panes={} visible={}\n",
+            et_render::live_devices(),
+            generations,
+            self.panes.len(),
+            self.panes.iter().filter(|p| p.visible()).count()
+        ));
+        if reset {
+            self.perf = Perf::new();
+        }
+        out
     }
 
     /// 点滅させるペイン（選んでいて、見えていて、下を追っていて、フォーカスがあり、カーソルが見えて点滅する）
@@ -1444,8 +1680,18 @@ impl App {
         }
         let view = self.follow_view(i);
         let focused = self.focused && self.selected == Some(self.panes[i].id);
-        let r = match self.panes[i].view.as_mut() {
-            Some(v) if unsafe { IsWindowVisible(v.hwnd) }.as_bool() => v.renderer.draw_blink(&self.master, &view, focused),
+        let pane = &mut self.panes[i];
+        let r = match pane.view.as_mut() {
+            Some(v) if unsafe { IsWindowVisible(v.hwnd) }.as_bool() => {
+                if v.renderer.try_acquire_frame() {
+                    v.renderer.draw_blink(&self.master, &view, focused)
+                } else {
+                    // フレームを受け付けるまで後回し（全体を描き直す）
+                    pane.needs_draw = true;
+                    pane.waiting_frame = true;
+                    Ok(())
+                }
+            }
             _ => Ok(()),
         };
         if let Err(e) = r {
@@ -1476,6 +1722,13 @@ impl App {
             if !unsafe { IsWindowVisible(v.hwnd) }.as_bool() && capture.is_none() {
                 return false;
             }
+            // 次のフレームを受け付けるまで描かない（Present で UI スレッドを止めない。T-068）。画面の保存はすぐ描く
+            if capture.is_none() && !v.renderer.try_acquire_frame() {
+                pane.needs_draw = true;
+                pane.waiting_frame = true;
+                return false;
+            }
+            pane.waiting_frame = false;
             let (cols, rows) = pane.grid;
             let result = if follows {
                 // 追っているペイン: 端末の下の端をペインの下の端に揃える（上に足りなければ空き）
@@ -1490,6 +1743,8 @@ impl App {
             };
             if result.is_ok() {
                 pane.needs_draw = false;
+                self.perf.draw.add(v.renderer.stats.last_draw);
+                self.perf.present.add(v.renderer.stats.last_present);
             }
             match result {
                 Ok(()) => true,
@@ -1506,22 +1761,60 @@ impl App {
         result
     }
 
-    /// デバイスが失われたら、端末の全ペインで新しいデバイスに載せ替える
+    /// デバイスが失われた（描いたペインの Renderer が分け合うデバイスを捨てて作り直した）。この端末の全ペインを新しいデバイスに
+    /// 載せ替え、ほかの端末にも知らせる（T-067。向こうは描く前にも世代の違いで気づく）
     fn rebuild_device(&mut self) {
-        match Gpu::create() {
-            Ok(g) => {
-                self.gpu = Some(g.clone());
-                for p in &mut self.panes {
-                    if let Some(v) = &mut p.view {
-                        if let Err(e) = v.renderer.adopt_gpu(g.clone()) {
-                            log(&format!("描画を作り直せません: {e}"));
-                        }
+        self.follow_device();
+        // 知らせるのは新しい世代ごとに 1 回だけ（作り直しに失敗し続けても、端末どうしで知らせ合い続けない）
+        static LAST_BROADCAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let g = et_render::current_generation();
+        if g != 0 && LAST_BROADCAST.swap(g, Ordering::AcqRel) != g {
+            broadcast_device_changed(self.control);
+        }
+    }
+
+    /// 分け合うデバイスが替わっていたら、全ペインを載せ替えて描き直す
+    fn follow_device(&mut self) {
+        for p in &mut self.panes {
+            if let Some(v) = &mut p.view {
+                match v.renderer.follow_shared_device() {
+                    Ok(true) => {
+                        log(&format!("ペイン {} を GPU デバイスの世代 {} に載せ替えた", p.id, v.renderer.gpu_generation()));
                         p.needs_draw = true;
                     }
+                    Ok(false) => {}
+                    Err(e) => log(&format!("GPU デバイスを作り直せません: {e}")),
                 }
             }
-            Err(e) => log(&format!("GPU デバイスを作り直せません: {e}")),
         }
+    }
+
+    /// いま描けるペインがあるか（見えていて、フレームの受け付けを待っていない）
+    fn can_draw_now(&self) -> bool {
+        self.panes.iter().any(|p| p.visible() && !p.waiting_frame)
+    }
+
+    /// フレームを受け付けるのを待っているペインの（番号, ハンドル）。メッセージのループが一緒に待つ（T-068）
+    fn waiting_frames(&self) -> Vec<(i64, HANDLE)> {
+        self.panes
+            .iter()
+            .filter(|p| p.waiting_frame && p.needs_draw && p.visible())
+            .filter_map(|p| p.view.as_ref().map(|v| (p.id, v.renderer.frame_waitable())))
+            .collect()
+    }
+
+    /// ペイン `id` のフレームを受け付けると知らされた（`timed_out` なら知らせが来ないまま時間切れで、受け付けを待たずに描く）
+    fn frame_signaled(&mut self, id: i64, timed_out: bool) {
+        if let Some(p) = self.pane_mut(id) {
+            p.waiting_frame = false;
+            if let Some(v) = &mut p.view {
+                v.renderer.set_frame_acquired();
+            }
+            if timed_out {
+                log(&format!("ペイン {id}: フレームの受け付けの知らせが来ないので待たずに描く"));
+            }
+        }
+        self.refresh(false);
     }
 
     fn publish_cursor(&self) {
@@ -1618,6 +1911,12 @@ impl App {
         let Some(s) = self.ensure_session() else { return };
         self.prepare_for_input(&s);
         s.write(data);
+        {
+            let mut p = self.shared.probe.lock().unwrap_or_else(|e| e.into_inner());
+            if p.sent.is_some() && p.ui.is_none() {
+                p.ui = Some(Instant::now());
+            }
+        }
         // 打ったらカーソルを点けて点滅をやり直す（次の update_blink でタイマーを掛け直す）
         if self.blink_timer && !self.blink_on {
             self.blink_on = true;
@@ -2137,10 +2436,20 @@ extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
         WM_APP_REQUEST => with_app(|a| a.drain_requests()).map(|_| LRESULT(0)),
         WM_APP_OUTPUT => with_app(|a| {
             a.output_pending = true;
-            a.refresh(false);
+            // 描けるペインが無い（見えていない・どれもフレームの受け付けを待っている）なら写さない。端末の「知らせを出した」印は
+            // 立てたままにして、読みのスレッドがもう知らせてこないようにする（ロックの取り合いと CPU を減らす。T-068）。
+            // 次に描けるようになったとき（フレームの受け付け・Place）の refresh がまとめて写す
+            if a.can_draw_now() {
+                a.refresh(false);
+            }
         })
         .map(|_| LRESULT(0)),
         WM_APP_SESSION => with_app(|a| a.session_changed()).map(|_| LRESULT(0)),
+        WM_APP_DEVICE => with_app(|a| {
+            a.follow_device();
+            a.refresh(true);
+        })
+        .map(|_| LRESULT(0)),
         WM_TIMER if wparam.0 == TIMER_RENDER_HOLD => {
             unsafe {
                 let _ = KillTimer(Some(hwnd), TIMER_RENDER_HOLD);

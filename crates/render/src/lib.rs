@@ -5,10 +5,14 @@
 //!
 //! 描き方の要点
 //! - 座標は物理ピクセル。セルは整数の画素に置く。DPI はフォントの大きさのほうに掛ける
-//! - 背景は、同じ色が続くセルをまとめて塗る
+//! - 背景は、セル 1 つを 1 画素にしたビットマップを最近傍で拡大して 1 回で描く（T-054。セルごとに塗ると色の細かい画面で重い）
 //! - 文字は 1 セルずつ決まった位置に置く（フォントの送り幅には頼らない）。主フォントが持つ文字は
-//!   同じ色・同じフェイスが続く範囲を 1 回の `DrawGlyphRun` にまとめる。持たない文字は DirectWrite の
+//!   （フェイス, 大きさ, 色）ごとに行をまたいでまとめ、位置はグリフのオフセットで渡して `DrawGlyphRun` にする
+//!   （1 回あたり `MAX_RUN_GLYPHS` まで。T-054）。持たない文字は DirectWrite の
 //!   レイアウトに任せる（システムのフォールバック、色付きの絵文字）
+//! - 描くたびに画面全体を描く（変わった行だけを描くことはしない。T-077 の測定で決めた）。
+//!   スワップチェーンは「次のフレームを受け付けるか」を待てる形（[`Renderer::try_acquire_frame`]。T-068）
+//! - GPU デバイスはプロセスで 1 つを分け合う（[`Gpu::shared`]。T-067）
 //! - **幅 2 のセルは 2 セル分**の枠に描く。**幅 1 と数えたのにグリフが広い文字（`①` `★` `※`）**は
 //!   [`NarrowWide`] で選ぶ（T-013）
 //!   - `Overlap`（既定）: 縮めずにセルの左端から描き、右隣へはみ出させる（WezTerm と同じ見え方）
@@ -38,13 +42,14 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::Result;
 use windows_numerics::{Matrix3x2, Vector2};
 
 pub use font::FontSpec;
 pub use frame::{Cell, Frame, ImagePixels, PLACEHOLDER, PlacedImage};
 pub use view::FrameView;
-pub use gpu::Gpu;
+pub use gpu::{Gpu, current_generation, live_devices};
 
 use font::{FontSet, fit_scale, style_index};
 use surface::Surface;
@@ -117,14 +122,19 @@ fn rect(l: f32, t: f32, r: f32, b: f32) -> D2D_RECT_F {
     D2D_RECT_F { left: l, top: t, right: r, bottom: b }
 }
 
-/// `DrawGlyphRun` にまとめる途中のグリフの並び
+/// 1 回の `DrawGlyphRun` にまとめるグリフの数の上限（T-054 の測定で決めた）。長い並びほど Direct2D の処理が
+/// 1 グリフあたりで重くなる（314x70 の画面で、2 万グリフを 1 回 → 170 ms、1024 ずつ → 20 ms、128 ずつ → 5〜7 ms）
+const MAX_RUN_GLYPHS: usize = 128;
+
+/// `DrawGlyphRun` にまとめる途中のグリフの並び（同じフェイス・大きさ・色。行をまたいでもよい）
 struct Run {
     face: usize,
     em: f32,
     color: Rgb,
-    origin_x: f32,
+    /// 最初のグリフの位置（ベースライン）。ほかのグリフはここからのオフセット
+    origin: (f32, f32),
     indices: Vec<u16>,
-    xs: Vec<f32>,
+    offsets: Vec<DWRITE_GLYPH_OFFSET>,
 }
 
 /// 行を描くときに一度決めたものの持ち回し
@@ -143,13 +153,17 @@ enum RowPass {
     Text,
 }
 
-/// 描いた回数（自動確認用）
+/// 描いた回数と、最後に描いたときの時間（自動確認・測定用。T-054 / T-068）
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DrawStats {
     /// 全体を描いた回数
     pub full: u64,
     /// カーソルのセルだけを描いた回数（点滅）
     pub partial: u64,
+    /// 最後の描画の `BeginDraw` から `EndDraw` まで（CPU で命令を組んで GPU に渡すまで）
+    pub last_draw: std::time::Duration,
+    /// 最後の `Present` にかかった時間（垂直同期を待つとここが延びる）
+    pub last_present: std::time::Duration,
 }
 
 /// HWND 1 枚に端末を描くもの
@@ -163,6 +177,10 @@ pub struct Renderer {
     brushes: HashMap<Rgb, ID2D1SolidColorBrush>,
     /// 画像の GPU のビットマップ（画像の世代が鍵。世代が変わると一覧から外れて捨てられる。デバイスと一緒に捨てる）
     bitmaps: HashMap<u64, ID2D1Bitmap1>,
+    /// 背景のビットマップ（セル 1 つが 1 画素。大きさ（桁, 行）ごと。デバイスと一緒に捨てる）
+    bg_bitmaps: Vec<((u32, u32), ID2D1Bitmap1)>,
+    /// 背景の画素の作業場所（描くたびに確保しない）
+    bg_pixels: Vec<u32>,
     pub theme: Theme,
     /// 点滅でカーソルのセルだけを描き直してよいか（2 枚のバッファが、カーソルのセルのほかは同じ中身）
     partial_ready: bool,
@@ -170,12 +188,12 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// `width` / `height` はクライアント領域の物理ピクセル、`dpi` はウィンドウの DPI
+    /// `width` / `height` はクライアント領域の物理ピクセル、`dpi` はウィンドウの DPI。デバイスはプロセスで分け合う（[`Gpu::shared`]）
     pub fn new(hwnd: HWND, width: u32, height: u32, dpi: u32, spec: FontSpec) -> Result<Self> {
-        Self::with_gpu(Gpu::create()?, hwnd, width, height, dpi, spec)
+        Self::with_gpu(Gpu::shared()?, hwnd, width, height, dpi, spec)
     }
 
-    /// デバイスを呼ぶ側と分け合って作る（端末の複数のペインで GPU デバイスを 1 つにする。T-067 の第一歩）
+    /// デバイスを渡して作る
     pub fn with_gpu(gpu: Gpu, hwnd: HWND, width: u32, height: u32, dpi: u32, spec: FontSpec) -> Result<Self> {
         let surface = Surface::new(&gpu, hwnd, width, height)?;
         let font = FontSet::new(&gpu.dwrite, &spec, dpi)?;
@@ -188,6 +206,8 @@ impl Renderer {
             dpi,
             brushes: HashMap::new(),
             bitmaps: HashMap::new(),
+            bg_bitmaps: Vec::new(),
+            bg_pixels: Vec::new(),
             theme: Theme::default(),
             partial_ready: false,
             stats: DrawStats::default(),
@@ -272,15 +292,47 @@ impl Renderer {
         Ok(b)
     }
 
-    /// デバイスを失ったあと、新しいデバイス（`Gpu`）に載せ替える（端末の全ペインで同じ `Gpu` を分け合うため）。
-    /// 失敗したら今のデバイスのまま
+    /// 次のフレームを受け付けるか（待たない。T-068）。true なら描いてよい（`Present` はほとんど待たない）。
+    /// false なら [`Renderer::frame_waitable`] が知らされるのを待ってから [`Renderer::set_frame_acquired`] して描く
+    pub fn try_acquire_frame(&mut self) -> bool {
+        self.surface.try_acquire()
+    }
+
+    /// 次のフレームを受け付けると知らせるハンドル（待つとセマフォを 1 つ取る。閉じない）
+    pub fn frame_waitable(&self) -> windows::Win32::Foundation::HANDLE {
+        self.surface.waitable()
+    }
+
+    /// 呼ぶ側が [`Renderer::frame_waitable`] を待って知らされた
+    pub fn set_frame_acquired(&mut self) {
+        self.surface.set_acquired();
+    }
+
+    /// ほかの誰かがデバイスを失って作り直していたら、新しいデバイスに載せ替える（T-067）。載せ替えたら true
+    pub fn follow_shared_device(&mut self) -> Result<bool> {
+        if self.gpu.is_current() {
+            return Ok(false);
+        }
+        self.adopt_gpu(Gpu::shared()?)?;
+        Ok(true)
+    }
+
+    /// 使っているデバイスの世代
+    pub fn gpu_generation(&self) -> u64 {
+        self.gpu.generation()
+    }
+
+    /// 新しいデバイス（`Gpu`）に載せ替える。失敗したら描けないままになり、次に描くときにまた作り直す
     pub fn adopt_gpu(&mut self, gpu: Gpu) -> Result<()> {
         let size = self.surface.size();
+        // 前のスワップチェーンを先に手放す（残っていると同じ HWND に作れない）
+        self.surface.release();
         let surface = Surface::new(&gpu, self.hwnd, size.0, size.1)?;
         self.gpu = gpu;
         self.surface = surface;
         self.brushes.clear();
         self.bitmaps.clear();
+        self.bg_bitmaps.clear();
         self.partial_ready = false;
         Ok(())
     }
@@ -294,11 +346,14 @@ impl Renderer {
     /// デバイスを失ったら作り直して、次の呼び出しで描けるようにする
     pub fn draw_view(&mut self, frame: &Frame, view: &FrameView, focused: bool, capture: Option<&Path>) -> Result<()> {
         // WM_SIZE の取りこぼしに備え、描く前にスワップチェーンの大きさを確かめるのは呼ぶ側（GenPreview §1.3 #1）
+        self.follow_shared_device()?;
         self.partial_ready = false;
         self.stats.full += 1;
+        let t0 = std::time::Instant::now();
         self.surface.begin();
         let r = self.draw_frame(frame, view, focused);
         let end = self.surface.end();
+        self.stats.last_draw = t0.elapsed();
         if let Err(e) = r.and(end) {
             self.recreate_device();
             return Err(e);
@@ -308,7 +363,10 @@ impl Renderer {
             let (data, pitch) = self.surface.read_back()?;
             png::write_bgra(path, w, h, &data, pitch).map_err(|e| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e.to_string()))?;
         }
-        if let Err(e) = self.surface.present() {
+        let t1 = std::time::Instant::now();
+        let presented = self.surface.present();
+        self.stats.last_present = t1.elapsed();
+        if let Err(e) = presented {
             self.recreate_device();
             return Err(e);
         }
@@ -321,7 +379,7 @@ impl Renderer {
     pub fn draw_blink(&mut self, frame: &Frame, view: &FrameView, focused: bool) -> Result<()> {
         let cols = (frame.cols as usize).min(view.cols as usize);
         let cell = self.cursor_cell(frame, view, cols);
-        let Some((cx, cy, span)) = cell.filter(|_| self.partial_ready && frame.images.is_empty()) else {
+        let Some((cx, cy, span)) = cell.filter(|_| self.partial_ready && frame.images.is_empty() && self.gpu.is_current()) else {
             self.draw_view(frame, view, focused, None)?;
             self.partial_ready = true;
             return Ok(());
@@ -368,16 +426,12 @@ impl Renderer {
         Some((x, py as u16, span))
     }
 
+    /// デバイスを失った。分け合っているデバイスを捨てて作り直し、載せ替える（ほかの端末は描く前に世代の違いで気づく。T-067）
     fn recreate_device(&mut self) {
         self.partial_ready = false;
-        let size = self.surface.size();
-        if let Ok(gpu) = Gpu::create()
-            && let Ok(surface) = Surface::new(&gpu, self.hwnd, size.0, size.1)
-        {
-            self.gpu = gpu;
-            self.surface = surface;
-            self.brushes.clear();
-            self.bitmaps.clear();
+        self.gpu.invalidate();
+        if let Ok(gpu) = Gpu::shared() {
+            let _ = self.adopt_gpu(gpu);
         }
     }
 
@@ -447,7 +501,51 @@ impl Renderer {
         Ok(())
     }
 
-    /// ビューの行を描く。`pass` で背景と文字のどちらか（画像を間に挟むとき）か、両方（ふつう）かを選ぶ
+    /// ビューの行 `y` が写すフレームの行。上や下に足りない行は `None`（背景のまま）
+    fn frame_row(frame: &Frame, view: &FrameView, y: u16) -> Option<u16> {
+        let fy = view.top + y as i32;
+        (0..frame.rows as i32).contains(&fy).then_some(fy as u16)
+    }
+
+    /// 1 行のセルの実際の前景・背景（反転・選択・塗りつぶしのカーソル・薄いを当てたもの）を `fgs` / `bgs` に入れる。
+    /// `y` はビューの行、`fy` はフレームの行
+    #[allow(clippy::too_many_arguments)]
+    fn row_colors(&self, frame: &Frame, row: &[Cell], fy: u16, y: u16, ctx: &RowContext, fgs: &mut [Rgb], bgs: &mut [Option<Rgb>]) {
+        let sel = frame.selection.get(fy as usize).copied().flatten();
+        for (x, c) in row.iter().enumerate() {
+            let mut fg = c.fg.unwrap_or(frame.foreground);
+            let mut bg = c.bg;
+            if c.style.inverse() {
+                let b = bg.unwrap_or(frame.background);
+                bg = Some(fg);
+                fg = b;
+            }
+            if let Some((s, e)) = sel
+                && (s as usize..=e as usize).contains(&x)
+            {
+                bg = Some(self.theme.selection_bg);
+                if let Some(f) = self.theme.selection_fg {
+                    fg = f;
+                }
+            }
+            if ctx.block_cursor
+                && let Some((cx, cy, span)) = ctx.cursor
+                && cy == y
+                && (cx as usize..cx as usize + span).contains(&x)
+            {
+                bg = Some(ctx.cursor_color);
+                fg = self.theme.cursor_text.unwrap_or(frame.background);
+            }
+            if c.style.faint() {
+                fg = blend(fg, bg.unwrap_or(frame.background), 0.5);
+            }
+            fgs[x] = fg;
+            bgs[x] = bg;
+        }
+    }
+
+    /// ビューの行を描く。`pass` で背景と文字のどちらか（画像を間に挟むとき）か、両方（ふつう）かを選ぶ。
+    /// 両方のときも、範囲の行の背景をすべて塗ってから文字を描く（文字は色ごとにまとめて描くため。T-008 / T-054）
     fn draw_rows(
         &mut self,
         dc: &ID2D1DeviceContext,
@@ -457,80 +555,98 @@ impl Renderer {
         pass: RowPass,
         rows: std::ops::Range<u16>,
     ) -> Result<()> {
+        if pass != RowPass::Text {
+            self.draw_backgrounds(dc, frame, view, ctx, rows.clone())?;
+        }
+        if pass != RowPass::Backgrounds {
+            self.draw_text(dc, frame, view, ctx, rows)?;
+        }
+        Ok(())
+    }
+
+    /// 背景を描く。セル 1 つを 1 画素にしたビットマップ（既定の背景のセルは透明）を作り、セルの大きさへ最近傍で拡大して 1 回で描く。
+    /// セルごとに `FillRectangle` すると、色が細かく変わる画面（314x70 でセルごとに色が違う）で 10 ms かかっていた（T-054）
+    fn draw_backgrounds(&mut self, dc: &ID2D1DeviceContext, frame: &Frame, view: &FrameView, ctx: &RowContext, rows: std::ops::Range<u16>) -> Result<()> {
+        let cols = ctx.cols;
+        let n = rows.len();
+        if cols == 0 || n == 0 {
+            return Ok(());
+        }
+        let mut fgs = vec![Rgb::default(); cols];
+        let mut bgs: Vec<Option<Rgb>> = vec![None; cols];
+        let mut px = std::mem::take(&mut self.bg_pixels);
+        px.clear();
+        px.resize(cols * n, 0);
+        let mut any = false;
+        for (i, y) in rows.clone().enumerate() {
+            let Some(fy) = Self::frame_row(frame, view, y) else { continue };
+            let row = &frame.row(fy)[..cols];
+            self.row_colors(frame, row, fy, y, ctx, &mut fgs, &mut bgs);
+            for (x, bg) in bgs.iter().enumerate() {
+                if let Some(c) = bg {
+                    // B8G8R8A8（リトルエンディアンの u32 で 0xAARRGGBB）、不透明
+                    px[i * cols + x] = 0xff00_0000 | (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32;
+                    any = true;
+                }
+            }
+        }
+        let r = if any { self.blit_backgrounds(dc, &px, cols, n, rows.start) } else { Ok(()) };
+        self.bg_pixels = px;
+        r
+    }
+
+    /// 背景のビットマップ（`cols` x `n` 画素）を `y0` 行目から描く
+    fn blit_backgrounds(&mut self, dc: &ID2D1DeviceContext, px: &[u32], cols: usize, n: usize, y0: u16) -> Result<()> {
+        let size = (cols as u32, n as u32);
+        let bitmap = match self.bg_bitmaps.iter().find(|(s, _)| *s == size) {
+            Some((_, b)) => b.clone(),
+            None => {
+                let props = D2D1_BITMAP_PROPERTIES1 {
+                    pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                    colorContext: std::mem::ManuallyDrop::new(None),
+                };
+                let b = unsafe { dc.CreateBitmap(D2D_SIZE_U { width: size.0, height: size.1 }, None, 0, &props)? };
+                // 全体（ペインの大きさ）と点滅（1 行）くらいしか使わないので、少しだけ覚える
+                if self.bg_bitmaps.len() >= 4 {
+                    self.bg_bitmaps.remove(0);
+                }
+                self.bg_bitmaps.push((size, b.clone()));
+                b
+            }
+        };
+        let (cw, ch) = (self.font.cell_w as f32, self.font.cell_h as f32);
+        let pad = self.padding() as f32;
+        let top = pad + y0 as f32 * ch;
+        let dest = rect(pad, top, pad + cols as f32 * cw, top + n as f32 * ch);
+        unsafe {
+            bitmap.CopyFromMemory(None, px.as_ptr().cast(), cols as u32 * 4)?;
+            dc.DrawBitmap(&bitmap, Some(&dest), 1.0, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None, None);
+        }
+        Ok(())
+    }
+
+    /// 文字と装飾（下線・取り消し線・上線）を描く。主フォントのグリフは（フェイス, 大きさ, 色）ごとに範囲の全部の行をまとめ、
+    /// グリフの位置はオフセットで渡して 1 回の `DrawGlyphRun` にする（セルごとに色が違う画面で 70 ms → 数 ms。T-054）。
+    /// 主フォントに無い文字（レイアウト）はその場で描く。装飾は文字の後
+    fn draw_text(&mut self, dc: &ID2D1DeviceContext, frame: &Frame, view: &FrameView, ctx: &RowContext, rows: std::ops::Range<u16>) -> Result<()> {
         let (cw, ch) = (self.font.cell_w as f32, self.font.cell_h as f32);
         let pad = self.padding() as f32;
         let cols = ctx.cols;
-        let (cursor, block_cursor, cursor_color) = (ctx.cursor, ctx.block_cursor, ctx.cursor_color);
         let mut fgs = vec![Rgb::default(); cols];
         let mut bgs: Vec<Option<Rgb>> = vec![None; cols];
         let mut text = String::new();
+        let mut runs: Vec<Run> = Vec::new();
+        let mut index: HashMap<(usize, u32, Rgb), usize> = HashMap::new();
 
-        for y in rows {
-            let fy = view.top + y as i32;
-            if fy < 0 || fy >= frame.rows as i32 {
-                continue; // 上や下に足りない行は空き（背景のまま）
-            }
-            let fy = fy as u16;
+        for y in rows.clone() {
+            let Some(fy) = Self::frame_row(frame, view, y) else { continue };
             let row = &frame.row(fy)[..cols];
             let top = pad + y as f32 * ch;
             let base_y = top + self.font.baseline;
-            let sel = frame.selection.get(fy as usize).copied().flatten();
-
-            // 1. セルごとの実際の前景・背景
-            for (x, c) in row.iter().enumerate() {
-                let mut fg = c.fg.unwrap_or(frame.foreground);
-                let mut bg = c.bg;
-                if c.style.inverse() {
-                    let b = bg.unwrap_or(frame.background);
-                    bg = Some(fg);
-                    fg = b;
-                }
-                if let Some((s, e)) = sel
-                    && (s as usize..=e as usize).contains(&x)
-                {
-                    bg = Some(self.theme.selection_bg);
-                    if let Some(f) = self.theme.selection_fg {
-                        fg = f;
-                    }
-                }
-                if block_cursor
-                    && let Some((cx, cy, span)) = cursor
-                    && cy == y
-                    && (cx as usize..cx as usize + span).contains(&x)
-                {
-                    bg = Some(cursor_color);
-                    fg = self.theme.cursor_text.unwrap_or(frame.background);
-                }
-                if c.style.faint() {
-                    fg = blend(fg, bg.unwrap_or(frame.background), 0.5);
-                }
-                fgs[x] = fg;
-                bgs[x] = bg;
-            }
-
-            // 2. 背景（同じ色が続くところをまとめて塗る）
-            if pass != RowPass::Text {
-                let mut x = 0;
-                while x < cols {
-                    let Some(bg) = bgs[x] else {
-                        x += 1;
-                        continue;
-                    };
-                    let start = x;
-                    while x < cols && bgs[x] == Some(bg) {
-                        x += 1;
-                    }
-                    let brush = self.brush(bg)?;
-                    let r = rect(pad + start as f32 * cw, top, pad + x as f32 * cw, top + ch);
-                    unsafe { dc.FillRectangle(&r, &brush) };
-                }
-            }
-            if pass == RowPass::Backgrounds {
-                continue;
-            }
-
-            // 3. 文字
-            let mut run: Option<Run> = None;
+            self.row_colors(frame, row, fy, y, ctx, &mut fgs, &mut bgs);
             for x in 0..cols {
                 let c = &row[x];
                 if matches!(c.wide, Wide::SpacerTail | Wide::SpacerHead) || c.is_blank() || c.style.invisible() || c.ch == PLACEHOLDER {
@@ -558,7 +674,7 @@ impl Renderer {
                     }
                 };
                 // 幅 1 のセルに広いグリフ。Overlap なら縮めず、セルの左端から右隣へはみ出させる
-                // （背景は手順 2 で先に塗ってあるので、はみ出した部分は隣のセルの上に重なる）
+                // （背景は先に塗ってあるので、はみ出した部分は隣のセルの上に重なる）
                 let overlap = span == 1 && advance > cw + 0.5 && self.theme.narrow_wide == NarrowWide::Overlap;
                 // 孤立した広いグリフは右隣の空白を借りて 2 セル分の枠にする
                 if span == 1
@@ -585,16 +701,21 @@ impl Renderer {
                 match glyph {
                     Some(g) => {
                         let em = self.font.em_px * scale;
-                        let same = run.as_ref().is_some_and(|r| r.face == si && r.em == em && r.color == fg);
-                        if !same {
-                            if let Some(r) = run.take() {
-                                self.flush_run(dc, r, base_y)?;
-                            }
-                            run = Some(Run { face: si, em, color: fg, origin_x: gx, indices: Vec::new(), xs: Vec::new() });
-                        }
-                        let r = run.as_mut().expect("直前に作った");
+                        let key = (si, em.to_bits(), fg);
+                        let i = *index.entry(key).or_insert_with(|| {
+                            runs.push(Run { face: si, em, color: fg, origin: (gx, base_y), indices: Vec::new(), offsets: Vec::new() });
+                            runs.len() - 1
+                        });
+                        let r = &mut runs[i];
                         r.indices.push(g.index);
-                        r.xs.push(gx);
+                        // 送り幅は 0 にして、位置はすべてオフセットで決める（上向きが正）
+                        r.offsets.push(DWRITE_GLYPH_OFFSET { advanceOffset: gx - r.origin.0, ascenderOffset: r.origin.1 - base_y });
+                        // 1 つの並びが長すぎると Direct2D が遅くなる（2 万グリフで 1 回 170 ms）ので、溜まったら描いて次を始める
+                        if r.indices.len() >= MAX_RUN_GLYPHS {
+                            let full = std::mem::replace(r, Run { face: si, em, color: fg, origin: (gx, base_y), indices: Vec::new(), offsets: Vec::new() });
+                            self.flush_run(dc, full)?;
+                            index.remove(&key);
+                        }
                     }
                     None => {
                         let brush = self.brush(fg)?;
@@ -612,11 +733,21 @@ impl Renderer {
                     }
                 }
             }
-            if let Some(r) = run.take() {
-                self.flush_run(dc, r, base_y)?;
-            }
+        }
+        for r in runs {
+            self.flush_run(dc, r)?;
+        }
 
-            // 4. 下線・取り消し線・上線（placeholder の下線の色は配置の ID で、線としては描かない）
+        // 下線・取り消し線・上線（placeholder の下線の色は配置の ID で、線としては描かない）
+        for y in rows {
+            let Some(fy) = Self::frame_row(frame, view, y) else { continue };
+            let row = &frame.row(fy)[..cols];
+            if !row.iter().any(|c| c.underline() != Underline::None || c.style.strikethrough() || c.style.overline()) {
+                continue;
+            }
+            let top = pad + y as f32 * ch;
+            let base_y = top + self.font.baseline;
+            self.row_colors(frame, row, fy, y, ctx, &mut fgs, &mut bgs);
             for x in 0..cols {
                 let c = &row[x];
                 let ul = c.underline();
@@ -674,25 +805,24 @@ impl Renderer {
         Ok(())
     }
 
-    fn flush_run(&mut self, dc: &ID2D1DeviceContext, r: Run, base_y: f32) -> Result<()> {
+    fn flush_run(&mut self, dc: &ID2D1DeviceContext, r: Run) -> Result<()> {
         if r.indices.is_empty() {
             return Ok(());
         }
         let brush = self.brush(r.color)?;
-        let mut advances: Vec<f32> = r.xs.windows(2).map(|w| w[1] - w[0]).collect();
-        advances.push(0.0);
+        let advances = vec![0.0f32; r.indices.len()];
         let run = DWRITE_GLYPH_RUN {
             fontFace: std::mem::ManuallyDrop::new(Some(self.font.faces[r.face].clone())),
             fontEmSize: r.em,
             glyphCount: r.indices.len() as u32,
             glyphIndices: r.indices.as_ptr(),
             glyphAdvances: advances.as_ptr(),
-            glyphOffsets: std::ptr::null(),
+            glyphOffsets: r.offsets.as_ptr(),
             isSideways: false.into(),
             bidiLevel: 0,
         };
         unsafe {
-            dc.DrawGlyphRun(Vector2 { X: r.origin_x, Y: base_y }, &run, None, &brush, DWRITE_MEASURING_MODE_NATURAL);
+            dc.DrawGlyphRun(Vector2 { X: r.origin.0, Y: r.origin.1 }, &run, None, &brush, DWRITE_MEASURING_MODE_NATURAL);
         }
         // ManuallyDrop の中のフェイスの参照を戻す
         drop(std::mem::ManuallyDrop::into_inner(run.fontFace));

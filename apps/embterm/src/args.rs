@@ -4,7 +4,7 @@
 //! embterm.exe [--conpty-dir DIR | --system-conpty] [--font NAME] [--font-size PT] [--narrow-wide shrink|overlap] [--cols N --rows N] [--cwd DIR]
 //!             [--input STR]... [--input-delay MS] [--input-interval MS]
 //!             [--select C1,R1,C2,R2] [--resize C,R] [--resize-after MS] [--scroll-up N] [--screenshot PNG] [--screenshot-after MS] [--exit-after MS]
-//!             [--log FILE] [-- コマンド 引数...]
+//!             [--log FILE] [--perf] [--exit-on-exit] [-- コマンド 引数...]
 //! ```
 //!
 //! `--input` 以降は自動で確かめるためのもの（人手なしで「起動 → 打つ → 画面を PNG に → 閉じる」）。
@@ -39,6 +39,10 @@ pub struct Args {
     pub screenshot_after: Option<u32>,
     pub exit_after: Option<u32>,
     pub log: Option<PathBuf>,
+    /// 終わるときに性能の測定（T-054）をログに書く
+    pub perf: bool,
+    /// 子プロセスが終わったらウィンドウを閉じる（`cat` の所要時間の測定用。T-054）
+    pub exit_on_exit: bool,
     /// 起動するコマンド。空なら cmd.exe
     pub command: Vec<OsString>,
 }
@@ -46,7 +50,7 @@ pub struct Args {
 pub const USAGE: &str = "使い方: embterm.exe [--conpty-dir DIR | --system-conpty] [--font NAME] [--font-size PT] [--narrow-wide shrink|overlap] [--cols N --rows N] [--cwd DIR]
                    [--input STR]... [--input-delay MS] [--input-interval MS]
                    [--select C1,R1,C2,R2] [--resize C,R] [--resize-after MS] [--scroll-up N] [--screenshot PNG] [--screenshot-after MS] [--exit-after MS]
-                   [--log FILE] [-- コマンド 引数...]
+                   [--log FILE] [--perf] [--exit-on-exit] [-- コマンド 引数...]
   --input の文字列は \\r \\n \\t \\e（ESC） \\\\ \\xHH \\u{HHHH} を解釈する";
 
 /// `\r` `\n` `\t` `\e` `\\` `\xHH`（ASCII） `\u{H..}` を解釈して UTF-8 のバイト列にする。知らないものはそのまま残す
@@ -120,6 +124,8 @@ pub fn parse(mut it: impl Iterator<Item = OsString>) -> Result<Args, String> {
             "--screenshot-after" => a.screenshot_after = Some(num("--screenshot-after", val())?),
             "--exit-after" => a.exit_after = Some(num("--exit-after", val())?),
             "--log" => a.log = Some(val().ok_or("--log に値が要る")?.into()),
+            "--perf" => a.perf = true,
+            "--exit-on-exit" => a.exit_on_exit = true,
             "--select" => {
                 let v = val().ok_or("--select に値が要る")?;
                 let n: Vec<u16> = v.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>().map_err(|_| format!("--select の値: {v}"))?;

@@ -5,22 +5,45 @@
 //!   座標を物理ピクセルで扱う（フォントの大きさのほうを DPI で拡大する）
 //! - 描いた直後の後ろのバッファを CPU で読めるビットマップに写せる（デバッグ用の画面の保存）
 //! - 描き終える（`end`）と画面に出す（`present`）を分けた
+//! - **待てるスワップチェーン**（`FRAME_LATENCY_WAITABLE_OBJECT`、最大の遅れ 1 フレーム。T-068）。`Present(1)` は
+//!   前のフレームが画面に出るまで UI スレッドを止めていた（出力が続くと 1 回 16 ms）。今は描く前に [`Surface::try_acquire`] で
+//!   「次のフレームを受け付けるか」を待たずに確かめ、まだなら描かずに後回しにする（呼ぶ側がハンドル [`Surface::waitable`] を
+//!   メッセージと一緒に待つ）。受け付けたあとの `Present` はほとんど待たない
 
-use windows::Win32::Foundation::{E_FAIL, HWND};
+use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, HWND, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::core::{Interface, Result};
 
 use crate::gpu::Gpu;
 
+/// スワップチェーンの作り方の印（作るときと `ResizeBuffers` で同じものを渡す）
+const SWAP_FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
 pub struct Surface {
     pub dc: ID2D1DeviceContext,
-    swapchain: IDXGISwapChain1,
+    gpu: Gpu,
+    /// [`Surface::release`] したら `None`
+    swapchain: Option<IDXGISwapChain1>,
     target: Option<ID2D1Bitmap1>,
     /// バッファの大きさ（物理ピクセル）
     size: (u32, u32),
+    /// 次のフレームを受け付けると知らされたら立つ（`waitable` のセマフォを 1 つ取った）。`present` で落とす
+    waitable: HANDLE,
+    acquired: bool,
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        if !self.waitable.is_invalid() && !self.waitable.0.is_null() {
+            unsafe {
+                let _ = CloseHandle(self.waitable);
+            }
+        }
+    }
 }
 
 fn bitmap_props(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
@@ -50,24 +73,55 @@ impl Surface {
                 Scaling: DXGI_SCALING_NONE,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
                 AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-                Flags: 0,
+                Flags: SWAP_FLAGS.0 as u32,
                 ..Default::default()
             };
-            let swapchain = factory.CreateSwapChainForHwnd(&gpu.d3d, hwnd, &desc, None, None)?;
+            // スワップチェーン（D3D の即時コンテキスト）に触るところは、デバイスを分け合うほかの端末と排他にする（T-067）
+            let (swapchain, waitable) = {
+                let _g = gpu.lock();
+                let swapchain = factory.CreateSwapChainForHwnd(&gpu.d3d, hwnd, &desc, None, None)?;
+                let sc2: IDXGISwapChain2 = swapchain.cast()?;
+                sc2.SetMaximumFrameLatency(1)?;
+                (swapchain, sc2.GetFrameLatencyWaitableObject())
+            };
             // Alt+Enter での全画面化は要らない
             let _ = factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
             let dc = gpu.create_dc()?;
             dc.SetDpi(96.0, 96.0);
             dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-            let mut s = Self { dc, swapchain, target: None, size: (width.max(1), height.max(1)) };
+            let mut s =
+                Self { dc, gpu: gpu.clone(), swapchain: Some(swapchain), target: None, size: (width.max(1), height.max(1)), waitable, acquired: false };
             s.create_target()?;
             Ok(s)
         }
     }
 
+    fn swapchain(&self) -> Result<&IDXGISwapChain1> {
+        self.swapchain.as_ref().ok_or_else(|| windows::core::Error::from(E_FAIL))
+    }
+
+    /// スワップチェーンを手放す（別のデバイスで作り直す前に。HWND に結び付くフリップモデルのスワップチェーンは 1 つだけで、
+    /// 前のものが残っていると `CreateSwapChainForHwnd` が E_ACCESSDENIED になる。T-067）。以後この `Surface` には描けない
+    pub fn release(&mut self) {
+        unsafe { self.dc.SetTarget(None) };
+        self.target = None;
+        if let Some(sc) = self.swapchain.take() {
+            let _g = self.gpu.lock();
+            drop(sc);
+            // スワップチェーンの破棄は遅らせて行われるので、Direct2D が持つ資源を手放し、即時コンテキストを空にして流す
+            unsafe {
+                self.gpu.d2d.ClearResources(0);
+                if let Ok(ctx) = self.gpu.d3d.GetImmediateContext() {
+                    ctx.ClearState();
+                    ctx.Flush();
+                }
+            }
+        }
+    }
+
     fn create_target(&mut self) -> Result<()> {
         unsafe {
-            let buffer: IDXGISurface = self.swapchain.GetBuffer(0)?;
+            let buffer: IDXGISurface = self.swapchain()?.GetBuffer(0)?;
             let props = bitmap_props(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW);
             let target = self.dc.CreateBitmapFromDxgiSurface(&buffer, Some(&props))?;
             self.dc.SetTarget(&target);
@@ -85,7 +139,8 @@ impl Surface {
         unsafe {
             self.dc.SetTarget(None);
             self.target = None;
-            self.swapchain.ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))?;
+            let _g = self.gpu.lock();
+            self.swapchain()?.ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, SWAP_FLAGS)?;
             self.size = (w, h);
         }
         self.create_target()
@@ -105,9 +160,31 @@ impl Surface {
         unsafe { self.dc.EndDraw(None, None) }
     }
 
-    /// 画面に出す。`Present(1)` は垂直同期を 1 回待つ（UI スレッドが最大 1 フレーム止まる。T-068 で測る）
-    pub fn present(&self) -> Result<()> {
-        unsafe { self.swapchain.Present(1, DXGI_PRESENT(0)).ok() }
+    /// 次のフレームを受け付けるか（待たない）。受け付けるなら true で、続けて描いて `present` してよい。
+    /// false なら [`Surface::waitable`] が知らされるまで描くのを後回しにする（そのときは [`Surface::set_acquired`]）
+    pub fn try_acquire(&mut self) -> bool {
+        if !self.acquired && unsafe { WaitForSingleObject(self.waitable, 0) } == WAIT_OBJECT_0 {
+            self.acquired = true;
+        }
+        self.acquired
+    }
+
+    /// 呼ぶ側が `waitable` を待って知らされた（セマフォを 1 つ取った）
+    pub fn set_acquired(&mut self) {
+        self.acquired = true;
+    }
+
+    /// 次のフレームを受け付けると知らせるハンドル（セマフォ。待つと 1 つ取る）。持ち主はこの `Surface`
+    pub fn waitable(&self) -> HANDLE {
+        self.waitable
+    }
+
+    /// 画面に出す（垂直同期に合わせる）。`try_acquire` で受け付けを確かめてから呼べば、ほとんど待たない
+    /// （確かめずに呼ぶと前のフレームが出るまで待つ。T-068）
+    pub fn present(&mut self) -> Result<()> {
+        let _g = self.gpu.lock();
+        self.acquired = false;
+        unsafe { self.swapchain()?.Present(1, DXGI_PRESENT(0)).ok() }
     }
 
     /// 描き終えた後ろのバッファを読む（`end` のあと `present` の前に呼ぶ）。BGRA の画素と 1 行のバイト数を返す

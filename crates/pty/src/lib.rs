@@ -8,9 +8,16 @@
 //! - パイプは名前付きパイプで、こちら側の端だけ overlapped にする（読みのキャンセルと待ち合わせのため）
 //! - 子は `STARTF_USESTDHANDLES`（ハンドルは NULL）+ `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` で起動する。
 //!   親の標準入出力がリダイレクトされていても子に継がせないため
-//! - 子は Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）に入れ、孫まで束ねる。ghostel には無い（T-007）
+//! - 子は Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）に入れ、孫まで束ねる。ghostel には無い（T-007）。
+//!   抜け出しを許す印（`BREAKAWAY_OK` / `SILENT_BREAKAWAY_OK`）は付けない（子孫を残さない。T-073）
+//! - **パッケージのアプリ（MSIX。Microsoft Store の pwsh など）が起こす子は、既定では Job の外に作られる**
+//!   （デスクトップアプリの実行環境から抜ける既定の決まり）。子を作るときに `PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY` で
+//!   木全体のその抜け出しを止める（T-073）。それでも、子孫が「アプリの実行エイリアス」でパッケージのアプリを起こすと
+//!   （cmd の中で `pwsh` と打つ）、システムが代わりにプロセスを作るので Job の外になる → 閉じるときに親子関係で辿って止める
 //! - 読みのスレッドは子のハンドルも待ち、子が終わったら `ClosePseudoConsole` を別スレッドで呼んで
 //!   EOF まで読む（古い Windows では `ClosePseudoConsole` が出力を吐き切るまで戻らないため）。待ちは時限付き
+//! - 閉じる（[`Pty::close`]）ときは「まず穏やかに、時限を過ぎたら Job ごと」: `ClosePseudoConsole` で中のアプリに
+//!   CTRL_CLOSE_EVENT を送り、子・Job の中・Job の外の子孫がすべて終わるのを猶予まで待ち、過ぎたら止める（T-076）
 //! - 書きは専用のスレッドがチャネルで受ける。端末の応答（libghostty-vt の `write_pty`）もここへ積む
 //!
 //! unsafe はこのクレートの中に閉じ込める。
@@ -36,6 +43,10 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE};
 use windows::Win32::System::Threading::*;
 use windows::core::{HRESULT, HSTRING, PCWSTR, PWSTR, s, w};
+
+/// `PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY` の値（winbase.h。windows クレートに無い）: 作るプロセスとその子孫が起こす子を、
+/// デスクトップアプリ（MSIX）の実行環境の中に作る（T-073）
+const PROCESS_CREATION_DESKTOP_APP_BREAKAWAY_DISABLE_PROCESS_TREE: u32 = 0x02;
 
 /// 読みの 1 回の大きさ（ghostel と同じ 64 KiB）
 const READ_BUFFER: usize = 64 * 1024;
@@ -252,6 +263,49 @@ impl Console {
     }
 }
 
+/// こちらから閉じるときの段取り（[`Pty::close`] が決めて、読みのスレッドが従う。T-076）
+#[derive(Default)]
+struct CloseParams {
+    /// 閉じ始めた時刻
+    started: Option<Instant>,
+    /// 穏やかに終わるのを待つ時間。過ぎたら Job ごと止める
+    grace: Duration,
+    /// 閉じ始めたときに見つけた、Job の外にいる子孫（親子関係で辿った。T-073）
+    outside: Vec<Handle>,
+    /// 段取りの記録（読みのスレッドが書く）
+    report: CloseReport,
+}
+
+/// 閉じたときの段取りの記録（T-076 の調べ用）。時間は閉じ始めてから
+#[derive(Clone, Debug, Default)]
+pub struct CloseReport {
+    /// `ClosePseudoConsole` が戻った（中のアプリに CTRL_CLOSE_EVENT を送り、conhost が終わった）
+    pub console_closed: Option<Duration>,
+    /// 出力を EOF まで読み終えた
+    pub eof: Option<Duration>,
+    /// 子と Job の中のプロセス（と Job の外の子孫）がすべて終わった。時限を過ぎたら `None`
+    pub all_exited: Option<Duration>,
+    /// 時限を過ぎて止めたプロセスの数（Job の中 + 外）
+    pub forced: usize,
+    /// 閉じ始めたときに Job の外にいた子孫の数
+    pub outside: usize,
+}
+
+impl std::fmt::Display for CloseReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ms = |d: Option<Duration>| d.map_or("-".to_string(), |d| format!("{} ms", d.as_millis()));
+        write!(
+            f,
+            "ClosePseudoConsole の戻り {} / EOF {} / 全員の終了 {} / Job の外の子孫 {} / 強制終了 {}",
+            ms(self.console_closed),
+            ms(self.eof),
+            ms(self.all_exited),
+            self.outside,
+            self.forced
+        )
+    }
+}
+
 /// ConPTY で動いている子プロセス 1 つ
 pub struct Pty {
     console: Arc<Console>,
@@ -264,11 +318,12 @@ pub struct Pty {
     writer_thread: Option<JoinHandle<()>>,
     /// 読みのスレッドが終わったら値が届く
     reader_done: Receiver<()>,
+    close_params: Arc<Mutex<CloseParams>>,
     warnings: Vec<String>,
 }
 
 /// プロセスの木の子孫の PID を求める（T-069 の KKP の安全策）。`root` は含めない。失敗すれば空。
-/// pwsh が起こす native command は Job から抜けることがある（T-073）ので、Job ではなく親子関係で求める
+/// Job から抜けたプロセス（パッケージのアプリを実行エイリアスで起こしたものなど。T-073）も含めたいので、Job ではなく親子関係で求める
 pub fn descendant_pids(root: u32) -> Vec<u32> {
     let mut edges = Vec::new();
     unsafe {
@@ -295,6 +350,51 @@ pub fn descendant_pids(root: u32) -> Vec<u32> {
         }
     }
     result
+}
+
+/// 子と子孫のプロセスを「名前(PID)」で並べる。Job に入っていないものには `!` を付ける（T-073 の調べ用）
+pub fn describe_tree(root: u32, job: &[u32]) -> String {
+    let mut names = std::collections::HashMap::new();
+    unsafe {
+        if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            let snap = Handle(snap);
+            let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+            if Process32FirstW(snap.0, &mut e).is_ok() {
+                loop {
+                    let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                    names.insert(e.th32ProcessID, String::from_utf16_lossy(&e.szExeFile[..n]));
+                    if Process32NextW(snap.0, &mut e).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    std::iter::once(root)
+        .chain(descendant_pids(root))
+        .map(|p| format!("{}({p}){}", names.get(&p).map_or("?", |s| s.as_str()), if job.contains(&p) { "" } else { "!" }))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Job に入っているプロセスの ID
+fn job_pids(job: &Handle) -> Vec<u32> {
+    // JOBOBJECT_BASIC_PROCESS_ID_LIST: 割り当て数・入っている数（u32 x 2）のあとに ULONG_PTR の配列
+    let mut buf = vec![0usize; 2 + 1024];
+    let ok = unsafe {
+        QueryInformationJobObject(
+            Some(job.0),
+            JobObjectBasicProcessIdList,
+            buf.as_mut_ptr() as *mut c_void,
+            (buf.len() * std::mem::size_of::<usize>()) as u32,
+            None,
+        )
+    };
+    if ok.is_err() {
+        return Vec::new();
+    }
+    let count = (buf[0] >> 32) as usize; // NumberOfProcessIdsInList（2 つ目の u32）
+    buf[1..1 + count.min(1024)].iter().map(|&p| p as u32).collect()
 }
 
 /// プロセスの組を見張る（[`ProcessWatch::new`]）
@@ -487,11 +587,12 @@ impl Pty {
 
         // 読みのスレッド
         let (done_tx, reader_done) = mpsc::channel();
+        let close_params = Arc::new(Mutex::new(CloseParams::default()));
         let reader = {
-            let (console, stop, job) = (console.clone(), stop.clone(), job.clone());
+            let (console, stop, job, params) = (console.clone(), stop.clone(), job.clone(), close_params.clone());
             thread::Builder::new().name("pty-read".into()).spawn(move || {
                 let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    read_loop(&out_read, &process, &stop, &console, &job, &mut on_output)
+                    read_loop(&out_read, &process, &stop, &console, &job, &params, &mut on_output)
                 }))
                 .unwrap_or(ExitStatus { code: None, closed_by_us: false });
                 drop(out_read);
@@ -510,6 +611,7 @@ impl Pty {
             reader: Some(reader),
             writer_thread: Some(writer_thread),
             reader_done,
+            close_params,
             warnings,
         })
     }
@@ -539,30 +641,55 @@ impl Pty {
         self.writer.write(data)
     }
 
+    /// Job に入っているプロセスの ID（T-073 の調べ用）。取れなければ空
+    pub fn job_pids(&self) -> Vec<u32> {
+        job_pids(&self.job)
+    }
+
     /// 擬似コンソールの大きさを変える（ピクセルは渡さない）
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         self.console.resize(cols, rows)
     }
 
-    /// 閉じる。読みのスレッドに止まるよう知らせ、`ClosePseudoConsole` → EOF まで読む、を `timeout` まで待つ。
-    /// 間に合わなければ Job ごと子を止めて、スレッドは置いていく
-    pub fn close(&mut self, timeout: Duration) {
+    /// 閉じる（T-076）。**最大 `grace` + 2 秒待つので、UI スレッドや Lisp のスレッドでは呼ばない**（et-session は別のスレッドで呼ぶ）。
+    ///
+    /// 1. Job の外にいる子孫（Job から抜けたもの。T-073）を、まだ親子関係で辿れるうちに控える
+    /// 2. `ClosePseudoConsole` で中のアプリに CTRL_CLOSE_EVENT を送り（端末を閉じたときの知らせ。Windows Terminal と同じ）、EOF まで読む
+    /// 3. 子・Job の中・控えた子孫がすべて終わるのを `grace` まで待つ（穏やかに終わる猶予）
+    /// 4. 過ぎたら Job ごと止め、控えた子孫も止める
+    pub fn close(&mut self, grace: Duration) -> CloseReport {
+        {
+            let mut p = self.close_params.lock().unwrap_or_else(|e| e.into_inner());
+            if p.started.is_none() {
+                let job = job_pids(&self.job);
+                p.outside = descendant_pids(self.pid)
+                    .into_iter()
+                    .filter(|pid| !job.contains(pid))
+                    .filter_map(|pid| unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid) }.ok().map(Handle))
+                    .collect();
+                p.report.outside = p.outside.len();
+                p.grace = grace;
+                p.started = Some(Instant::now());
+            }
+        }
         unsafe {
             let _ = SetEvent(self.stop.0);
         }
         let _ = self.writer.tx.send(WriteMsg::Stop);
         if let Some(r) = self.reader.take() {
-            if self.reader_done.recv_timeout(timeout).is_ok() {
+            // 読みのスレッドが段取りを済ませる。ClosePseudoConsole が戻らないなどで間に合わなければ、ここで止める
+            if self.reader_done.recv_timeout(grace + Duration::from_secs(2)).is_ok() {
                 let _ = r.join();
             } else {
-                unsafe {
-                    let _ = TerminateJobObject(self.job.0, 1);
-                }
+                let mut p = self.close_params.lock().unwrap_or_else(|e| e.into_inner());
+                let outside = std::mem::take(&mut p.outside);
+                p.report.forced += force_kill(&self.job, &outside);
             }
         }
         if let Some(w) = self.writer_thread.take() {
             let _ = w.join();
         }
+        self.close_params.lock().unwrap_or_else(|e| e.into_inner()).report.clone()
     }
 }
 
@@ -572,16 +699,35 @@ impl Drop for Pty {
     }
 }
 
+/// Job の中と `outside` のプロセスのうち、まだ動いているものの数
+fn alive_count(job: &Handle, outside: &[Handle]) -> usize {
+    job_pids(job).len() + outside.iter().filter(|h| unsafe { WaitForSingleObject(h.0, 0) } != WAIT_OBJECT_0).count()
+}
+
+/// Job ごと止め、`outside` のプロセスも止める。止めた数を返す
+fn force_kill(job: &Handle, outside: &[Handle]) -> usize {
+    let n = alive_count(job, outside);
+    unsafe {
+        let _ = TerminateJobObject(job.0, 1);
+        for h in outside {
+            if WaitForSingleObject(h.0, 0) != WAIT_OBJECT_0 {
+                let _ = TerminateProcess(h.0, 1);
+            }
+        }
+    }
+    n
+}
+
 fn spawn_child(opts: &PtyOptions, hpc: HPCON, job: &Handle, warnings: &mut Vec<String>) -> Result<Handle> {
     let mut cmdline = command_line(&opts.argv);
     let env = environment_block(&opts.env);
     let cwd = opts.cwd.as_ref().map(|p| HSTRING::from(p.as_os_str()));
     unsafe {
         let mut size = 0usize;
-        let _ = InitializeProcThreadAttributeList(None, 1, None, &mut size);
+        let _ = InitializeProcThreadAttributeList(None, 2, None, &mut size);
         let mut attr_buf = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
         let list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut c_void);
-        InitializeProcThreadAttributeList(Some(list), 1, None, &mut size).map_err(win_err)?;
+        InitializeProcThreadAttributeList(Some(list), 2, None, &mut size).map_err(win_err)?;
         struct AttrList(LPPROC_THREAD_ATTRIBUTE_LIST);
         impl Drop for AttrList {
             fn drop(&mut self) {
@@ -599,6 +745,20 @@ fn spawn_child(opts: &PtyOptions, hpc: HPCON, job: &Handle, warnings: &mut Vec<S
             None,
         )
         .map_err(win_err)?;
+        // T-073: パッケージのアプリ（Microsoft Store の pwsh など、MSIX）が起こす子は、既定では「デスクトップアプリの実行環境の外」に
+        // 作られ、そのとき Job からも抜ける。子孫の木全体でそれをやめさせる（子孫に引き継がれる）。古い Windows で使えなければ諦める
+        let desktop_app_policy: u32 = PROCESS_CREATION_DESKTOP_APP_BREAKAWAY_DISABLE_PROCESS_TREE;
+        if let Err(e) = UpdateProcThreadAttribute(
+            list,
+            0,
+            PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY as usize,
+            Some(&desktop_app_policy as *const u32 as *const c_void),
+            std::mem::size_of::<u32>(),
+            None,
+            None,
+        ) {
+            warnings.push(format!("DESKTOP_APP_POLICY を設定できません（パッケージのアプリの子が Job から抜けうる）: {e}"));
+        }
 
         let mut si = STARTUPINFOEXW::default();
         si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
@@ -675,6 +835,7 @@ fn read_loop(
     stop: &Handle,
     console: &Console,
     job: &Handle,
+    params: &Mutex<CloseParams>,
     on_output: &mut dyn FnMut(&[u8]),
 ) -> ExitStatus {
     let Ok(ev) = (unsafe { CreateEventW(None, true, false, PCWSTR::null()) }) else {
@@ -698,12 +859,31 @@ fn read_loop(
         }
     }
     let closed_by_us = unsafe { WaitForSingleObject(stop.0, 0) } == WAIT_OBJECT_0;
+    // こちらから閉じたときは Pty::close の段取り（猶予）に従う。子が自分で終わったときは、残りの出力を読むだけ（3 秒まで）
+    let (t0, grace) = {
+        let p = params.lock().unwrap_or_else(|e| e.into_inner());
+        match (closed_by_us, p.started) {
+            (true, Some(t)) => (t, p.grace),
+            _ => (Instant::now(), Duration::from_secs(3)),
+        }
+    };
+    let deadline = t0 + grace;
+    let mut report = CloseReport::default();
 
-    // 2. ClosePseudoConsole を別スレッドで呼び、EOF まで読む（時限付き）。
-    //    こちらから閉じたときは、閉じてから残りの出力を受け流すだけ
-    let closer = console.start_close();
+    // 2. ClosePseudoConsole を別スレッドで呼び（中のアプリに CTRL_CLOSE_EVENT が届く）、EOF まで読む（時限付き）。
+    //    古い Windows の ClosePseudoConsole は出力を吐き切るまで戻らないので、読みながら待つ
+    let closed_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let closer = console.start_close().and_then(|c| {
+        let closed_at = closed_at.clone();
+        thread::Builder::new()
+            .name("conpty-close-wait".into())
+            .spawn(move || {
+                let _ = c.join();
+                *closed_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            })
+            .ok()
+    });
     if !eof {
-        let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -711,7 +891,10 @@ fn read_loop(
             }
             match read_once(pipe, &event, &mut buf, &[], left.as_millis() as u32) {
                 ReadResult::Data(n) => on_output(&buf[..n]),
-                ReadResult::Eof => break,
+                ReadResult::Eof => {
+                    eof = true;
+                    break;
+                }
                 ReadResult::Interrupted(n) => {
                     on_output(&buf[..n]);
                     break;
@@ -719,27 +902,50 @@ fn read_loop(
             }
         }
     }
-    if let Some(c) = closer {
-        // ClosePseudoConsole が戻らないことがあるので、待つのは少しだけ
-        let (tx, rx) = mpsc::channel();
-        let _ = thread::Builder::new().name("conpty-close-wait".into()).spawn(move || {
-            let _ = c.join();
-            let _ = tx.send(());
-        });
-        let _ = rx.recv_timeout(Duration::from_secs(2));
+    if eof {
+        report.eof = Some(t0.elapsed());
     }
 
-    // 3. 子がまだ動いていれば（こちらから閉じたとき）少し待ち、だめなら Job ごと止める
+    // 3. こちらから閉じたとき: 子・Job の中・Job の外の子孫がすべて終わるのを猶予まで待ち、過ぎたら止める。
+    //    子が自分で終わったとき: 子が終わったのを確かめるだけ（Job に残ったものは Pty を落とすときに Job ごと止まる）
+    let outside: Vec<Handle> =
+        if closed_by_us { std::mem::take(&mut params.lock().unwrap_or_else(|e| e.into_inner()).outside) } else { Vec::new() };
+    loop {
+        let child_done = unsafe { WaitForSingleObject(process.0, 0) } == WAIT_OBJECT_0;
+        if child_done && (!closed_by_us || alive_count(job, &outside) == 0) {
+            report.all_exited = Some(t0.elapsed());
+            break;
+        }
+        if Instant::now() >= deadline {
+            report.forced = force_kill(job, &outside);
+            unsafe {
+                let _ = WaitForSingleObject(process.0, 1000);
+            }
+            break;
+        }
+        unsafe {
+            let _ = WaitForSingleObject(process.0, 20);
+        }
+    }
+    // ClosePseudoConsole は戻らないことがあるので、待つのは少しだけ
+    if let Some(c) = closer {
+        let until = Instant::now() + Duration::from_millis(500);
+        while !c.is_finished() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    report.console_closed = closed_at.lock().unwrap_or_else(|e| e.into_inner()).map(|t| t.saturating_duration_since(t0));
     let mut code = None;
     unsafe {
-        if WaitForSingleObject(process.0, 2000) != WAIT_OBJECT_0 {
-            let _ = TerminateJobObject(job.0, 1);
-            let _ = WaitForSingleObject(process.0, 1000);
-        }
         let mut c = 0u32;
         if GetExitCodeProcess(process.0, &mut c).is_ok() && c != STILL_ACTIVE.0 as u32 {
             code = Some(c);
         }
+    }
+    if closed_by_us {
+        let mut p = params.lock().unwrap_or_else(|e| e.into_inner());
+        let outside = p.report.outside;
+        p.report = CloseReport { outside, ..report };
     }
     ExitStatus { code, closed_by_us }
 }

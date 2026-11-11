@@ -45,7 +45,7 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub use png::install_png_decoder;
+pub use png::{PngDecodeStats, install_png_decoder, png_decode_stats};
 
 fn check(r: ffi::GhosttyResult) -> Result<()> {
     if r == ffi::GHOSTTY_SUCCESS { Ok(()) } else { Err(Error(r)) }

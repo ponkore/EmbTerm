@@ -7,6 +7,8 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Once;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::*;
@@ -22,6 +24,35 @@ pub fn install_png_decoder() {
         let f: ffi::GhosttySysDecodePngFn = decode_png;
         unsafe { ffi::ghostty_sys_set(ffi::GHOSTTY_SYS_OPT_DECODE_PNG, f as *const c_void) };
     });
+}
+
+/// デコードの回数・時間の合計と最大（マイクロ秒）・最後の画素数（T-096 の測定）
+static DECODE_COUNT: AtomicU64 = AtomicU64::new(0);
+static DECODE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static DECODE_MAX_US: AtomicU64 = AtomicU64::new(0);
+static DECODE_LAST_US: AtomicU64 = AtomicU64::new(0);
+static DECODE_LAST_PIXELS: AtomicU64 = AtomicU64::new(0);
+
+/// PNG のデコードの測定（[`png_decode_stats`]）
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PngDecodeStats {
+    pub count: u64,
+    pub total_us: u64,
+    pub max_us: u64,
+    pub last_us: u64,
+    /// 最後にデコードした画像の画素数（幅 x 高さ）
+    pub last_pixels: u64,
+}
+
+/// プロセス全体の PNG のデコードの回数と時間（T-096。デコードは端末のロックの中で走る）
+pub fn png_decode_stats() -> PngDecodeStats {
+    PngDecodeStats {
+        count: DECODE_COUNT.load(Ordering::Relaxed),
+        total_us: DECODE_TOTAL_US.load(Ordering::Relaxed),
+        max_us: DECODE_MAX_US.load(Ordering::Relaxed),
+        last_us: DECODE_LAST_US.load(Ordering::Relaxed),
+        last_pixels: DECODE_LAST_PIXELS.load(Ordering::Relaxed),
+    }
 }
 
 /// `CoInitializeEx` の対。その呼び出しが成功したときだけ `CoUninitialize` する
@@ -45,7 +76,17 @@ unsafe extern "C" fn decode_png(
     catch_unwind(AssertUnwindSafe(|| unsafe {
         let Some(out) = out.as_mut() else { return false };
         let bytes = std::slice::from_raw_parts(data, data_len);
-        decode(bytes, allocator, out).is_ok()
+        let t0 = Instant::now();
+        let ok = decode(bytes, allocator, out).is_ok();
+        let us = t0.elapsed().as_micros() as u64;
+        DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        DECODE_TOTAL_US.fetch_add(us, Ordering::Relaxed);
+        DECODE_MAX_US.fetch_max(us, Ordering::Relaxed);
+        DECODE_LAST_US.store(us, Ordering::Relaxed);
+        if ok {
+            DECODE_LAST_PIXELS.store(out.width as u64 * out.height as u64, Ordering::Relaxed);
+        }
+        ok
     }))
     .unwrap_or(false)
 }

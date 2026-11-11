@@ -16,13 +16,14 @@
 //!   許すかは [`Session::set_clipboard_policy`]（読みのスレッドで、ロックを持ったまま判断するので `AtomicBool`）
 
 pub mod keys;
+pub mod perf;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use et_pty::{ConptyKind, ExitStatus, ProcessWatch, Pty, PtyOptions, PtyWriter};
 use et_vt::{CursorShape, Effects, KeyEncoder, Mode, ProgressState, Rgb, Terminal};
@@ -57,8 +58,9 @@ pub type Notify = Arc<dyn Fn(Event) + Send + Sync>;
 /// Kitty graphics の画像を置ける量（バイト。画面ごと）。libghostty-vt の既定は 10 MB で、大きな画像 1 枚で埋まる（T-088）
 pub const KITTY_IMAGE_STORAGE_LIMIT: u64 = 128 * 1024 * 1024;
 
-/// 端末を閉じるときに後始末を待つ時間（ClosePseudoConsole → EOF。過ぎたら Job ごと止める）
-pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+/// 端末を閉じるときに、中のアプリが穏やかに終わるのを待つ時間（ClosePseudoConsole の CTRL_CLOSE_EVENT → 終了。過ぎたら Job ごと止める。T-076）。
+/// Windows がコンソールのアプリの CTRL_CLOSE_EVENT の処理を待つのは 5 秒なので、それに合わせる
+pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct SessionOptions {
     pub argv: Vec<OsString>,
@@ -275,6 +277,23 @@ struct Shared {
     kkp_owners: Mutex<Option<ProcessWatch>>,
     bytes_seen: AtomicUsize,
     exit: Mutex<Option<ExitStatus>>,
+    /// 読みのスレッドの測定（T-054）
+    perf: Mutex<ReadPerf>,
+}
+
+/// 読みのスレッドの測定（T-054 / T-096）。読み 1 回ごとに、端末のロックを待った時間と `vt_write` の時間
+struct ReadPerf {
+    lock_wait: perf::Samples,
+    vt_write: perf::Samples,
+    bytes: u64,
+    first: Option<Instant>,
+    last: Option<Instant>,
+}
+
+impl ReadPerf {
+    const fn new() -> Self {
+        Self { lock_wait: perf::Samples::new("read.lock_wait"), vt_write: perf::Samples::new("read.vt_write"), bytes: 0, first: None, last: None }
+    }
 }
 
 /// 閉じる処理の待ち合わせ。待たなくてよい（終わると [`Event::Closed`] も届く）
@@ -305,6 +324,8 @@ pub struct Session {
     pid: u32,
     warnings: Vec<String>,
     notify: Notify,
+    /// 閉じたときの段取りの記録（T-076）
+    close_report: Arc<Mutex<Option<String>>>,
 }
 
 impl Session {
@@ -351,6 +372,7 @@ impl Session {
             kkp_owners: Mutex::new(None),
             bytes_seen: AtomicUsize::new(0),
             exit: Mutex::new(None),
+            perf: Mutex::new(ReadPerf::new()),
         });
 
         let pty_opts = PtyOptions {
@@ -376,11 +398,21 @@ impl Session {
                 {
                     shared.saw_da1.store(true, Ordering::Relaxed);
                 }
-                let flags = {
+                let t0 = Instant::now();
+                let (flags, t1, t2) = {
                     let mut t = shared.term.lock().unwrap_or_else(|e| e.into_inner());
+                    let t1 = Instant::now();
                     t.vt_write(data);
-                    t.kitty_keyboard_flags()
+                    (t.kitty_keyboard_flags(), t1, Instant::now())
                 };
+                {
+                    let mut p = shared.perf.lock().unwrap_or_else(|e| e.into_inner());
+                    p.lock_wait.add(t1 - t0);
+                    p.vt_write.add(t2 - t1);
+                    p.bytes += data.len() as u64;
+                    p.first.get_or_insert(t0);
+                    p.last = Some(t2);
+                }
                 // KKP が有効になったときにいたプロセスを覚える（T-069）
                 let on = flags != 0;
                 if on != shared.kkp_on.load(Ordering::Relaxed) {
@@ -408,7 +440,19 @@ impl Session {
         let kind = pty.kind().clone();
         let pid = pty.pid();
         let warnings = pty.warnings().to_vec();
-        Ok(Session { shared, title, pwd, clipboard_write, writer, pty: Mutex::new(Some(pty)), kind, pid, warnings, notify })
+        Ok(Session {
+            shared,
+            title,
+            pwd,
+            clipboard_write,
+            writer,
+            pty: Mutex::new(Some(pty)),
+            kind,
+            pid,
+            warnings,
+            notify,
+            close_report: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// 既定の色を変える（T-034。アプリが OSC で変えた色はそのまま）
@@ -525,22 +569,67 @@ impl Session {
         self.pid
     }
 
+    /// 子プロセスの木と Job の中身（T-073 の調べ用）。Job に入っていないものに `!` が付く
+    pub fn process_report(&self) -> String {
+        let job = self.pty.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|p| p.job_pids()).unwrap_or_default();
+        format!("木: {} / Job: {job:?}", et_pty::describe_tree(self.pid, &job))
+    }
+
+    /// 読みのスレッドの測定の報告（T-054）。`reset` なら報告のあと消す。行ごとに 1 項目
+    pub fn perf_report(&self, reset: bool) -> String {
+        let mut p = self.shared.perf.lock().unwrap_or_else(|e| e.into_inner());
+        let span = match (p.first, p.last) {
+            (Some(a), Some(b)) => (b - a).as_secs_f64(),
+            _ => 0.0,
+        };
+        let mb = p.bytes as f64 / (1024.0 * 1024.0);
+        let report = format!(
+            "{}
+{}
+read.bytes={} ({:.2} MiB) span={:.3}s rate={:.2} MiB/s
+",
+            p.lock_wait.line(),
+            p.vt_write.line(),
+            p.bytes,
+            mb,
+            span,
+            if span > 0.0 { mb / span } else { 0.0 }
+        );
+        if reset {
+            *p = ReadPerf::new();
+        }
+        report
+    }
+
     /// 閉じているか（[`Session::close`] を呼んだあと）
     pub fn is_closed(&self) -> bool {
         self.pty.lock().unwrap_or_else(|e| e.into_inner()).is_none()
     }
 
-    /// 閉じる（T-076）。**待たない。** ClosePseudoConsole → EOF まで読む → 子が残っていれば Job ごと止める、を
-    /// 別のスレッドで行い（時限 [`CLOSE_TIMEOUT`]）、終わったら [`Event::Closed`] を知らせる。
-    /// 待ちたいときは戻り値の [`Closing::wait`]。2 回目以降は何もしない（すぐ終わった扱いの `Closing`）
+    /// 閉じたときの段取りの記録（[`et_pty::CloseReport`]。閉じ終わるまでは `None`）
+    pub fn close_report(&self) -> Option<String> {
+        self.close_report.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// 閉じる（T-076）。**待たない。** 別のスレッドで、ClosePseudoConsole（中のアプリに CTRL_CLOSE_EVENT）→ EOF まで読む →
+    /// アプリが穏やかに終わるのを [`CLOSE_TIMEOUT`] まで待つ → 残っていれば Job ごと（と Job の外の子孫も）止める、を行い、
+    /// 終わったら [`Event::Closed`] を知らせる。待ちたいときは戻り値の [`Closing::wait`]。2 回目以降は何もしない（すぐ終わった扱いの `Closing`）
     pub fn close(&self) -> Closing {
+        self.close_with(CLOSE_TIMEOUT)
+    }
+
+    /// [`Session::close`] の猶予を `grace` にしたもの（Emacs を終えるときは短くする。T-076）
+    pub fn close_with(&self, grace: Duration) -> Closing {
         let Some(mut pty) = self.pty.lock().unwrap_or_else(|e| e.into_inner()).take() else {
             return Closing { done: None };
         };
         let (tx, rx) = mpsc::channel();
         let notify = self.notify.clone();
+        let report = self.close_report.clone();
         let spawned = std::thread::Builder::new().name("session-close".into()).spawn(move || {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pty.close(CLOSE_TIMEOUT)));
+            if let Ok(r) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pty.close(grace))) {
+                *report.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.to_string());
+            }
             drop(pty);
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify(Event::Closed)));
             let _ = tx.send(());

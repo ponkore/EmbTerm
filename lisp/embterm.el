@@ -67,6 +67,7 @@
 (declare-function embterm-module-focus "embterm-module")
 (declare-function embterm-module-screenshot "embterm-module")
 (declare-function embterm-module-close "embterm-module")
+(declare-function embterm-module-shutdown "embterm-module")
 (declare-function embterm-module-poll "embterm-module")
 (declare-function embterm-module-cursor "embterm-module")
 (declare-function embterm-module-text "embterm-module")
@@ -146,6 +147,12 @@ tr-ime advanced（`tr-ime-modadv--set-composition-window'）があるときだ�
 (defcustom embterm-kill-buffer-on-exit t
   "non-nil なら、プロセスが終わったら端末のバッファを消す。"
   :type 'boolean)
+
+(defcustom embterm-kill-emacs-timeout 0.5
+  "Emacs を終えるとき、端末の中のアプリが穏やかに終わるのを待つ秒数。
+アプリに端末を閉じたこと（CTRL_CLOSE_EVENT）を知らせ、この秒数まで待ってから残ったものを止める。
+その間は Emacs の終了が待たされる。0 なら待たずに止める（アプリは知らせを受けずに止まる）。"
+  :type 'number)
 
 (defcustom embterm-buffer-name-format "*embterm: %s*"
   "タイトル（OSC 0 / 2）をバッファ名にするときの書式。nil ならバッファ名を変えない。
@@ -513,6 +520,10 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
   (setq embterm--buffers (delq (current-buffer) embterm--buffers)))
 
 (defun embterm--close-all ()
+  "Emacs を終えるときに、すべての端末を閉じる（`kill-emacs-hook'）。
+`embterm-kill-emacs-timeout' 秒までアプリが穏やかに終わるのを待つ（T-076）。"
+  (when (and embterm--module-loaded (fboundp 'embterm-module-shutdown) (> embterm-kill-emacs-timeout 0))
+    (ignore-errors (embterm-module-shutdown (round (* 1000 embterm-kill-emacs-timeout)))))
   (dolist (buf (copy-sequence (embterm--live-buffers)))
     (with-current-buffer buf
       (embterm--close))))

@@ -15,6 +15,7 @@ use et_vt::{Key, KeyEncoder, MouseAction, MouseButton, MouseEncoder, MouseGeomet
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::INFINITE;
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
@@ -25,6 +26,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 use crate::args::Args;
 use crate::log;
 use et_session::keys::{KeyEvent, KeyPhase, KeyProtocol};
+use et_session::perf::Samples;
 use et_session::{Event, Session, SessionOptions, keys};
 
 const CLASS: PCWSTR = w!("EmbTermWindow");
@@ -82,6 +84,12 @@ struct App {
     scroll_up: Option<u16>,
     screenshot: Option<PathBuf>,
     base_title: String,
+    /// 子プロセスが終わったら閉じる（T-054）
+    exit_on_exit: bool,
+    /// 描こうとしたが、スワップチェーンが次のフレームをまだ受け付けない（知らせを待っている。T-068）
+    waiting_frame: bool,
+    /// 測定（T-054）: 端末のロックを待った / 持った時間、ペインを描いた時間、Present の時間
+    perf: [Samples; 4],
 }
 
 /// lParam のスキャンコード（`WM_KEYDOWN` など）
@@ -116,6 +124,28 @@ fn set_client_size(hwnd: HWND, w: u32, h: u32) {
         let mut r = RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
         let _ = AdjustWindowRectExForDpi(&mut r, style, false, ex, dpi);
         let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// ウィンドウの状態（T-097 の調べ用）: 最大化などの表示の状態、ウィンドウの矩形、前面のウィンドウのプロセス
+fn window_state(hwnd: HWND) -> String {
+    unsafe {
+        let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        let _ = GetWindowPlacement(hwnd, &mut wp);
+        let mut r = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut r);
+        let mut fg_pid = 0u32;
+        let fg = GetForegroundWindow();
+        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        format!(
+            " / 表示 {} / 矩形 ({},{})-({},{}) / 前面 pid {fg_pid}{}",
+            wp.showCmd,
+            r.left,
+            r.top,
+            r.right,
+            r.bottom,
+            if fg == hwnd { "（自分）" } else { "" }
+        )
     }
 }
 
@@ -263,6 +293,9 @@ pub fn run(args: Args) -> Result<(), String> {
         scroll_up: args.scroll_up,
         screenshot: args.screenshot.clone(),
         base_title,
+        exit_on_exit: args.exit_on_exit,
+        waiting_frame: false,
+        perf: [Samples::new("ui.lock_wait"), Samples::new("ui.lock_hold"), Samples::new("ui.draw"), Samples::new("ui.present")],
     };
     APP.with(|a| *a.borrow_mut() = Some(app));
 
@@ -288,16 +321,20 @@ pub fn run(args: Args) -> Result<(), String> {
     }
     with_app(|a| a.refresh(false));
 
-    let mut msg = MSG::default();
-    unsafe {
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
+    message_loop();
     // ウィンドウを閉じたあと。PTY を閉じる（ClosePseudoConsole → EOF → Job で子を止める。時限付き）
     let app = APP.with(|a| a.borrow_mut().take());
     if let Some(app) = app {
+        if args.perf {
+            for s in &app.perf {
+                log(&format!("perf {}", s.line()));
+            }
+            for l in app.session.perf_report(false).lines() {
+                log(&format!("perf {l}"));
+            }
+            let png = et_vt::png_decode_stats();
+            log(&format!("perf png.decode n={} max={:.1}ms last_pixels={}", png.count, png.max_us as f64 / 1000.0, png.last_pixels));
+        }
         let pwd = app.session.pwd();
         if !pwd.is_empty() {
             log(&format!("最後のカレントディレクトリ（OSC 7 など）: {pwd}"));
@@ -306,9 +343,39 @@ pub fn run(args: Args) -> Result<(), String> {
         if !app.session.close().wait(et_session::CLOSE_TIMEOUT + std::time::Duration::from_secs(3)) {
             log("PTY の後始末が時間内に終わらなかった");
         }
+        if let Some(r) = app.session.close_report() {
+            log(&format!("閉じた: {r}"));
+        }
         log("終了");
     }
     Ok(())
+}
+
+/// メッセージのループ。描くのを待っているときはスワップチェーンの知らせも一緒に待つ（T-068。module と同じ）
+fn message_loop() {
+    let mut msg = MSG::default();
+    loop {
+        let waiting = with_app(|a| a.waiting_frame.then(|| a.renderer.frame_waitable())).flatten();
+        let handles: Vec<HANDLE> = waiting.into_iter().collect();
+        let timeout = if handles.is_empty() { INFINITE } else { 250 };
+        let r = unsafe { MsgWaitForMultipleObjectsEx(Some(&handles), timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE) };
+        if !handles.is_empty() && (r == WAIT_OBJECT_0 || r == WAIT_TIMEOUT) {
+            with_app(|a| {
+                a.waiting_frame = false;
+                a.renderer.set_frame_acquired();
+                a.refresh(true);
+            });
+        }
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                return;
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
 }
 
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
@@ -320,8 +387,11 @@ impl App {
     fn refresh(&mut self, force: bool) {
         self.sync_size();
         self.session.take_output();
+        let t0 = std::time::Instant::now();
         let hold = {
             let mut term = self.session.lock();
+            let t1 = std::time::Instant::now();
+            self.perf[0].add(t1 - t0);
             // 同期出力（T-074）: hold の間は写し直さない。hold の始まりの画面は読みのスレッドが写してある
             let hold = term.render_hold(RENDER_HOLD_TIMEOUT);
             if let Some(rs) = term.take_held_render_state() {
@@ -333,6 +403,7 @@ impl App {
             }
             // 画像の画素は render state に無いので、端末のロックの中で写す（T-088）
             self.frame.capture_images(&mut self.rs, &term);
+            self.perf[1].add(t1.elapsed());
             hold
         };
         // hold の時限が来たら描き直せるように、タイマーで起こす
@@ -348,8 +419,17 @@ impl App {
     }
 
     fn draw(&mut self, capture: Option<&std::path::Path>) {
+        // 次のフレームを受け付けるまで描かない（Present で止まらない。T-068）。画面の保存はすぐ描く
+        if capture.is_none() && !self.renderer.try_acquire_frame() {
+            self.waiting_frame = true;
+            return;
+        }
+        self.waiting_frame = false;
         if let Err(e) = self.renderer.draw(&self.frame, self.focused, capture) {
             log(&format!("描画に失敗（デバイスを作り直した）: {e}"));
+        } else {
+            self.perf[2].add(self.renderer.stats.last_draw);
+            self.perf[3].add(self.renderer.stats.last_present);
         }
     }
 
@@ -368,7 +448,7 @@ impl App {
             self.grid = grid;
             self.cell = cell;
             self.session.resize(grid.0, grid.1, cell);
-            log(&format!("リサイズ: {}x{}（セル {}x{} px）", grid.0, grid.1, cell.0, cell.1));
+            log(&format!("リサイズ: {}x{}（セル {}x{} px）{}", grid.0, grid.1, cell.0, cell.1, window_state(self.hwnd)));
         }
     }
 
@@ -626,6 +706,7 @@ impl App {
             }
             TIMER_EXIT => unsafe {
                 let _ = KillTimer(Some(self.hwnd), TIMER_EXIT);
+                log(&format!("閉じる前のプロセス: {}", self.session.process_report()));
                 log("--exit-after で閉じる");
                 let _ = DestroyWindow(self.hwnd);
             },
@@ -664,6 +745,8 @@ impl App {
     /// メッセージを処理する。`None` なら DefWindowProc に任せる
     fn handle(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
+            // フレームの受け付けを待っている間は写さない（知らせの印は立てたままにして、読みのスレッドに知らせさせない。T-068）
+            WM_APP_OUTPUT if self.waiting_frame => {}
             WM_APP_OUTPUT => self.refresh(false),
             WM_APP_TITLE => self.update_title(),
             WM_APP_EXITED => {
@@ -671,8 +754,18 @@ impl App {
                 log(&format!("子プロセスが終わった: {s:?}"));
                 self.refresh(false);
                 self.update_title();
+                if self.exit_on_exit {
+                    log("--exit-on-exit で閉じる");
+                    unsafe {
+                        let _ = DestroyWindow(self.hwnd);
+                    }
+                }
             }
             WM_SIZE => {
+                // T-097 の調べ: 最大化・元に戻すの知らせ
+                if wparam.0 as u32 == SIZE_MAXIMIZED {
+                    log(&format!("WM_SIZE: 最大化された{}", window_state(self.hwnd)));
+                }
                 if wparam.0 as u32 != SIZE_MINIMIZED {
                     self.refresh(true);
                 }
@@ -765,6 +858,14 @@ impl App {
                 let _ = ReleaseCapture();
             },
             WM_TIMER => self.timer(wparam.0),
+            WM_SYSCOMMAND => {
+                // T-097 の調べ: 最大化・元に戻す・移動の命令（タイトルバーのダブルクリック、Win+↑ など）を記録して、処理は任せる
+                let cmd = (wparam.0 & 0xfff0) as u32;
+                if matches!(cmd, SC_MAXIMIZE | SC_RESTORE | SC_SIZE | SC_MOVE) {
+                    log(&format!("WM_SYSCOMMAND 0x{cmd:x}{}", window_state(self.hwnd)));
+                }
+                return None;
+            }
             _ => return None,
         }
         Some(LRESULT(0))

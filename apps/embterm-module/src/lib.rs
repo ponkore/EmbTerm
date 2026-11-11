@@ -369,6 +369,45 @@ fn debug_info<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
     env.list(&items)
 }
 
+/// 性能の測定の報告（T-054。UI スレッドに頼んで最大 2 秒待つ。デバッグ・測定用）。RESET が non-nil なら報告のあと消す。
+/// 1 行に 1 項目の文字列（`名前 n=件数 mean= p50= p90= p99= max=`、単位は ms）
+#[defun]
+fn perf(term: &RefCell<Term>, reset: Value<'_>) -> Result<Option<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    term.borrow().request(Request::Perf { reset: reset.is_not_nil(), reply: tx });
+    Ok(rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+}
+
+/// いま生きている GPU デバイスの数（プロセス全体。T-054 / T-067 の確認用）
+#[defun]
+fn gpu_devices() -> Result<i64> {
+    Ok(et_render::live_devices() as i64)
+}
+
+/// Emacs を終えるとき（`kill-emacs-hook'）に全部の端末を閉じる（T-076）。**最大 GRACE-MS + 300 ミリ秒待つ。**
+/// アプリに CTRL_CLOSE_EVENT を送って GRACE-MS まで穏やかに終わるのを待ち、過ぎたら Job ごと（Job の外の子孫も）止める。
+/// 戻り値は (時間内に閉じ終えた数 . 端末の数)
+#[defun]
+fn shutdown<'e>(env: &'e Env, grace_ms: i64) -> Result<Value<'e>> {
+    let (done, total) = term::shutdown(std::time::Duration::from_millis(grace_ms.max(0) as u64));
+    env.cons(done as i64, total as i64)
+}
+
+/// 子プロセスの木と Job の中身（デバッグ・自動確認用。T-073）。`名前(PID)` を空白区切りで並べ、Job に入っていないものに `!` が付く。
+/// まだ起動していなければ nil
+#[defun]
+fn process_report(term: &RefCell<Term>) -> Result<Option<String>> {
+    Ok(term.borrow().shared().session().map(|s| s.process_report()))
+}
+
+/// GPU デバイスを失ったことにする（デバッグ・自動確認用。T-067）。分け合うデバイスを捨て、開いている全部の端末に
+/// 新しいデバイスへ載せ替えさせる
+#[defun]
+fn debug_lose_device() -> Result<()> {
+    term::debug_lose_device();
+    Ok(())
+}
+
 /// フォーカスの出入りを知らせる（FLAG が non-nil なら入った）
 #[defun]
 fn focus(term: &RefCell<Term>, flag: Value<'_>) -> Result<()> {
