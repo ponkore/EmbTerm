@@ -1836,9 +1836,14 @@ extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
 }
 
 extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    // クリックされてもフォーカスを取らない（キーは Emacs が受ける）。App を見る前に返す
+    // クリックされてもフォーカスを取らない（キーは Emacs が受ける）。App を見る前に返す。
+    // ただしフレームが前面にないときは MA_ACTIVATE を返し、OS にトップレベルのフレームを前面にさせる
+    // （他のアプリから戻るクリックで Emacs にフォーカスが入らない問題への対処）。
+    // 親（Emacs の GUI スレッド）へ同期で送らないよう、DefWindowProc には回さない
     if msg == WM_MOUSEACTIVATE {
-        return LRESULT(MA_NOACTIVATE as isize);
+        let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+        let active = if unsafe { GetForegroundWindow() } == root { MA_NOACTIVATE } else { MA_ACTIVATE };
+        return LRESULT(active as isize);
     }
     let r = catch_unwind(AssertUnwindSafe(|| {
         if msg == WM_NCDESTROY {
