@@ -106,8 +106,11 @@ fn set_log(file: Option<String>) -> Result<()> {
 /// CONPTY-DIR は conpty.dll（と x64/OpenConsole.exe）のあるディレクトリ（nil か無ければ OS 同梱の ConPTY）。
 /// FONT-FAMILY・FONT-SIZE（ポイント）・NARROW-WIDE（"overlap" か "shrink"）は nil なら既定、
 /// SCROLLBACK はスクロールバックの行数の上限（nil なら 10000）。
+/// ENV は Emacs の環境変数への変更の文字列のベクタ（nil なら変えない。T-109）: "NAME=VALUE" は設定、"NAME" は削除。
+/// 前から順に当てる。`TERM` `COLORTERM` `TERM_PROGRAM` は端末が最後に決める。
 /// 子プロセスは最初の `embterm-module-place' で起動する（そのときの大きさで）
 #[defun(user_ptr)]
+#[allow(clippy::too_many_arguments)]
 fn create(
     argv: Vector<'_>,
     cwd: Option<String>,
@@ -116,14 +119,23 @@ fn create(
     font_size: Value<'_>,
     narrow_wide_: Option<String>,
     scrollback: Option<i64>,
+    env: Option<Vector<'_>>,
 ) -> Result<RefCell<Term>> {
     let mut args = Vec::with_capacity(argv.len());
     for i in 0..argv.len() {
         args.push(std::ffi::OsString::from(argv.get::<String>(i)?));
     }
+    let mut changes = Vec::new();
+    if let Some(env) = env {
+        for i in 0..env.len() {
+            let e: String = env.get(i)?;
+            changes.push(parse_env_change(&e).map_err(lisp_err)?);
+        }
+    }
     let opts = SpawnOptions {
         argv: args,
         cwd: cwd.map(PathBuf::from),
+        env: changes,
         conpty_dir: conpty_dir.map(PathBuf::from),
         font_family,
         font_size: opt_num(font_size)?.map(|f| f as f32),
@@ -131,6 +143,23 @@ fn create(
         scrollback_lines: scrollback.map(|n| n.max(0) as usize),
     };
     Ok(RefCell::new(term::spawn(opts).map_err(lisp_err)?))
+}
+
+/// 環境変数の変更 1 つ（"NAME=VALUE" は設定、"NAME" は削除）。Windows には "=C:=C:\x" のように
+/// `=` で始まる名前もあるので、名前は 2 文字目以降の最初の `=` までとする
+fn parse_env_change(e: &str) -> std::result::Result<(std::ffi::OsString, Option<std::ffi::OsString>), String> {
+    let Some(first) = e.chars().next() else { return Err("環境変数の指定が空".into()) };
+    if e.contains('\0') {
+        return Err(format!("環境変数の指定が正しくない: {e:?}"));
+    }
+    let rest = &e[first.len_utf8()..];
+    Ok(match rest.find('=') {
+        Some(i) => {
+            let n = first.len_utf8() + i;
+            (e[..n].into(), Some(e[n + 1..].into()))
+        }
+        None => (e.into(), None),
+    })
 }
 
 /// ペイン PANE（端末の中で一意の整数。Lisp が決める）を、フレーム WINDOW-ID（`(frame-parameter nil \\='window-id)'）の
@@ -547,5 +576,21 @@ fn text<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
     match term.borrow().shared().session() {
         Some(s) => term::screen_text(&s).map_err(lisp_err)?.into_lisp(env),
         None => ().into_lisp(env),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_env_change;
+
+    #[test]
+    fn env_change() {
+        assert_eq!(parse_env_change("LANG=ja_JP.UTF-8").unwrap(), ("LANG".into(), Some("ja_JP.UTF-8".into())));
+        assert_eq!(parse_env_change("EMPTY=").unwrap(), ("EMPTY".into(), Some("".into())));
+        assert_eq!(parse_env_change("A=b=c").unwrap(), ("A".into(), Some("b=c".into())));
+        assert_eq!(parse_env_change("CLAUDE_CONFIG_DIR").unwrap(), ("CLAUDE_CONFIG_DIR".into(), None));
+        assert_eq!(parse_env_change(r"=C:=C:\x").unwrap(), ("=C:".into(), Some(r"C:\x".into())));
+        assert_eq!(parse_env_change("名前=値").unwrap(), ("名前".into(), Some("値".into())));
+        assert!(parse_env_change("").is_err());
     }
 }

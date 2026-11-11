@@ -277,6 +277,8 @@ pub struct State {
 pub struct SpawnOptions {
     pub argv: Vec<OsString>,
     pub cwd: Option<PathBuf>,
+    /// Emacs の環境変数への変更（`Some` は設定、`None` は削除。T-109）
+    pub env: Vec<(OsString, Option<OsString>)>,
     pub conpty_dir: Option<PathBuf>,
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -1189,6 +1191,7 @@ impl App {
             SessionOptions {
                 argv: opts.argv.clone(),
                 cwd: opts.cwd.clone(),
+                env: opts.env.clone(),
                 cols,
                 rows,
                 cell_px: self.cell,

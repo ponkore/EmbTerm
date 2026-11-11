@@ -111,7 +111,7 @@ GenPreview の設計と HWND 埋め込みのプローブ（`~/.emacs.d/docs/embe
 - PTY は ConPTY【決定 T-007】。**再配布版の `conpty.dll` + `OpenConsole.exe`（1.25 以降）を同梱して優先**し、
   無ければ OS の ConPTY を使う。OS 同梱版は Kitty graphics・Sixel を捨て、OSC の位置をずらし、
   結合文字・ZWJ の幅も揃わないので、退避先として動けばよい
-- 起動するコマンド・引数・作業ディレクトリ・環境変数を elisp から指定できる【案】
+- 起動するコマンド・引数・作業ディレクトリ・環境変数を elisp から指定できる【決定 T-109 / T-110】（`embterm-run`。子の環境は `process-environment` から作るので `setenv` が届く）
 - バッファを消したらプロセス（とその子）を終わらせる。プロセスが終わったら Emacs に知らせる【案】
 
 ### 5.5 文字幅（eaw）

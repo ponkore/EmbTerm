@@ -168,8 +168,9 @@ pub struct PtyOptions {
     pub argv: Vec<OsString>,
     /// 作業ディレクトリ。`None` なら親と同じ
     pub cwd: Option<PathBuf>,
-    /// 親の環境変数に足す（同じ名前なら上書きする。名前の大文字・小文字は区別しない）
-    pub env: Vec<(OsString, OsString)>,
+    /// 親の環境変数を前から順に書き換える。`Some` は設定（同じ名前なら上書き）、`None` は削除。
+    /// 名前の大文字・小文字は区別しない
+    pub env: Vec<(OsString, Option<OsString>)>,
     pub cols: u16,
     pub rows: u16,
     /// `conpty.dll` を探すディレクトリ（前から順に）。[`default_conpty_search`] を参照
@@ -198,10 +199,10 @@ pub fn default_conpty_search(preferred: Option<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// 端末用に足す環境変数（`TERM=xterm-256color`、`COLORTERM=truecolor`、`TERM_PROGRAM=EmbTerm`）
-pub fn terminal_env() -> Vec<(OsString, OsString)> {
+pub fn terminal_env() -> Vec<(OsString, Option<OsString>)> {
     [("TERM", "xterm-256color"), ("COLORTERM", "truecolor"), ("TERM_PROGRAM", "EmbTerm")]
         .into_iter()
-        .map(|(k, v)| (k.into(), v.into()))
+        .map(|(k, v)| (k.into(), Some(v.into())))
         .collect()
 }
 
@@ -493,14 +494,17 @@ pub fn command_line(argv: &[OsString]) -> Vec<u16> {
     out
 }
 
-/// 親の環境変数に `extra` を足した環境ブロック（`名前=値\0 … \0`、名前の大文字小文字を無視して並べる）
-fn environment_block(extra: &[(OsString, OsString)]) -> Vec<u16> {
+/// 親の環境変数を `changes` で書き換えた環境ブロック（`名前=値\0 … \0`、名前の大文字小文字を無視して並べる）。
+/// `changes` は前から順に当てる（`Some` は設定、`None` は削除）
+fn environment_block(changes: &[(OsString, Option<OsString>)]) -> Vec<u16> {
     let upper = |s: &OsStr| s.to_string_lossy().to_uppercase();
     let mut vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
-    for (k, v) in extra {
+    for (k, v) in changes {
         let ku = upper(k);
         vars.retain(|(k2, _)| upper(k2) != ku);
-        vars.push((k.clone(), v.clone()));
+        if let Some(v) = v {
+            vars.push((k.clone(), v.clone()));
+        }
     }
     vars.sort_by_key(|(k, _)| upper(k));
     let mut block = Vec::new();
@@ -1004,11 +1008,20 @@ mod tests {
 
     #[test]
     fn env_block_overrides() {
-        let b = environment_block(&[("TERM".into(), "xterm-256color".into())]);
+        let b = environment_block(&[("TERM".into(), Some("xterm-256color".into()))]);
         let s = String::from_utf16_lossy(&b);
         assert!(s.contains("TERM=xterm-256color\0"));
         assert!(s.ends_with("\0\0"));
         assert_eq!(s.matches("\0TERM=").count() + s.starts_with("TERM=") as usize, 1);
+        // 削除と、後から当てたものが勝つこと（PATH は親に必ずある）
+        let b = environment_block(&[
+            ("path".into(), None),
+            ("ET_TEST_A".into(), Some("1".into())),
+            ("et_test_a".into(), Some("2".into())),
+        ]);
+        let s = String::from_utf16_lossy(&b);
+        assert!(!s.to_uppercase().contains("\0PATH="), "PATH が残っている");
+        assert!(s.contains("et_test_a=2\0") && !s.contains("ET_TEST_A=1"));
     }
 
     /// OS 同梱の ConPTY で cmd を動かし、出力が届いて終了が分かること

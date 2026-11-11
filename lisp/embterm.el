@@ -339,6 +339,8 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
   "non-nil なら `embterm-semi-char-map' が効く（`emulation-mode-map-alists' の条件）。")
 (defvar-local embterm--command nil "起動したコマンド（argv の先頭）。タイトルが無いときのバッファ名に使う。")
 (defvar-local embterm--project nil "`embterm-project' で開いた端末なら、そのプロジェクトのルート。")
+(defvar-local embterm--fixed-name nil
+  "non-nil なら、バッファ名をタイトルで付け替えない（`embterm-run' の NAME を指定したとき）。")
 
 (defvar embterm--buffers nil "端末のバッファ。")
 (defvar embterm--timer nil "module の状態を読むタイマー。")
@@ -364,33 +366,98 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 (defun embterm--conpty-dir ()
   (embterm--native-path (or embterm-conpty-directory embterm-module-directory)))
 
-(defun embterm--create (dir &optional project)
-  "DIR で `embterm-shell' を起動する端末のバッファを作って出す。PROJECT はプロジェクトのルート（T-042）。"
+(defun embterm--env-name (entry)
+  "`process-environment' の項目 ENTRY（\"NAME=VALUE\" か \"NAME\"）の名前。
+Windows の \"=C:=C:\\\" のように `=' で始まる名前があるので、2 文字目以降の最初の `=' までとする。"
+  (let ((i (and (> (length entry) 1) (string-search "=" entry 1))))
+    (if i (substring entry 0 i) entry)))
+
+(defun embterm--environment-changes (&optional env)
+  "ENV（既定は `process-environment'）が Emacs の起動時の環境（`initial-environment'）から
+変わったところを、`embterm-module-create' に渡す文字列のベクタにする（T-109）。
+\"NAME=VALUE\" は設定、\"NAME\" は削除。子プロセスの環境は Emacs のプロセスの環境に
+これを当てたもの（`make-process' と同じく `setenv' が子に届く）。
+
+変わっていない項目は渡さない。`process-environment' には起動時の ANSI の文字列が
+復号されないまま残る項目があり、往復させると化けるため。"
+  (let ((seen (make-hash-table :test #'equal))
+        changes)
+    (dolist (e (or env process-environment))
+      (let* ((name (embterm--env-name e))
+             (key (upcase name)))
+        (unless (gethash key seen)
+          (puthash key t seen)
+          (cond
+           ;; "NAME" は削除（`setenv' に nil を渡したとき）
+           ((equal name e)
+            (when (getenv-internal name initial-environment)
+              (push name changes)))
+           ((not (member e initial-environment))
+            (push e changes))))))
+    ;; 起動時にはあったのに、ENV に名前ごと無いもの（ENV を組み立て直したとき）も削除
+    (dolist (e initial-environment)
+      (let ((name (embterm--env-name e)))
+        (unless (gethash (upcase name) seen)
+          (puthash (upcase name) t seen)
+          (push name changes))))
+    ;; `setenv' は名前と値を `locale-coding-system' で符号化して入れる（ユニバイトの文字列）。
+    ;; module には UTF-8 の文字列で渡すので、同じ符号化で戻す
+    (vconcat (mapcar (lambda (e)
+                       (if (or (multibyte-string-p e) (string-match-p "\\`[[:ascii:]]*\\'" e)
+                               (null locale-coding-system))
+                           e
+                         (decode-coding-string e locale-coding-system)))
+                     (nreverse changes)))))
+
+(cl-defun embterm--create (dir &key project argv environment name display)
+  "DIR で ARGV（nil なら `embterm-shell'）を起動する端末のバッファを作って出す。バッファを返す。
+PROJECT はプロジェクトのルート（T-042）。ENVIRONMENT は子の環境（`process-environment' の形。
+nil なら `process-environment'）。NAME はバッファ名（nil ならタイトルから付ける）。
+DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'）。"
   (embterm--load-module)
   (let* ((default-directory dir)
-         (argv (embterm--argv))
-         (buf (generate-new-buffer "*embterm*")))
+         (argv (or argv (embterm--argv)))
+         (env (embterm--environment-changes environment))
+         (buf (generate-new-buffer (or name "*embterm*"))))
     (with-current-buffer buf
       (setq default-directory dir)
       (embterm-mode)
       (setq embterm--command (car argv)
-            embterm--project project)
+            embterm--project project
+            embterm--fixed-name (and name t))
       (condition-case err
           (setq embterm--term
                 (embterm-module-create (vconcat argv) (embterm--cwd) (embterm--conpty-dir)
                                        embterm-font-family embterm-font-size
                                        (symbol-name embterm-narrow-wide)
-                                       embterm-scrollback-lines))
+                                       embterm-scrollback-lines
+                                       env))
         (error (kill-buffer buf)
                (signal (car err) (cdr err))))
       ;; 子プロセスは最初の place で起動する。その前に色・カーソル・クリップボードの許可を積む（頼みごとは順に片付く）
       (embterm--apply-term-settings (embterm--color-args))
       (push buf embterm--buffers)
       (embterm--rename-buffer nil))
-    (pop-to-buffer-same-window buf)
-    (embterm--activate)
-    (embterm--sync)
+    (funcall (or display #'pop-to-buffer-same-window) buf)
+    (with-current-buffer buf
+      (embterm--activate)
+      (embterm--sync))
     buf))
+
+;;;###autoload
+(cl-defun embterm-run (command &key directory environment name display)
+  "COMMAND（プログラムと引数の文字列のリスト）を端末で起動し、そのバッファを返す（T-110）。
+DIRECTORY は作業ディレクトリ（nil なら `default-directory'）。
+ENVIRONMENT は子の環境で、`process-environment' と同じ形（nil なら `process-environment'）。
+`process-environment' を `copy-sequence' して `setenv' で X を消したものを渡せば、
+X を消して起動する。
+NAME はバッファ名（同じ名前があれば `<2>' などを付ける）。指定するとタイトルで付け替えない。
+DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'。たとえば `pop-to-buffer'）。
+ヘッダ行などは、返ったバッファで設定すればよい（端末の大きさはウィンドウに合わせ直す）。"
+  (unless (and (consp command) (seq-every-p #'stringp command))
+    (signal 'wrong-type-argument (list 'list-of-strings command)))
+  (embterm--create (file-name-as-directory (expand-file-name (or directory default-directory)))
+                   :argv command :environment environment :name name :display display))
 
 (defun embterm--buffers-by-recency ()
   "端末のバッファを、最近選んだ順に。"
@@ -431,7 +498,7 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
     (if existing
         (progn (pop-to-buffer-same-window existing)
                existing)
-      (embterm--create root root))))
+      (embterm--create root :project root))))
 
 (defun embterm--annotate-buffer (name)
   "`embterm-list-buffers' の候補 NAME の注釈（ディレクトリ）。"
@@ -773,10 +840,12 @@ TITLE が長いパスならファイル名だけ（拡張子なし）、TITLE �
               (truncate-string-to-width (string-replace "\n" " " name) room nil nil "…")))))
 
 (defun embterm--rename-buffer (title)
-  "TITLE（nil はまだ無い）からバッファ名を決めて付ける。同じ名前があれば `<2>' などを付ける。"
-  (let ((name (funcall embterm-buffer-name-function title)))
-    (when (and (stringp name) (not (string-empty-p name)) (not (equal name (buffer-name))))
-      (rename-buffer name t))))
+  "TITLE（nil はまだ無い）からバッファ名を決めて付ける。同じ名前があれば `<2>' などを付ける。
+`embterm-run' で名前を決めたバッファは付け替えない。"
+  (unless embterm--fixed-name
+    (let ((name (funcall embterm-buffer-name-function title)))
+      (when (and (stringp name) (not (string-empty-p name)) (not (equal name (buffer-name))))
+        (rename-buffer name t)))))
 
 (defun embterm--apply-title (title)
   (unless (equal title embterm--title)

@@ -14,6 +14,12 @@
 //!     release でビルドし、target/dist/ に配布物を集める（T-028 / T-030）:
 //!     embterm_module.dll、embterm.el、embterm.exe、conpty.dll、x64/OpenConsole.exe
 //!     （ConPTY は vendor/conpty から。無ければ先に `cargo xtask fetch-conpty`）
+//!
+//! cargo xtask install [DIR]
+//!     release でビルドし、配布物を DIR（既定 C:\Apps\embterm）に写す（T-057）。普段使いの Emacs はここを読む。
+//!     中身が同じファイルは写さない。使用中（Emacs が読み込んだ conpty.dll、動いている OpenConsole.exe）で
+//!     上書きできないものは `<名前>.old-<時刻>` に名前を変えてから写す（使用中のファイルも名前は変えられる）。
+//!     新しい版が使われるのは、module なら Emacs の再起動後、ConPTY なら次に開く端末から
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -30,17 +36,22 @@ const CONPTY_VERSION: &str = "1.25.260930003";
 const CONPTY_NUPKG_SHA256: &str = "02b07b349af66d801159bdf9e440d4a1ce78bb951f37fc8609731665afdae7ee";
 /// Zig の版は libghostty-vt の build.zig.zon の minimum_zig_version と minor まで一致させる
 const ZIG_MINOR: &str = "0.17.";
+/// `cargo xtask install` の既定の置き場（GenPreview の C:\Apps\genpreview と同じ形）
+const DEFAULT_INSTALL_DIR: &str = r"C:\Apps\embterm";
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    let task = args.next().unwrap_or_default();
-    let force = args.any(|a| a == "--force");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let task = args.first().cloned().unwrap_or_default();
+    let force = args.iter().any(|a| a == "--force");
     let result = match task.as_str() {
         "fetch-ghostty-vt" => fetch_ghostty_vt(force),
         "fetch-conpty" => fetch_conpty(force),
         "dist" => dist(),
+        "install" => install(args.get(1).map_or_else(|| PathBuf::from(DEFAULT_INSTALL_DIR), PathBuf::from)),
         _ => {
-            eprintln!("使い方: cargo xtask <fetch-ghostty-vt | fetch-conpty> [--force] | cargo xtask dist");
+            eprintln!(
+                "使い方: cargo xtask <fetch-ghostty-vt | fetch-conpty> [--force] | cargo xtask dist | cargo xtask install [DIR]"
+            );
             return ExitCode::from(2);
         }
     };
@@ -216,31 +227,79 @@ fn fetch_conpty(force: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// release でビルドし、target/dist/ に配布物を集める。embterm.el は自分の隣の module と conpty.dll を使う
-fn dist() -> Result<(), String> {
+/// release でビルドし、配布物の（元のファイル, 配布物の中の相対パス）を返す
+fn build_release() -> Result<Vec<(PathBuf, &'static str)>, String> {
     let root = root();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     run(Command::new(&cargo)
         .args(["build", "--release", "-p", "embterm", "-p", "embterm-module"])
         .current_dir(&root))?;
     let release = root.join("target/release");
-    let dist = root.join("target/dist");
-    std::fs::create_dir_all(dist.join("x64")).map_err(|e| e.to_string())?;
     let conpty = root.join("vendor/conpty");
-    let files = [
-        (release.join("embterm_module.dll"), dist.join("embterm_module.dll")),
-        (release.join("embterm.exe"), dist.join("embterm.exe")),
-        (root.join("lisp/embterm.el"), dist.join("embterm.el")),
-        (conpty.join("conpty.dll"), dist.join("conpty.dll")),
-        (conpty.join("x64/OpenConsole.exe"), dist.join("x64/OpenConsole.exe")),
+    let files = vec![
+        (release.join("embterm_module.dll"), "embterm_module.dll"),
+        (release.join("embterm.exe"), "embterm.exe"),
+        (root.join("lisp/embterm.el"), "embterm.el"),
+        (conpty.join("conpty.dll"), "conpty.dll"),
+        (conpty.join("x64/OpenConsole.exe"), "x64/OpenConsole.exe"),
     ];
-    for (src, dst) in &files {
+    for (src, _) in &files {
         if !src.exists() {
             return Err(format!("{} がありません（ConPTY なら `cargo xtask fetch-conpty`）", src.display()));
         }
-        std::fs::copy(src, dst).map_err(|e| format!("{} → {}: {e}", src.display(), dst.display()))?;
+    }
+    Ok(files)
+}
+
+/// release でビルドし、target/dist/ に配布物を集める。embterm.el は自分の隣の module と conpty.dll を使う
+fn dist() -> Result<(), String> {
+    let files = build_release()?;
+    let dist = root().join("target/dist");
+    std::fs::create_dir_all(dist.join("x64")).map_err(|e| e.to_string())?;
+    for (src, name) in &files {
+        let dst = dist.join(name);
+        std::fs::copy(src, &dst).map_err(|e| format!("{} → {}: {e}", src.display(), dst.display()))?;
         eprintln!("{}", dst.display());
     }
     eprintln!("できた: {}", dist.display());
+    Ok(())
+}
+
+/// release でビルドし、配布物を DIR に写す（target/dist は経由しない）。使用中で上書きできないファイルは名前を変えて退避してから写す
+fn install(dir: PathBuf) -> Result<(), String> {
+    let files = build_release()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    std::fs::create_dir_all(dir.join("x64")).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // 前に退避したもの。もう使われていなければ消せる（使用中なら残す）
+    for sub in [dir.clone(), dir.join("x64")] {
+        if let Ok(entries) = std::fs::read_dir(&sub) {
+            for e in entries.flatten() {
+                if e.file_name().to_string_lossy().contains(".old-") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    for (src, name) in &files {
+        let dst = dir.join(name);
+        let new = std::fs::read(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        if std::fs::read(&dst).is_ok_and(|old| old == new) {
+            eprintln!("同じ: {}", dst.display());
+            continue;
+        }
+        if std::fs::write(&dst, &new).is_err() {
+            // 使用中（読み込まれた DLL・動いている exe）は書けないが、名前は変えられる
+            let moved = dst.with_file_name(format!("{}.old-{stamp}", dst.file_name().unwrap().to_string_lossy()));
+            std::fs::rename(&dst, &moved).map_err(|e| format!("{} を退避できない: {e}", dst.display()))?;
+            std::fs::write(&dst, &new).map_err(|e| format!("{}: {e}", dst.display()))?;
+            eprintln!("入れ替え（使用中のものは {} に退避）: {}", moved.display(), dst.display());
+        } else {
+            eprintln!("写した: {}", dst.display());
+        }
+    }
+    eprintln!("できた: {}（module の新しい版は Emacs の再起動後に使われる）", dir.display());
     Ok(())
 }

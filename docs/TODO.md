@@ -236,12 +236,12 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-052** yazi（画像のプレビュー、マウス）（2026-11-11）→ embterm.exe と別起動の `emacs -Q` で、プレビュー・`j` での切り替え・`q` で画面が戻る・クリック・ホイールを確認。`Drivers.matches: Kgp`。手元での確認は T-091
 - ✅ **T-053** vim（2026-11-11）→ 日本語入力の表示・`:set number`・`Esc`（T-069 の `:set mouse=a` のクリックも確認済み）OK。`-u NONE` の MSYS 版 vim は encoding が latin1 になり化けるが vim の設定の問題
 - ✅ **T-054** 性能を測る（大量の出力、入力の遅れ、端末を何個も開いたとき）（2026-11-11）→ Emacs の 10 ms タイマーの p99 はどの場面でも 17〜22 ms（止まらない）。`cat` 10 MB は 5.3 秒で Windows Terminal と同じ（ConPTY が律速）。入力から `Present` まで 1〜2 ms。端末 15 個でプライベート 123 MB。docs/notes/t054-performance.md、`test/perf.el`
-- ⏸ **T-055** 端末としての適合を測る（vttest など）（2026-11-11: WSL に vttest が無い。`apt install` してよいか利用者に確かめてから）
+- 🔄 **T-055** 端末としての適合を測る（vttest など）（2026-11-11: 利用者の了承を得て WSL に vttest 2.7 を入れた。測定中）
 
 ## 6. ghostel からの移行
 
-- ⬜ **T-056** ghostel で使っている機能とキー割り当てを洗い出す（`C-c s s` / `n` / `p` / `b`、`my-ghostel.el`）
-- ⬜ **T-057** `~/.emacs.d` に `my-embterm.el` を作り、ghostel と並べて使ってみる
+- ✅ **T-056** ghostel で使っている機能とキー割り当てを洗い出す（`C-c s s` / `n` / `p` / `b`、`my-ghostel.el`）（2026-11-11）→ 4 つのコマンド・pwsh の起動・module の置き場はすべて EmbTerm にある。足りなかった `setenv` の受け渡し（T-109）と `embterm-run`（T-110）を足した。docs/notes/t056-ghostel-migration.md
+- 🔄 **T-057** `~/.emacs.d` に `my-embterm.el` を作り、ghostel と並べて使ってみる（2026-11-11: `my-embterm.el` と関連の変更をパッチにした（`~/.emacs.d` への書き込みは権限の判定で止まった）。`emacs -Q` で動作を確認済み。利用者がパッチを当てて使う段階）
 - ⬜ **T-058** ghostel をやめる判断と撤去（`my-ghostel.el`、`~/.emacs.d/ghostel/`、ドキュメント）
 - ⬜ **T-059** `my-pty`（ptyd + eat）も一緒にやめられるか判断する
 
@@ -277,7 +277,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   原因と、抜けさせない方法を決める（T-041 の一部）
 - ✅ **T-074**（2026-11-11）→ render hold の間は全ペインで写し直さない（時限 1 秒）。途中の画面が見えないことを確認。同期出力（DEC 2026）: `GHOSTTY_TERMINAL_OPT_RENDER_HOLD` を登録し、hold の間は render state を写し直さない（時限 1 秒）
 - ✅ **T-075**（2026-11-11）→ `crates/session`（`et-session`）に移し、embterm.exe と module の両方が使う。`apps/embterm/src/session.rs`（端末 + PTY + 読み書きのスレッド + 知らせ）を、Emacs module と共有するクレート（`et-session`）に移す。T-028 の前にやる
-- ✅ **T-076**（2026-11-11: 前半は済み。閉じる待ちは別スレッドで行い、終わったら `Closed` を知らせる。`kill-buffer` は 1 ms 程度で返る。後半 → 閉じ方を「CTRL_CLOSE_EVENT → 5 秒まで待つ → Job ごと止める」にした。**`.swp` が残るのは vim の仕様**（MSYS の vim は SIGHUP で常に残す、Windows 版は書き換えたときだけ残す）で強制終了ではなかった。`kill-emacs` では `embterm-kill-emacs-timeout`（既定 0.5 秒）だけ待つ。t054 §3.8）閉じる処理を UI スレッドから外す（`Pty::close` は最大数秒待つ。module では Emacs を止めてしまう）。
+- ✅ **T-076**（2026-11-11: 前半は済み。閉じる待ちは別スレッドで行い、終わったら `Closed` を知らせる。`kill-buffer` は 1 ms 程度で返る。後半 → 閉じ方を「CTRL_CLOSE_EVENT → 5 秒まで待つ → Job ごと止める」にした。**`.swp` が残るのは vim の仕様**（MSYS の vim は SIGHUP で常に残す、Windows 版は書き換えたときだけ残す）で強制終了ではなかった。`kill-emacs` では `embterm-kill-emacs-timeout`（既定 0.5 秒。利用者が了承）だけ待つ。t054 §3.8）閉じる処理を UI スレッドから外す（`Pty::close` は最大数秒待つ。module では Emacs を止めてしまう）。
   あわせて、閉じたときに vim の `.swp` が残る（実質の強制終了）ので、子に先に終了を促す手順を考える
 - ✅ **T-077** 変わった行だけ描き直すか（今は毎回全体を描き、`Present(1)` で垂直同期を待つ）→ T-068 の測定で決める（2026-11-11）→ **毎回全体を描くで確定**（ふつうの画面 0.2〜1 ms、最悪 8 ms。フリップモデルの差分を追う複雑さに見合わない）
 - ⬜ **T-078** 自動確認の道具をリポジトリに入れる（キーを送るスクリプト、画面の `.txt` を期待値と比べる回帰テストを `cargo xtask` から）
@@ -312,3 +312,6 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ⬜ **T-106** 入力から画面に出るまでを DWM の合成込みで実測し、Windows Terminal と比べる（カメラ・フォトセンサ）
 - ⬜ **T-107** 本物のデバイスの消失（TDR、ドライバの更新）での作り直しを確かめる（`dxcap -forcetdr` など）
 - ❌ **T-108** `box: ┌──┬──┐` の `─` が描かれていないように見える（SGR の確かめの画面。T-054 の変更の前後で同じ）。overlap の既知の見え方（T-013）か別の問題かを調べる（2026-11-11 → 不具合ではない。30pt で撮ると `┌──┬──┐`・`x─x`・`━`・`═`・`╭─╮` はすべて描かれていた。12pt では角と横線がつながって見分けにくいだけ）
+- ✅ **T-109** 子の環境変数を Emacs の `process-environment` から作る（2026-11-11）→ 起動時の環境からの差分（設定・削除）を module に渡す。`setenv` が子に届く（`make-process` と同じ）。`setenv` のユニバイトの値は `locale-coding-system` で戻す。`test/env.el`
+- ✅ **T-110** コマンド・作業ディレクトリ・環境・バッファ名を指定して開く `embterm-run`（2026-11-11）→ `(embterm-run COMMAND &key DIRECTORY ENVIRONMENT NAME DISPLAY)`。`my:claude-term` の置き換え（T-059）に使う
+- ✅ **T-111** 普段使いの置き場に入れる `cargo xtask install [DIR]`（2026-11-11）→ 既定 `C:\Apps\embterm`。使用中の conpty.dll / OpenConsole.exe / exe は `.old-<時刻>` に退避して入れ替える。`target/dist` を普段の Emacs に読ませると dist と試験が上書きに失敗するため

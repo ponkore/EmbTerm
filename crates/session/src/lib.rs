@@ -65,6 +65,9 @@ pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct SessionOptions {
     pub argv: Vec<OsString>,
     pub cwd: Option<PathBuf>,
+    /// 親（Emacs / embterm.exe）の環境変数への変更（`Some` は設定、`None` は削除。T-109）。
+    /// 端末の変数（`TERM` など）はこのあとに当てるので、ここでは変えられない
+    pub env: Vec<(OsString, Option<OsString>)>,
     pub cols: u16,
     pub rows: u16,
     pub cell_px: (u32, u32),
@@ -378,7 +381,7 @@ impl Session {
         let pty_opts = PtyOptions {
             argv: if opts.argv.is_empty() { vec!["cmd.exe".into()] } else { opts.argv },
             cwd: opts.cwd,
-            env: et_pty::terminal_env(),
+            env: opts.env.into_iter().chain(et_pty::terminal_env()).collect(),
             cols: opts.cols,
             rows: opts.rows,
             conpty_search: opts.conpty_search,

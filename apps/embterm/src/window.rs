@@ -242,6 +242,7 @@ pub fn run(args: Args) -> Result<(), String> {
         SessionOptions {
             argv: args.command.clone(),
             cwd: args.cwd.clone(),
+            env: Vec::new(),
             cols: grid.0,
             rows: grid.1,
             cell_px: cell,
