@@ -169,13 +169,17 @@ impl Frame {
         }
         let colors = rs.colors();
         let cursor = rs.cursor();
+        // パレットが変わった（T-034 のテーマの追従、OSC 4）。セルの色は写すときに解決済みなので、全部の行を写し直す
+        let palette_changed = colors.palette != self.palette;
         let mut changed = dirty != et_vt::Dirty::Clean
+            || palette_changed
             || colors.foreground != self.foreground
             || colors.background != self.background
             || colors.cursor != self.cursor_color
             || cursor.pos != self.cursor.pos
             || cursor.visible != self.cursor.visible
             || cursor.shape != self.cursor.shape
+            || cursor.blinking != self.cursor.blinking
             || std::mem::take(&mut self.images_changed);
         self.foreground = colors.foreground;
         self.background = colors.background;
@@ -183,10 +187,11 @@ impl Frame {
         self.palette = colors.palette;
         self.cursor = cursor;
 
-        if dirty != et_vt::Dirty::Clean || resized {
+        let all = resized || palette_changed;
+        if dirty != et_vt::Dirty::Clean || all {
             let mut text = Vec::new();
-            let mut rows_it = if resized { rs.all_rows() } else { rs.dirty_rows() };
-            while let Some(y) = if resized { rows_it.next_row() } else { rows_it.next_dirty() } {
+            let mut rows_it = if all { rs.all_rows() } else { rs.dirty_rows() };
+            while let Some(y) = if all { rows_it.next_row() } else { rows_it.next_dirty() } {
                 if y >= rows {
                     continue;
                 }

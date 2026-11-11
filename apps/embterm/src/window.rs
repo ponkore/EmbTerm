@@ -205,7 +205,8 @@ pub fn run(args: Args) -> Result<(), String> {
         Event::Output => post(hwnd_raw, WM_APP_OUTPUT),
         Event::Title => post(hwnd_raw, WM_APP_TITLE),
         Event::Exited => post(hwnd_raw, WM_APP_EXITED),
-        Event::Bell | Event::Pwd | Event::Closed => {}
+        // embterm.exe はデバッグ用なので、ベル・OSC 52 / 9 / 777 / 9;4 は扱わない（クリップボードは既定で拒む）
+        _ => {}
     });
     let session = Session::start(
         SessionOptions {
@@ -215,9 +216,11 @@ pub fn run(args: Args) -> Result<(), String> {
             rows: grid.1,
             cell_px: cell,
             conpty_search: conpty_search(&args),
-            foreground: DEFAULT_FG,
-            background: DEFAULT_BG,
+            colors: et_session::Colors { foreground: DEFAULT_FG, background: DEFAULT_BG, cursor: None, palette: [None; 16] },
+            cursor: Default::default(),
             scrollback_lines: 10_000,
+            clipboard_write: false,
+            clipboard_read: false,
         },
         notify,
     )?;

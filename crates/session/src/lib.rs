@@ -12,6 +12,8 @@
 //! - **端末の状態（[`Session`]）は表示（HWND）より長生きにする**（T-066）。メソッドはすべて `&self` なので、
 //!   `Arc<Session>` にして UI スレッドと呼び出し側（Lisp のスレッド）で分け合える
 //! - キーの変換（KKP / win32-input-mode / レガシーの VT の切り替え。T-069）は [`keys`]
+//! - OSC 52 / 9 / 777 / 9;4（T-039）は [`Event`] に中身を載せて知らせる。クリップボードの書き込み・読み取りを
+//!   許すかは [`Session::set_clipboard_policy`]（読みのスレッドで、ロックを持ったまま判断するので `AtomicBool`）
 
 pub mod keys;
 
@@ -23,10 +25,10 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use et_pty::{ConptyKind, ExitStatus, ProcessWatch, Pty, PtyOptions, PtyWriter};
-use et_vt::{Effects, KeyEncoder, Mode, Rgb, Terminal};
+use et_vt::{CursorShape, Effects, KeyEncoder, Mode, ProgressState, Rgb, Terminal};
 
 /// 呼び出し側（UI）に知らせること
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// 端末の中身が変わった（描き直す）
     Output,
@@ -40,6 +42,12 @@ pub enum Event {
     Exited,
     /// [`Session::close`] の後始末が終わった（PTY のスレッドも止まった）
     Closed,
+    /// アプリがクリップボードへ書いた（OSC 52 など。書き込みを許しているときだけ）
+    ClipboardWrite(String),
+    /// デスクトップ通知（OSC 9 / 777）。タイトルが無ければ空
+    Notification { title: String, body: String },
+    /// 進捗（OSC 9;4）
+    Progress { state: ProgressState, percent: Option<u8> },
 }
 
 /// 知らせを受ける関数。**PTY の読みのスレッドや閉じるスレッドから呼ばれる**（端末のロックを持ったままのこともある）。
@@ -59,9 +67,39 @@ pub struct SessionOptions {
     pub rows: u16,
     pub cell_px: (u32, u32),
     pub conpty_search: Vec<PathBuf>,
+    /// 既定の色（OSC 10 / 11 / 12 / 4 で上書きされうる。T-034）
+    pub colors: Colors,
+    /// DECSCUSR の既定（T-035）
+    pub cursor: CursorDefault,
+    pub scrollback_lines: usize,
+    /// クリップボードの書き込み（OSC 52）を許すか（T-039）
+    pub clipboard_write: bool,
+    /// クリップボードの読み取り（OSC 52 の `?`）を許すか（T-039。既定で拒む）
+    pub clipboard_read: bool,
+}
+
+/// 端末の既定の色（T-034）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Colors {
     pub foreground: Rgb,
     pub background: Rgb,
-    pub scrollback_lines: usize,
+    /// カーソルの色。`None` なら描く側の既定
+    pub cursor: Option<Rgb>,
+    /// 16 色。`None` の色は libghostty-vt の組み込み
+    pub palette: [Option<Rgb>; 16],
+}
+
+/// カーソルの既定（アプリが DECSCUSR で決めていない間の形と点滅。T-035）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorDefault {
+    pub shape: CursorShape,
+    pub blink: bool,
+}
+
+impl Default for CursorDefault {
+    fn default() -> Self {
+        Self { shape: CursorShape::Block, blink: false }
+    }
 }
 
 /// `CSI ?9001h` / `l`（win32-input-mode）を見つける。libghostty-vt は未知のモードを無視して、
@@ -136,6 +174,8 @@ struct TermEffects {
     writer: Arc<OnceLock<PtyWriter>>,
     title: Arc<Mutex<String>>,
     pwd: Arc<Mutex<String>>,
+    /// クリップボードの書き込みを許すか（[`Session::set_clipboard_policy`]）
+    clipboard_write: Arc<AtomicBool>,
     notify: Notify,
 }
 
@@ -157,6 +197,65 @@ impl Effects for TermEffects {
         *self.pwd.lock().unwrap_or_else(|e| e.into_inner()) = pwd.to_string();
         (self.notify)(Event::Pwd);
     }
+    fn clipboard_write(&mut self, text: &str) -> bool {
+        if !self.clipboard_write.load(Ordering::Relaxed) {
+            return false;
+        }
+        (self.notify)(Event::ClipboardWrite(text.to_string()));
+        true
+    }
+    fn clipboard_read(&mut self) -> Option<String> {
+        // 読み取りは有効にしたときだけ呼ばれる（Terminal::set_clipboard_read_enabled）
+        read_system_clipboard()
+    }
+    fn desktop_notification(&mut self, title: &str, body: &str) {
+        (self.notify)(Event::Notification { title: title.to_string(), body: body.to_string() });
+    }
+    fn progress(&mut self, state: ProgressState, percent: Option<u8>) {
+        (self.notify)(Event::Progress { state, percent });
+    }
+}
+
+/// Windows のクリップボードのテキストを読む（OSC 52 の読み取りを許したとき。読みのスレッドで呼ばれる）。
+/// ほかのプロセスが開いていれば少しだけ待ち直し、だめなら `None`（待ち続けない）
+fn read_system_clipboard() -> Option<String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    let mut opened = false;
+    for _ in 0..5 {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    if !opened {
+        return None;
+    }
+    let text = (|| unsafe {
+        let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+        let g = HGLOBAL(h.0);
+        let p = GlobalLock(g) as *const u16;
+        if p.is_null() {
+            return None;
+        }
+        let max = GlobalSize(g) / 2;
+        let len = (0..max).find(|&i| *p.add(i) == 0).unwrap_or(max);
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
+        let _ = GlobalUnlock(g);
+        Some(s)
+    })();
+    unsafe {
+        let _ = CloseClipboard();
+    }
+    text
+}
+
+fn apply_colors(term: &mut Terminal, c: &Colors) -> et_vt::Result<()> {
+    term.set_default_colors(c.foreground, c.background, c.cursor)?;
+    term.set_default_palette16(&c.palette)
 }
 
 /// 読みのスレッドと UI スレッドで共有するもの
@@ -198,6 +297,7 @@ pub struct Session {
     shared: Arc<Shared>,
     title: Arc<Mutex<String>>,
     pwd: Arc<Mutex<String>>,
+    clipboard_write: Arc<AtomicBool>,
     writer: PtyWriter,
     /// 閉じたら `None`。閉じる処理は別のスレッドへ持っていく
     pty: Mutex<Option<Pty>>,
@@ -212,13 +312,22 @@ impl Session {
         let writer_cell: Arc<OnceLock<PtyWriter>> = Arc::new(OnceLock::new());
         let title = Arc::new(Mutex::new(String::new()));
         let pwd = Arc::new(Mutex::new(String::new()));
-        let effects = TermEffects { writer: writer_cell.clone(), title: title.clone(), pwd: pwd.clone(), notify: notify.clone() };
+        let clipboard_write = Arc::new(AtomicBool::new(opts.clipboard_write));
+        let effects = TermEffects {
+            writer: writer_cell.clone(),
+            title: title.clone(),
+            pwd: pwd.clone(),
+            clipboard_write: clipboard_write.clone(),
+            notify: notify.clone(),
+        };
         let mut term = Terminal::new(opts.cols, opts.rows, Box::new(effects)).map_err(|e| e.to_string())?;
         // ConPTY は自分の画面（スクロールバック無し）を持つので、リサイズで行をスクロールバックから戻さない
         term.set_resize_pull_scrollback(false).map_err(|e| e.to_string())?;
         // 書記素クラスタで幅を数える（再配布版の ConPTY の既定と揃える。ghostel と同じ）
         term.set_mode(Mode::GRAPHEME_CLUSTER, true, true).map_err(|e| e.to_string())?;
-        term.set_default_colors(opts.foreground, opts.background, None).map_err(|e| e.to_string())?;
+        apply_colors(&mut term, &opts.colors).map_err(|e| e.to_string())?;
+        term.set_default_cursor(opts.cursor.shape, opts.cursor.blink).map_err(|e| e.to_string())?;
+        term.set_clipboard_read_enabled(opts.clipboard_read).map_err(|e| e.to_string())?;
         term.set_terminfo_name("xterm-256color").map_err(|e| e.to_string())?;
         // T-071: "ghostty" を含むと yazi が Kitty の Unicode プレースホルダ方式を選ぶ（docs/research/conpty.md §4）
         term.set_xtversion(&format!("EmbTerm {} (libghostty-vt {})", env!("CARGO_PKG_VERSION"), et_vt::version()))
@@ -299,7 +408,23 @@ impl Session {
         let kind = pty.kind().clone();
         let pid = pty.pid();
         let warnings = pty.warnings().to_vec();
-        Ok(Session { shared, title, pwd, writer, pty: Mutex::new(Some(pty)), kind, pid, warnings, notify })
+        Ok(Session { shared, title, pwd, clipboard_write, writer, pty: Mutex::new(Some(pty)), kind, pid, warnings, notify })
+    }
+
+    /// 既定の色を変える（T-034。アプリが OSC で変えた色はそのまま）
+    pub fn set_colors(&self, colors: &Colors) {
+        let _ = apply_colors(&mut self.lock(), colors);
+    }
+
+    /// DECSCUSR の既定を変える（T-035。アプリが形を決めていなければ、今のカーソルも変わる）
+    pub fn set_cursor_default(&self, cursor: CursorDefault) {
+        let _ = self.lock().set_default_cursor(cursor.shape, cursor.blink);
+    }
+
+    /// クリップボードの書き込み・読み取りを許すか（T-039）
+    pub fn set_clipboard_policy(&self, write: bool, read: bool) {
+        self.clipboard_write.store(write, Ordering::Relaxed);
+        let _ = self.lock().set_clipboard_read_enabled(read);
     }
 
     /// 描き直しの知らせを受け取った（次の出力でまた知らせが来るようにする）。端末をロックする前に呼ぶ

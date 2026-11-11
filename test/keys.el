@@ -47,7 +47,7 @@
 (defun keys-spawn (mode)
   "子プロセス key-child.py を MODE で起動して、端末のバッファを返す。"
   (let ((embterm-shell (list keys-python keys-child mode (keys-out (format "child-%s.log" mode)) "120")))
-    (embterm)))
+    (embterm-new)))
 
 (defun keys-send-1 (name)
   (keys-sent name)
@@ -134,7 +134,7 @@
    `(1.0 "drop-kkp: pwsh を起動"
          . ,(lambda ()
               (let ((embterm-shell '("pwsh" "-NoLogo" "-NoProfile")))
-                (setq keys-buffer (embterm)))
+                (setq keys-buffer (embterm-new)))
               (keys-sent "---- drop-kkp")))
    `(3.0 "drop-kkp: 子を起動して CSI >5u のまま落とす"
          . ,(lambda ()
@@ -197,7 +197,7 @@
    `(1.0 "pwsh: 起動"
          . ,(lambda ()
               (let ((embterm-shell '("pwsh" "-NoLogo" "-NoProfile")))
-                (setq keys-buffer (embterm)))
+                (setq keys-buffer (embterm-new)))
               (keys-sent "---- pwsh")))
    `(3.0 "pwsh: ハンドラを登録"
          . ,(lambda ()
@@ -225,7 +225,7 @@
      `(1.0 "vim: 起動"
            . ,(lambda ()
                 (let ((embterm-shell (list vim "-u" "NONE" "-N" "-c" "set mouse=a" "--" (expand-file-name "docs/TODO.md" keys-root))))
-                  (setq keys-buffer (embterm)))
+                  (setq keys-buffer (embterm-new)))
                 (keys-sent "---- vim")))
      `(3.0 "vim: クリック（桁 10、行 5。0 始まり）"
            . ,(lambda ()

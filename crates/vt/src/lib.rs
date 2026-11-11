@@ -83,6 +83,48 @@ pub trait Effects: Send {
     fn title_changed(&mut self, _title: &str) {}
     /// カレントディレクトリ（OSC 7 など）が変わった。OSC 7 なら URI のまま
     fn pwd_changed(&mut self, _pwd: &str) {}
+    /// アプリがクリップボードへ書こうとした（OSC 52 など。T-039）。テキストの表現だけを渡す。
+    /// 受け入れたら true（OSC 5522 なら答えに使う。OSC 52 は答えを捨てる）
+    fn clipboard_write(&mut self, _text: &str) -> bool {
+        false
+    }
+    /// アプリがクリップボードを読もうとした（OSC 52 の `?`）。[`Terminal::set_clipboard_read_enabled`] で
+    /// 有効にしたときだけ呼ばれる。`None` なら読めなかった（空として答える）
+    fn clipboard_read(&mut self) -> Option<String> {
+        None
+    }
+    /// デスクトップ通知（OSC 9 / 777）。タイトルが無ければ空
+    fn desktop_notification(&mut self, _title: &str, _body: &str) {}
+    /// 進捗（OSC 9;4）。`percent` は省かれていれば `None`
+    fn progress(&mut self, _state: ProgressState, _percent: Option<u8>) {}
+}
+
+/// 進捗の状態（OSC 9;4。`GhosttyTerminalProgressState`）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressState {
+    /// 表示を消す
+    Remove,
+    /// 進捗（割合）
+    Set,
+    /// 失敗
+    Error,
+    /// 割合の分からない進捗
+    Indeterminate,
+    /// 一時停止
+    Pause,
+}
+
+impl ProgressState {
+    /// Lisp に渡す名前
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Remove => "remove",
+            Self::Set => "set",
+            Self::Error => "error",
+            Self::Indeterminate => "indeterminate",
+            Self::Pause => "pause",
+        }
+    }
 }
 
 /// 何もしない [`Effects`]
@@ -102,6 +144,8 @@ struct Inner {
     hold_capture: Option<RenderState>,
     /// hold の render state に写す余分の行（ペインの行が端末より多いとき）
     hold_overscan: (u16, u16),
+    /// libghostty-vt の組み込みの 256 色（最初に既定のパレットを変える前に読んで覚える。T-034）
+    builtin_palette: Option<[Rgb; 256]>,
 }
 
 /// ビューポートのスクロールのしかた
@@ -208,6 +252,7 @@ impl Terminal {
             hold_started: None,
             hold_capture: None,
             hold_overscan: (0, 0),
+            builtin_palette: None,
         }));
         let t = Self { raw, inner, gesture: None };
         unsafe {
@@ -218,14 +263,84 @@ impl Terminal {
             let pwd: ffi::GhosttyTerminalPwdChangedFn = cb_pwd_changed;
             let size: ffi::GhosttyTerminalSizeFn = cb_size;
             let hold: ffi::GhosttyTerminalRenderHoldFn = cb_render_hold;
+            let clip: ffi::GhosttyTerminalClipboardWriteFn = cb_clipboard_write;
+            let notify: ffi::GhosttyTerminalDesktopNotificationFn = cb_desktop_notification;
+            let progress: ffi::GhosttyTerminalProgressReportFn = cb_progress_report;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_BELL, bell as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, title as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_PWD_CHANGED, pwd as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_SIZE, size as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_RENDER_HOLD, hold as *const c_void))?;
+            // OSC 52 の書き込み・OSC 9 / 777・OSC 9;4（T-039）。読み取りは既定で入れない（set_clipboard_read_enabled）
+            check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, clip as *const c_void))?;
+            check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, notify as *const c_void))?;
+            check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT, progress as *const c_void))?;
         }
         Ok(t)
+    }
+
+    /// クリップボードの読み取り（OSC 52 の `?`）を受けるか（T-039）。**既定は受けない**（コールバックを入れないので、
+    /// libghostty-vt は OSC 52 の読み取りを無視し、OSC 5522 の読み取りを EPERM で断る）。
+    /// 受けるときは [`Effects::clipboard_read`] が呼ばれる
+    pub fn set_clipboard_read_enabled(&mut self, enabled: bool) -> Result<()> {
+        let f: ffi::GhosttyTerminalClipboardReadFn = cb_clipboard_read;
+        let value = if enabled { f as *const c_void } else { ptr::null() };
+        check(unsafe { ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ, value) })
+    }
+
+    /// 既定の 16 色を変える（T-034）。`None` の色は libghostty-vt の組み込みの色。16〜255 は組み込みのまま。
+    /// アプリが OSC 4 で変えた色はそのまま残る（libghostty-vt は既定と上書きを分けて持つ）
+    pub fn set_default_palette16(&mut self, colors: &[Option<Rgb>; 16]) -> Result<()> {
+        let inner = unsafe { &mut *self.inner };
+        let base = match inner.builtin_palette {
+            Some(p) => p,
+            None => {
+                let mut p = [Rgb::default(); 256];
+                check(unsafe {
+                    ffi::ghostty_terminal_get(self.raw, ffi::GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT, p.as_mut_ptr() as *mut c_void)
+                })?;
+                inner.builtin_palette = Some(p);
+                p
+            }
+        };
+        let mut full = base;
+        for (dst, c) in full.iter_mut().zip(colors) {
+            if let Some(c) = c {
+                *dst = *c;
+            }
+        }
+        check(unsafe { ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, full.as_ptr() as *const c_void) })
+    }
+
+    /// DECSCUSR の既定（`CSI 0 q` で戻る形と点滅。T-035）。アプリが DECSCUSR で形を決めていない間は、今のカーソルもこれに従う
+    /// （決めたあとはアプリの形のまま。libghostty-vt の動き。tests.rs で確かめた）
+    pub fn set_default_cursor(&mut self, shape: CursorShape, blink: bool) -> Result<()> {
+        let style: c_int = match shape {
+            CursorShape::Bar => ffi::GHOSTTY_CURSOR_STYLE_BAR,
+            CursorShape::Block => ffi::GHOSTTY_CURSOR_STYLE_BLOCK,
+            CursorShape::Underline => ffi::GHOSTTY_CURSOR_STYLE_UNDERLINE,
+            CursorShape::BlockHollow => ffi::GHOSTTY_CURSOR_STYLE_BLOCK_HOLLOW,
+        };
+        unsafe {
+            check(ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE, &style as *const _ as *const c_void))?;
+            check(ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK, &blink as *const _ as *const c_void))
+        }
+    }
+
+    /// セルのハイパーリンク（OSC 8）の URI。無ければ `None`（T-039）
+    pub fn hyperlink_uri(&self, at: GridRef) -> Option<String> {
+        let mut len = 0usize;
+        let r = unsafe { ffi::ghostty_grid_ref_hyperlink_uri(&at.0, ptr::null_mut(), 0, &mut len) };
+        if r == ffi::GHOSTTY_SUCCESS || len == 0 {
+            return None;
+        }
+        if r != ffi::GHOSTTY_OUT_OF_SPACE {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        let r = unsafe { ffi::ghostty_grid_ref_hyperlink_uri(&at.0, buf.as_mut_ptr(), buf.len(), &mut len) };
+        (r == ffi::GHOSTTY_SUCCESS && len > 0).then(|| String::from_utf8_lossy(&buf[..len.min(buf.len())]).into_owned())
     }
 
     /// PTY から読んだバイト列を解釈する。途中で切れた列をそのまま渡してよい
@@ -913,6 +1028,94 @@ unsafe extern "C" fn cb_pwd_changed(t: ffi::GhosttyTerminal, userdata: *mut c_vo
             let pwd = terminal_string(t, ffi::GHOSTTY_TERMINAL_DATA_PWD);
             i.effects.pwd_changed(&pwd);
         }
+    }));
+}
+
+unsafe fn ghostty_str<'a>(s: &ffi::GhosttyString) -> &'a [u8] {
+    if s.ptr.is_null() || s.len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(s.ptr, s.len) } }
+}
+
+/// クリップボードへの書き込み（OSC 52 / OSC 1337 Copy / OSC 5522。T-039）。テキストの表現を 1 つ選んで渡す。
+/// 答えはコールバックの中で返す（返さなければ拒んだことになる）
+unsafe extern "C" fn cb_clipboard_write(_t: ffi::GhosttyTerminal, userdata: *mut c_void, write: *const ffi::GhosttyClipboardWrite) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (Some(i), Some(w)) = (inner(userdata), write.as_ref()) else { return };
+        let contents: &[ffi::GhosttyClipboardContent] =
+            if w.contents.is_null() || w.contents_len == 0 { &[] } else { std::slice::from_raw_parts(w.contents, w.contents_len) };
+        // text/plain を先に、無ければほかの text/*。消す（contents_len = 0）頼みは受けない
+        let pick = contents
+            .iter()
+            .find(|c| ghostty_str(&c.mime).starts_with(b"text/plain"))
+            .or_else(|| contents.iter().find(|c| ghostty_str(&c.mime).starts_with(b"text/")));
+        let result = match pick {
+            Some(c) => {
+                let text = String::from_utf8_lossy(ghostty_str(&c.data)).into_owned();
+                if i.effects.clipboard_write(&text) {
+                    ffi::GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS
+                } else {
+                    ffi::GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED
+                }
+            }
+            None => ffi::GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED,
+        };
+        let reply = ffi::GhosttyClipboardWriteReply { size: std::mem::size_of::<ffi::GhosttyClipboardWriteReply>(), result, remember: false };
+        (w.reply)(write, &reply);
+    }));
+}
+
+/// クリップボードの読み取り（[`Terminal::set_clipboard_read_enabled`] のときだけ入れる）
+unsafe extern "C" fn cb_clipboard_read(_t: ffi::GhosttyTerminal, userdata: *mut c_void, read: *const ffi::GhosttyClipboardRead) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (Some(i), Some(r)) = (inner(userdata), read.as_ref()) else { return };
+        let text = i.effects.clipboard_read();
+        let mime = "text/plain";
+        let content = text.as_ref().map(|t| ffi::GhosttyClipboardContent {
+            mime: ffi::GhosttyString { ptr: mime.as_ptr(), len: mime.len() },
+            data: ffi::GhosttyString { ptr: t.as_ptr(), len: t.len() },
+        });
+        let reply = ffi::GhosttyClipboardReadReply {
+            size: std::mem::size_of::<ffi::GhosttyClipboardReadReply>(),
+            result: if content.is_some() { ffi::GHOSTTY_CLIPBOARD_READ_RESULT_SUCCESS } else { ffi::GHOSTTY_CLIPBOARD_READ_RESULT_BUSY },
+            contents: content.as_ref().map_or(ptr::null(), |c| c as *const _),
+            contents_len: content.is_some() as usize,
+            available: ptr::null(),
+            available_len: 0,
+            remember: false,
+        };
+        (r.reply)(read, &reply);
+    }));
+}
+
+/// デスクトップ通知（OSC 9 / 777）。空の通知は捨てる（ghostel と同じ）
+unsafe extern "C" fn cb_desktop_notification(
+    _t: ffi::GhosttyTerminal,
+    userdata: *mut c_void,
+    n: *const ffi::GhosttyTerminalDesktopNotification,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (Some(i), Some(n)) = (inner(userdata), n.as_ref()) else { return };
+        let title = String::from_utf8_lossy(ghostty_str(&n.title)).into_owned();
+        let body = String::from_utf8_lossy(ghostty_str(&n.body)).into_owned();
+        if title.is_empty() && body.is_empty() {
+            return;
+        }
+        i.effects.desktop_notification(&title, &body);
+    }));
+}
+
+/// 進捗（OSC 9;4）
+unsafe extern "C" fn cb_progress_report(_t: ffi::GhosttyTerminal, userdata: *mut c_void, r: *const ffi::GhosttyTerminalProgressReport) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (Some(i), Some(r)) = (inner(userdata), r.as_ref()) else { return };
+        let state = match r.state {
+            ffi::GHOSTTY_TERMINAL_PROGRESS_STATE_REMOVE => ProgressState::Remove,
+            ffi::GHOSTTY_TERMINAL_PROGRESS_STATE_SET => ProgressState::Set,
+            ffi::GHOSTTY_TERMINAL_PROGRESS_STATE_ERROR => ProgressState::Error,
+            ffi::GHOSTTY_TERMINAL_PROGRESS_STATE_INDETERMINATE => ProgressState::Indeterminate,
+            ffi::GHOSTTY_TERMINAL_PROGRESS_STATE_PAUSE => ProgressState::Pause,
+            _ => return,
+        };
+        i.effects.progress(state, (r.progress >= 0).then_some(r.progress as u8));
     }));
 }
 

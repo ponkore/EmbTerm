@@ -20,7 +20,9 @@ use std::sync::Mutex;
 
 use emacs::{Env, IntoLisp, Result, Value, Vector, defun};
 use et_render::NarrowWide;
-use term::{Event, Request, ScrollAmount, SpawnOptions, Term};
+use et_session::CursorDefault;
+use et_vt::{CursorShape, Rgb};
+use term::{ColorConfig, Event, Request, ScrollAmount, SpawnOptions, Term};
 
 emacs::plugin_is_GPL_compatible!();
 
@@ -58,6 +60,21 @@ fn opt_num(v: Value) -> Result<Option<f64>> {
 
 fn window_id(s: &str) -> Result<isize> {
     s.trim().parse::<isize>().map_err(|_| lisp_err(format!("window-id ではありません: {s}")))
+}
+
+/// "#rrggbb" を色にする（nil は `None`）
+fn color(s: Option<String>) -> Result<Option<Rgb>> {
+    let Some(s) = s else { return Ok(None) };
+    let hex = s.strip_prefix('#').unwrap_or(&s);
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(lisp_err(format!("色は \"#rrggbb\" で指定する: {s}")));
+    }
+    let v = u32::from_str_radix(hex, 16).map_err(lisp_err)?;
+    Ok(Some(Rgb { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 }))
+}
+
+fn color_string(c: Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
 }
 
 fn narrow_wide(s: Option<String>) -> Result<NarrowWide> {
@@ -251,6 +268,107 @@ fn set_narrow_wide(term: &RefCell<Term>, mode: String) -> Result<()> {
     Ok(())
 }
 
+/// 既定の色を変える（T-034）。FG・BG・CURSOR・SELECTION-BG・SELECTION-FG は "#rrggbb" か nil（module の既定）。
+/// PALETTE は 16 個の "#rrggbb" か nil のベクタ（nil の色は組み込み）、または nil。
+/// アプリが OSC 10 / 11 / 12 / 4 で変えた色はそのまま残る
+#[defun]
+fn set_colors(
+    term: &RefCell<Term>,
+    fg: Option<String>,
+    bg: Option<String>,
+    cursor: Option<String>,
+    selection_bg: Option<String>,
+    selection_fg: Option<String>,
+    palette: Option<Vector<'_>>,
+) -> Result<()> {
+    let mut c = ColorConfig {
+        foreground: color(fg)?,
+        background: color(bg)?,
+        cursor: color(cursor)?,
+        selection_bg: color(selection_bg)?,
+        selection_fg: color(selection_fg)?,
+        palette: [None; 16],
+    };
+    if let Some(v) = palette {
+        for i in 0..v.len().min(16) {
+            c.palette[i] = color(v.get::<Option<String>>(i)?)?;
+        }
+    }
+    term.borrow().request(Request::SetColors(c));
+    Ok(())
+}
+
+/// カーソルの既定の形 STYLE（"block" / "bar" / "underline"）と点滅 BLINK（T-035）。
+/// アプリが DECSCUSR で形を決めていない間はこれに従う
+#[defun]
+fn set_cursor(term: &RefCell<Term>, style: String, blink: Value<'_>) -> Result<()> {
+    let shape = match style.as_str() {
+        "block" => CursorShape::Block,
+        "bar" => CursorShape::Bar,
+        "underline" => CursorShape::Underline,
+        _ => return Err(lisp_err(format!("block / bar / underline を指定する: {style}"))),
+    };
+    term.borrow().request(Request::SetCursor(CursorDefault { shape, blink: blink.is_not_nil() }));
+    Ok(())
+}
+
+/// クリップボードの書き込み（OSC 52）を WRITE、読み取り（OSC 52 の `?`）を READ が non-nil なら許す（T-039）。
+/// 端末を作った直後は両方とも許さない
+#[defun]
+fn set_clipboard_policy(term: &RefCell<Term>, write: Value<'_>, read: Value<'_>) -> Result<()> {
+    term.borrow().request(Request::SetClipboardPolicy { write: write.is_not_nil(), read: read.is_not_nil() });
+    Ok(())
+}
+
+/// ペイン PANE のクライアント座標 X Y（画素）のセルのハイパーリンク（OSC 8）の URI。無ければ nil
+/// （UI スレッドに頼んで最大 2 秒待つ。デバッグ・自動確認用）
+#[defun]
+fn link_at(term: &RefCell<Term>, pane: i64, x: i64, y: i64) -> Result<Option<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    term.borrow().request(Request::LinkAt { pane, x: x as i32, y: y as i32, reply: tx });
+    Ok(rx.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten())
+}
+
+/// 描画とカーソルの状態の plist（UI スレッドに頼んで最大 2 秒待つ。デバッグ・自動確認用）。
+/// `(:blink-timer :blink-on :blink-ticks :full-draws :partial-draws :cursor-shape :cursor-blinking :cursor-visible
+/// :foreground :background :palette1 :cell :padding)`
+#[defun]
+fn debug_info<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    term.borrow().request(Request::DebugInfo(tx));
+    let Ok(i) = rx.recv_timeout(std::time::Duration::from_secs(2)) else { return ().into_lisp(env) };
+    let b = |v: bool| -> Result<Value<'e>> { v.into_lisp(env) };
+    let items = [
+        env.intern(":blink-timer")?,
+        b(i.blink_timer)?,
+        env.intern(":blink-on")?,
+        b(i.blink_on)?,
+        env.intern(":blink-ticks")?,
+        (i.blink_ticks as i64).into_lisp(env)?,
+        env.intern(":full-draws")?,
+        (i.full_draws as i64).into_lisp(env)?,
+        env.intern(":partial-draws")?,
+        (i.partial_draws as i64).into_lisp(env)?,
+        env.intern(":cursor-shape")?,
+        env.intern(i.cursor_shape)?,
+        env.intern(":cursor-blinking")?,
+        b(i.cursor_blinking)?,
+        env.intern(":cursor-visible")?,
+        b(i.cursor_visible)?,
+        env.intern(":foreground")?,
+        color_string(i.foreground).into_lisp(env)?,
+        env.intern(":background")?,
+        color_string(i.background).into_lisp(env)?,
+        env.intern(":palette1")?,
+        color_string(i.palette1).into_lisp(env)?,
+        env.intern(":cell")?,
+        env.cons(i.cell.0 as i64, i.cell.1 as i64)?,
+        env.intern(":padding")?,
+        (i.padding as i64).into_lisp(env)?,
+    ];
+    env.list(&items)
+}
+
 /// フォーカスの出入りを知らせる（FLAG が non-nil なら入った）
 #[defun]
 fn focus(term: &RefCell<Term>, flag: Value<'_>) -> Result<()> {
@@ -276,7 +394,9 @@ fn close(term: &RefCell<Term>) -> Result<()> {
 /// `(:generation :alive :view :hwnd :panes :started :pid :conpty :font :title :pwd :exited :exit-code :closed :cols :rows :events)`。
 /// :panes は `(ID HWND COLS ROWS SCROLLED)` のリスト。
 /// :events は前回から溜まった知らせ `(clicked . PANE)` `(bell)` `(exited . CODE)` `(screenshot . PATH)`
-/// `(selected . TEXT)` `(copy-ready)` `(error . MESSAGE)` のリスト
+/// `(selected . TEXT)` `(copy-ready)` `(error . MESSAGE)` `(clipboard . TEXT)` `(notification TITLE . BODY)`
+/// `(progress STATE . PERCENT)` `(link . URI)` のリスト（STATE は `set' `remove' `error' `indeterminate' `pause'、
+/// PERCENT は省かれていれば nil）
 #[defun]
 fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Result<Value<'e>> {
     let t = term.borrow();
@@ -294,6 +414,12 @@ fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Resu
             Event::Selected(t) => env.cons(env.intern("selected")?, t)?,
             Event::CopyReady => env.list([env.intern("copy-ready")?])?,
             Event::Error(m) => env.cons(env.intern("error")?, m)?,
+            Event::Clipboard(t) => env.cons(env.intern("clipboard")?, t)?,
+            Event::Notification { title, body } => env.cons(env.intern("notification")?, env.cons(title, body)?)?,
+            Event::Progress { state, percent } => {
+                env.cons(env.intern("progress")?, env.cons(env.intern(state)?, percent.map(|p| p as i64))?)?
+            }
+            Event::Link(uri) => env.cons(env.intern("link")?, uri)?,
         });
     }
     let b = |v: bool| -> Result<Value<'e>> { v.into_lisp(env) };

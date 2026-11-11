@@ -21,6 +21,11 @@
 //! - 子 HWND は作ったら `HWND_BOTTOM`、動かすときは `SWP_NOZORDER`。`WS_EX_NOACTIVATE` と `MA_NOACTIVATE` で
 //!   フォーカスを取らない（キーは Emacs が受けて module に送る。T-009 の案 A）
 //! - UI スレッドの wndproc とスレッドの本体は `catch_unwind` で包む（T-031）
+//! - 色（T-034）・カーソルの既定（T-035）・クリップボードの許可（T-039）は Lisp が頼みごとで送る。子プロセスを起動する前に
+//!   届いたものは [`SessionOptions`] に入れ、起動後のものは [`Session`] に反映する
+//! - カーソルの点滅（T-035）は制御用のウィンドウのタイマー。**選んでいるペインが見えていて、フォーカスがあり、カーソルが
+//!   点滅するときだけ**動かし、1 回ごとにカーソルのセルだけを描き直す（[`Renderer::draw_blink`]）
+//! - OSC 52 / 9 / 777 / 9;4 と、Ctrl+クリックしたハイパーリンク（OSC 8）は [`Event`] で Lisp に渡す（T-039）
 //! - スクロール位置・選択は [`et_vt::TrackedRef`] / libghostty の選択で持つので、出力が増えても同じ行を指す。
 //!   これらはすべて端末のロックの中で読み書きする
 
@@ -33,15 +38,15 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use et_render::{FontSpec, Frame, FrameView, Gpu, NarrowWide, Renderer};
+use et_render::{FontSpec, Frame, FrameView, Gpu, NarrowWide, Renderer, Theme};
 use et_session::keys::{KeyEvent, KeyPhase};
-use et_session::{Event as SessionEvent, Session, SessionOptions, keys};
+use et_session::{Colors, CursorDefault, Event as SessionEvent, Session, SessionOptions, keys};
 use et_vt::{Geometry, GridRef, Key, KeyEncoder, Mode, Mods, MouseAction, MouseButton, MouseEncoder, MouseGeometry, RenderState, Rgb, Scroll, Terminal, TrackedRef};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToClient};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_MENU, VK_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
@@ -68,6 +73,10 @@ const WHEEL_LINES: i64 = 3;
 const RENDER_HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 /// 制御用のウィンドウの hold の時限のタイマー
 const TIMER_RENDER_HOLD: usize = 1;
+/// カーソルの点滅のタイマー（T-035）
+const TIMER_CURSOR_BLINK: usize = 2;
+/// Lisp がまだ読んでいない知らせの上限（アプリが OSC を大量に出したときに溜め込みすぎない）
+const MAX_PENDING_EVENTS: usize = 1000;
 // マウスのメッセージの wParam の修飾キー（Win32_System_SystemServices の MK_* と同じ値）
 const MK_LBUTTON: u32 = 0x0001;
 const MK_RBUTTON: u32 = 0x0002;
@@ -122,7 +131,66 @@ pub enum Request {
     Screenshot { pane: Option<i64>, path: PathBuf },
     /// ペインの見えている行のテキスト（デバッグ用）
     PaneText { pane: i64, reply: mpsc::Sender<Option<String>> },
+    /// 既定の色（T-034）
+    SetColors(ColorConfig),
+    /// カーソルの既定（T-035）
+    SetCursor(CursorDefault),
+    /// クリップボードの書き込み・読み取りを許すか（T-039）
+    SetClipboardPolicy { write: bool, read: bool },
+    /// ペインの画素の位置のハイパーリンク（デバッグ・自動確認用）
+    LinkAt { pane: i64, x: i32, y: i32, reply: mpsc::Sender<Option<String>> },
+    /// 描画とカーソルの状態（デバッグ・自動確認用）
+    DebugInfo(mpsc::Sender<DebugInfo>),
     Close,
+}
+
+/// Lisp から受けた色（T-034）。端末の既定の色と、描く側の選択の色。`None` は module の既定
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ColorConfig {
+    pub foreground: Option<Rgb>,
+    pub background: Option<Rgb>,
+    pub cursor: Option<Rgb>,
+    pub selection_bg: Option<Rgb>,
+    pub selection_fg: Option<Rgb>,
+    pub palette: [Option<Rgb>; 16],
+}
+
+impl ColorConfig {
+    fn term_colors(&self) -> Colors {
+        Colors {
+            foreground: self.foreground.unwrap_or(DEFAULT_FG),
+            background: self.background.unwrap_or(DEFAULT_BG),
+            cursor: self.cursor,
+            palette: self.palette,
+        }
+    }
+
+    /// 描く側の色（選択とカーソル）を `theme` に入れる
+    fn apply_theme(&self, theme: &mut Theme) {
+        let d = Theme::default();
+        theme.selection_bg = self.selection_bg.unwrap_or(d.selection_bg);
+        theme.selection_fg = self.selection_fg;
+        theme.cursor = self.cursor.unwrap_or(d.cursor);
+    }
+}
+
+/// 描画とカーソルの状態（[`Request::DebugInfo`]）
+#[derive(Clone, Debug, Default)]
+pub struct DebugInfo {
+    pub blink_timer: bool,
+    pub blink_on: bool,
+    pub blink_ticks: u64,
+    pub full_draws: u64,
+    pub partial_draws: u64,
+    pub cursor_shape: &'static str,
+    pub cursor_blinking: bool,
+    pub cursor_visible: bool,
+    pub foreground: Rgb,
+    pub background: Rgb,
+    pub palette1: Rgb,
+    /// 選んでいる（無ければ最後に選んだ）ペインのセルの大きさと余白（画素）
+    pub cell: (u32, u32),
+    pub padding: u32,
 }
 
 /// Lisp に渡す知らせ
@@ -140,6 +208,14 @@ pub enum Event {
     /// copy モードのテキストができた（`embterm-module-take-copy' で受け取る）
     CopyReady,
     Error(String),
+    /// アプリがクリップボードへ書いた（OSC 52。T-039）
+    Clipboard(String),
+    /// デスクトップ通知（OSC 9 / 777）
+    Notification { title: String, body: String },
+    /// 進捗（OSC 9;4）。状態の名前（"set" など）と割合
+    Progress { state: &'static str, percent: Option<u8> },
+    /// ハイパーリンク（OSC 8）が Ctrl+クリックされた（URI）
+    Link(String),
 }
 
 /// Lisp に見せるペインの情報
@@ -229,6 +305,29 @@ impl Shared {
 
     fn emit(&self, e: Event) {
         self.events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        self.update(|_| {});
+    }
+
+    /// アプリが出したものの知らせ（ベル・OSC）。まだ読まれていない同じ知らせは重ねない（ベルは 1 つに、進捗は最後のものに）。
+    /// 溜まりすぎたら捨てる（大量に出すアプリで Emacs を詰まらせない。T-040）
+    fn emit_from_app(&self, e: Event) {
+        {
+            let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+            match (events.last_mut(), &e) {
+                (Some(Event::Bell), Event::Bell) => return,
+                (Some(last @ Event::Progress { .. }), Event::Progress { .. }) => {
+                    *last = e;
+                    drop(events);
+                    self.update(|_| {});
+                    return;
+                }
+                _ => {}
+            }
+            if events.len() >= MAX_PENDING_EVENTS {
+                return;
+            }
+            events.push(e);
+        }
         self.update(|_| {});
     }
 
@@ -537,6 +636,20 @@ struct App {
     drag: Option<Drag>,
     /// 最初のクリックからの単調な時刻の基準（libghostty の選択の解釈に渡す）
     epoch: Instant,
+    /// 色（T-034）。起動前に届いたものは起動のときに使う
+    colors: ColorConfig,
+    /// カーソルの既定（T-035）
+    cursor_default: CursorDefault,
+    /// クリップボードの書き込み・読み取りを許すか（T-039）
+    clipboard: (bool, bool),
+    /// 点滅のタイマーが動いているか
+    blink_timer: bool,
+    /// 点滅でカーソルが点いているか（タイマーが止まっているときは常に true）
+    blink_on: bool,
+    /// 点滅の回数（自動確認用）
+    blink_ticks: u64,
+    /// 前に描いたカーソルの位置（動いたら点滅をやり直して点ける）
+    blink_pos: Option<(u16, u16)>,
 }
 
 fn client_size(hwnd: HWND) -> (u32, u32) {
@@ -584,6 +697,13 @@ impl App {
             alt_screen: false,
             drag: None,
             epoch: Instant::now(),
+            colors: ColorConfig::default(),
+            cursor_default: CursorDefault::default(),
+            clipboard: (false, false),
+            blink_timer: false,
+            blink_on: true,
+            blink_ticks: 0,
+            blink_pos: None,
         })
     }
 
@@ -738,6 +858,64 @@ impl App {
                 let text = self.pane_text(pane);
                 let _ = reply.send(text);
             }
+            Request::SetColors(c) => {
+                self.colors = c;
+                for p in &mut self.panes {
+                    if let Some(v) = &mut p.view {
+                        c.apply_theme(&mut v.renderer.theme);
+                    }
+                }
+                if let Some(s) = &self.session {
+                    s.set_colors(&c.term_colors());
+                }
+                self.refresh(true);
+            }
+            Request::SetCursor(c) => {
+                self.cursor_default = c;
+                if let Some(s) = &self.session {
+                    s.set_cursor_default(c);
+                }
+                self.refresh(true);
+            }
+            Request::SetClipboardPolicy { write, read } => {
+                self.clipboard = (write, read);
+                if let Some(s) = &self.session {
+                    s.set_clipboard_policy(write, read);
+                }
+            }
+            Request::LinkAt { pane, x, y, reply } => {
+                let _ = reply.send(self.link_at(pane, (x, y)));
+            }
+            Request::DebugInfo(reply) => {
+                let mut info = DebugInfo {
+                    blink_timer: self.blink_timer,
+                    blink_on: self.blink_on,
+                    blink_ticks: self.blink_ticks,
+                    cursor_shape: match self.master.cursor.shape {
+                        et_vt::CursorShape::Bar => "bar",
+                        et_vt::CursorShape::Block => "block",
+                        et_vt::CursorShape::Underline => "underline",
+                        et_vt::CursorShape::BlockHollow => "block-hollow",
+                    },
+                    cursor_blinking: self.master.cursor.blinking,
+                    cursor_visible: self.master.cursor.visible,
+                    foreground: self.master.foreground,
+                    background: self.master.background,
+                    palette1: self.master.palette[1],
+                    ..Default::default()
+                };
+                for p in &self.panes {
+                    if let Some(v) = &p.view {
+                        info.full_draws += v.renderer.stats.full;
+                        info.partial_draws += v.renderer.stats.partial;
+                        if Some(p.id) == self.active {
+                            info.cell = v.renderer.cell_size();
+                            info.padding = v.renderer.padding();
+                        }
+                    }
+                }
+                let _ = reply.send(info);
+            }
             Request::Close => self.close(),
         }
     }
@@ -807,9 +985,25 @@ impl App {
                     s.update(|st| st.closed = true);
                 }
             }
+            // 読みのスレッドで、端末のロックを持ったまま呼ばれる。共有の列に積むだけ（T-039 / T-040）
             SessionEvent::Bell => {
                 if let Some(s) = weak.upgrade() {
-                    s.emit(Event::Bell);
+                    s.emit_from_app(Event::Bell);
+                }
+            }
+            SessionEvent::ClipboardWrite(text) => {
+                if let Some(s) = weak.upgrade() {
+                    s.emit_from_app(Event::Clipboard(text));
+                }
+            }
+            SessionEvent::Notification { title, body } => {
+                if let Some(s) = weak.upgrade() {
+                    s.emit_from_app(Event::Notification { title, body });
+                }
+            }
+            SessionEvent::Progress { state, percent } => {
+                if let Some(s) = weak.upgrade() {
+                    s.emit_from_app(Event::Progress { state: state.name(), percent });
                 }
             }
             SessionEvent::Title | SessionEvent::Pwd | SessionEvent::Exited => {
@@ -824,9 +1018,11 @@ impl App {
                 rows,
                 cell_px: self.cell,
                 conpty_search: search,
-                foreground: DEFAULT_FG,
-                background: DEFAULT_BG,
+                colors: self.colors.term_colors(),
+                cursor: self.cursor_default,
                 scrollback_lines: opts.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
+                clipboard_write: self.clipboard.0,
+                clipboard_read: self.clipboard.1,
             },
             notify,
         );
@@ -906,6 +1102,7 @@ impl App {
         match Renderer::with_gpu(gpu, hwnd, cw.max(1), ch.max(1), dpi, self.font.clone()) {
             Ok(mut renderer) => {
                 renderer.theme.narrow_wide = self.narrow_wide;
+                self.colors.apply_theme(&mut renderer.theme);
                 log(&format!(
                     "子 HWND を作った: 0x{:x} / 親 0x{:x} / フォント {} / セル {:?} / DPI {dpi}{}",
                     hwnd.0 as isize,
@@ -1167,6 +1364,7 @@ impl App {
             p.needs_draw = true;
         }
         self.publish_cursor();
+        self.update_blink();
         for i in 0..self.panes.len() {
             let p = &self.panes[i];
             if !p.visible() {
@@ -1177,6 +1375,93 @@ impl App {
                 self.draw_pane(i, None);
             }
         }
+    }
+
+    /// 点滅させるペイン（選んでいて、見えていて、下を追っていて、フォーカスがあり、カーソルが見えて点滅する）
+    fn blink_target(&self) -> Option<usize> {
+        if !self.focused {
+            return None;
+        }
+        let c = &self.master.cursor;
+        if !(c.visible && c.blinking && c.pos.is_some()) {
+            return None;
+        }
+        let id = self.selected?;
+        self.panes.iter().position(|p| p.id == id && p.visible() && p.follows(self.alt_screen))
+    }
+
+    /// 点滅のタイマーを要るときだけ動かす（T-035）。カーソルが動いたら点けてやり直す。描く前に呼ぶ
+    fn update_blink(&mut self) {
+        let interval = unsafe { GetCaretBlinkTime() };
+        // 0xFFFFFFFF（INFINITE）は「Windows の設定で点滅しない」
+        let want = self.blink_target().is_some() && interval != u32::MAX && interval > 0;
+        let pos = self.master.cursor.pos;
+        if want {
+            if !self.blink_timer || pos != self.blink_pos {
+                if !self.blink_on {
+                    self.mark_blink_pane_dirty();
+                }
+                self.blink_on = true;
+                unsafe {
+                    SetTimer(Some(self.control), TIMER_CURSOR_BLINK, interval, None);
+                }
+                self.blink_timer = true;
+            }
+        } else if self.blink_timer {
+            unsafe {
+                let _ = KillTimer(Some(self.control), TIMER_CURSOR_BLINK);
+            }
+            self.blink_timer = false;
+            if !self.blink_on {
+                self.blink_on = true;
+                self.mark_blink_pane_dirty();
+            }
+        }
+        self.blink_pos = pos;
+    }
+
+    /// 選んでいるペインを描き直す印を付ける（点滅で消えていたカーソルを点けるとき）
+    fn mark_blink_pane_dirty(&mut self) {
+        if let Some(id) = self.selected
+            && let Some(p) = self.pane_mut(id)
+        {
+            p.needs_draw = true;
+        }
+    }
+
+    /// 点滅のタイマー。カーソルのセルだけを描き直す
+    fn blink_tick(&mut self) {
+        self.check_views();
+        let Some(i) = self.blink_target().filter(|_| self.blink_timer) else {
+            self.update_blink();
+            return;
+        };
+        self.blink_on = !self.blink_on;
+        self.blink_ticks += 1;
+        if self.panes[i].needs_draw {
+            self.draw_pane(i, None);
+            return;
+        }
+        let view = self.follow_view(i);
+        let focused = self.focused && self.selected == Some(self.panes[i].id);
+        let r = match self.panes[i].view.as_mut() {
+            Some(v) if unsafe { IsWindowVisible(v.hwnd) }.as_bool() => v.renderer.draw_blink(&self.master, &view, focused),
+            _ => Ok(()),
+        };
+        if let Err(e) = r {
+            log(&format!("点滅の描画に失敗（デバイスを作り直した）: {e}"));
+            self.rebuild_device();
+        }
+    }
+
+    /// 下を追っているペイン `i` に描くビュー（端末の下の端をペインの下の端に揃える）
+    fn follow_view(&self, i: usize) -> FrameView {
+        let p = &self.panes[i];
+        let (cols, rows) = p.grid;
+        let focused = self.focused && self.selected == Some(p.id);
+        // 点滅で消えているときはカーソルを描かない（フォーカスの無いペインは枠のまま点滅しない）
+        let show_cursor = !(focused && self.blink_timer && !self.blink_on);
+        FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor }
     }
 
     /// ペインの今の中身を描く
@@ -1194,7 +1479,8 @@ impl App {
             let (cols, rows) = pane.grid;
             let result = if follows {
                 // 追っているペイン: 端末の下の端をペインの下の端に揃える（上に足りなければ空き）
-                let view = FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor: true };
+                let show_cursor = !(focused && self.blink_timer && !self.blink_on);
+                let view = FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor };
                 v.renderer.draw_view(&self.master, &view, focused, capture)
             } else if let Some(s) = &pane.scrolled {
                 let view = FrameView { top: s.top, cols, rows, show_cursor: false };
@@ -1332,6 +1618,12 @@ impl App {
         let Some(s) = self.ensure_session() else { return };
         self.prepare_for_input(&s);
         s.write(data);
+        // 打ったらカーソルを点けて点滅をやり直す（次の update_blink でタイマーを掛け直す）
+        if self.blink_timer && !self.blink_on {
+            self.blink_on = true;
+            self.mark_blink_pane_dirty();
+        }
+        self.blink_pos = None;
         self.refresh(false);
     }
 
@@ -1590,9 +1882,28 @@ impl App {
         term.grid_ref(x, y as u32).ok()
     }
 
+    /// ペインのクライアント座標のセルのハイパーリンク（OSC 8）の URI（T-039）
+    fn link_at(&self, id: i64, client: (i32, i32)) -> Option<String> {
+        let cell = self.pane_cell(id, client)?;
+        let s = self.session.as_ref()?;
+        let term = s.lock();
+        let alt = term.is_alternate_screen();
+        let p = self.panes.iter().find(|p| p.id == id)?;
+        let at = Self::pane_ref(p, &term, cell, alt)?;
+        term.hyperlink_uri(at)
+    }
+
     fn lbutton_down(&mut self, id: i64, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         let client = point_of(lparam);
         let mods = mods_of(wparam);
+        // Ctrl+クリックしたのがハイパーリンクなら、開くのは Lisp に任せる（選択もアプリへの報告もしない）
+        if mods.ctrl
+            && let Some(uri) = self.link_at(id, client)
+        {
+            log(&format!("リンクを Ctrl+クリック: {uri}"));
+            self.shared.emit(Event::Link(uri));
+            return;
+        }
         if self.should_report(id, mods.shift) {
             self.drag = Some(Drag::Reporting(id, MouseButton::Left));
             unsafe { SetCapture(hwnd) };
@@ -1758,10 +2069,27 @@ impl App {
                 }
             }
             WM_SETCURSOR => {
-                // マウスの形（T-038）: テキストの上は I ビーム、アプリへ報告しているときは矢印
+                // マウスの形（T-038）: テキストの上は I ビーム、アプリへ報告しているときは矢印、
+                // ハイパーリンク（OSC 8）の上は手（報告しているときは Ctrl を押している間だけ。T-039）
                 if (lparam.0 & 0xffff) as u32 == HTCLIENT {
                     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
-                    let name = if self.should_report(id, shift) { IDC_ARROW } else { IDC_IBEAM };
+                    let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+                    let report = self.should_report(id, shift);
+                    let link = self.drag.is_none() && (!report || ctrl) && {
+                        let mut pt = POINT::default();
+                        unsafe {
+                            let _ = GetCursorPos(&mut pt);
+                            let _ = ScreenToClient(hwnd, &mut pt);
+                        }
+                        self.link_at(id, (pt.x, pt.y)).is_some()
+                    };
+                    let name = if link {
+                        IDC_HAND
+                    } else if report {
+                        IDC_ARROW
+                    } else {
+                        IDC_IBEAM
+                    };
                     unsafe {
                         SetCursor(LoadCursorW(None, name).ok());
                     }
@@ -1819,6 +2147,7 @@ extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
             }
             with_app(|a| a.refresh(false)).map(|_| LRESULT(0))
         }
+        WM_TIMER if wparam.0 == TIMER_CURSOR_BLINK => with_app(|a| a.blink_tick()).map(|_| LRESULT(0)),
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             Some(LRESULT(0))

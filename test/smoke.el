@@ -123,7 +123,7 @@
               (embterm-module-set-log (smoke-out "module.log"))
               (smoke-log "module %s / %s" embterm--module-loaded embterm-module-directory)
               (let ((embterm-shell '("cmd.exe")))
-                (setq smoke-cmd (embterm)))
+                (setq smoke-cmd (embterm-new)))
               (smoke-log "%s" (smoke-state smoke-cmd))))
     (3.0 "cmd: キーを送る（semi-char のキーマップを通す）"
          . ,(lambda ()
@@ -211,7 +211,7 @@
          . ,(lambda ()
               (smoke-log "%s" (smoke-state smoke-cmd))
               (let ((embterm-shell '("pwsh" "-NoLogo")))
-                (setq smoke-pwsh (embterm)))))
+                (setq smoke-pwsh (embterm-new)))))
     (4.0 "pwsh: キーを送る"
          . ,(lambda ()
               (smoke-log "%s" (smoke-state smoke-pwsh))
@@ -294,7 +294,7 @@
                          (mapcar (lambda (p) (and p (process-attributes p) t)) smoke-pids)
                          embterm--buffers)
               (let ((embterm-shell '("cmd.exe" "/c" "exit 3")))
-                (setq smoke-cmd (embterm)))))
+                (setq smoke-cmd (embterm-new)))))
     (3.0 "終了コード 3 で終わる端末（バッファが消える）"
          . ,(lambda ()
               (smoke-log "バッファは生きているか: %S / 端末のバッファ: %S" (buffer-live-p smoke-cmd) embterm--buffers)

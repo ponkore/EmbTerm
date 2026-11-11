@@ -83,7 +83,7 @@
               (embterm--load-module)
               (embterm-module-set-log (expand-file-name "module.log" kitty-out))
               (let ((embterm-shell '("cmd.exe")))
-                (setq kitty-buf (embterm)))))
+                (setq kitty-buf (embterm-new)))))
     (3.0 "yazi を起動して画像を選ぶ"
          . ,(lambda ()
               (kitty-type (format "set YAZI_CONFIG_HOME=%s&& yazi %s" kitty-yazi-config kitty-imgs) 'return)))

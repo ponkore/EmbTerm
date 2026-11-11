@@ -5,6 +5,7 @@
 # 動作は次のどれか。X Y はクライアント座標、D はホイールの量（120 が 1 ノッチ、正は上）
 #   down:X:Y  up:X:Y  move:X:Y  rdown:X:Y  rup:X:Y  wheel:D:X:Y
 #   sdown:X:Y sup:X:Y smove:X:Y（Shift を押した扱い）
+#   cdown:X:Y cup:X:Y cmove:X:Y（Ctrl を押した扱い。ハイパーリンクの Ctrl+クリック。T-039）
 #   sleep:MS
 # 本物のマウスは動かさない。
 param(
@@ -34,6 +35,9 @@ foreach ($a in $Actions.Split(',')) {
         'sdown' { [void][EmbTermPost]::PostMessageW($h, 0x0201, [IntPtr]5, (Pt $p[1] $p[2])) }
         'sup'   { [void][EmbTermPost]::PostMessageW($h, 0x0202, [IntPtr]4, (Pt $p[1] $p[2])) }
         'smove' { [void][EmbTermPost]::PostMessageW($h, 0x0200, [IntPtr]5, (Pt $p[1] $p[2])) }
+        'cdown' { [void][EmbTermPost]::PostMessageW($h, 0x0201, [IntPtr]9, (Pt $p[1] $p[2])) }
+        'cup'   { [void][EmbTermPost]::PostMessageW($h, 0x0202, [IntPtr]8, (Pt $p[1] $p[2])) }
+        'cmove' { [void][EmbTermPost]::PostMessageW($h, 0x0200, [IntPtr]9, (Pt $p[1] $p[2])) }
         'wheel' {
             $pt = New-Object EmbTermPost+POINT
             $pt.X = [int]$p[2]; $pt.Y = [int]$p[3]

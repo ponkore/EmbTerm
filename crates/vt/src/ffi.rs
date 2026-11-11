@@ -286,7 +286,95 @@ pub struct GhosttySysImage {
     pub data_len: usize,
 }
 
+/// terminal.h（クリップボードの 1 つの表現。T-039）
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GhosttyClipboardContent {
+    pub mime: GhosttyString,
+    pub data: GhosttyString,
+}
+
+/// terminal.h（大きさ付き）
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GhosttyClipboardWriteReply {
+    pub size: usize,
+    pub result: c_int,
+    pub remember: bool,
+}
+
+/// terminal.h（書き込みの頼み。コールバックの間だけ有効）
+#[repr(C)]
+pub struct GhosttyClipboardWrite {
+    pub location: c_int,
+    pub contents: *const GhosttyClipboardContent,
+    pub contents_len: usize,
+    pub name: GhosttyString,
+    pub granted: bool,
+    pub can_remember: bool,
+    pub ctx: *const c_void,
+    pub reply: GhosttyClipboardWriteReplyFn,
+}
+
+/// terminal.h（大きさ付き）
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GhosttyClipboardReadReply {
+    pub size: usize,
+    pub result: c_int,
+    pub contents: *const GhosttyClipboardContent,
+    pub contents_len: usize,
+    pub available: *const GhosttyString,
+    pub available_len: usize,
+    pub remember: bool,
+}
+
+/// terminal.h（読み取りの頼み。コールバックの間だけ有効）
+#[repr(C)]
+pub struct GhosttyClipboardRead {
+    pub location: c_int,
+    pub mimes: *const GhosttyString,
+    pub mimes_len: usize,
+    pub list: bool,
+    pub name: GhosttyString,
+    pub granted: bool,
+    pub can_remember: bool,
+    pub ctx: *const c_void,
+    pub reply: GhosttyClipboardReadReplyFn,
+}
+
+/// terminal.h（OSC 9 / 777 の通知）
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GhosttyTerminalDesktopNotification {
+    pub title: GhosttyString,
+    pub body: GhosttyString,
+}
+
+/// terminal.h（OSC 9;4 の進捗）
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GhosttyTerminalProgressReport {
+    pub state: c_int,
+    pub progress: i8,
+}
+
 // ---- 列挙の値（使うものだけ） ----
+
+// GhosttyClipboardWriteResult / GhosttyClipboardReadResult（terminal.h）
+pub const GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS: c_int = 0;
+pub const GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED: c_int = 1;
+pub const GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED: c_int = 2;
+pub const GHOSTTY_CLIPBOARD_READ_RESULT_SUCCESS: c_int = 0;
+pub const GHOSTTY_CLIPBOARD_READ_RESULT_DENIED: c_int = 1;
+pub const GHOSTTY_CLIPBOARD_READ_RESULT_BUSY: c_int = 3;
+
+// GhosttyTerminalProgressState（terminal.h）
+pub const GHOSTTY_TERMINAL_PROGRESS_STATE_REMOVE: c_int = 0;
+pub const GHOSTTY_TERMINAL_PROGRESS_STATE_SET: c_int = 1;
+pub const GHOSTTY_TERMINAL_PROGRESS_STATE_ERROR: c_int = 2;
+pub const GHOSTTY_TERMINAL_PROGRESS_STATE_INDETERMINATE: c_int = 3;
+pub const GHOSTTY_TERMINAL_PROGRESS_STATE_PAUSE: c_int = 4;
 
 // GhosttyTerminalOption
 pub const GHOSTTY_TERMINAL_OPT_USERDATA: c_int = 1;
@@ -298,15 +386,22 @@ pub const GHOSTTY_TERMINAL_OPT_SIZE: c_int = 7;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND: c_int = 12;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: c_int = 13;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_CURSOR: c_int = 14;
+pub const GHOSTTY_TERMINAL_OPT_COLOR_PALETTE: c_int = 15;
 pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT: c_int = 16;
 pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE: c_int = 17;
 pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE: c_int = 18;
 pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM: c_int = 19;
 pub const GHOSTTY_TERMINAL_OPT_SELECTION: c_int = 22;
+pub const GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE: c_int = 23;
+pub const GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK: c_int = 24;
 pub const GHOSTTY_TERMINAL_OPT_PWD_CHANGED: c_int = 26;
+pub const GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE: c_int = 27;
 pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES: c_int = 28;
 pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES: c_int = 29;
+pub const GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION: c_int = 30;
+pub const GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT: c_int = 31;
 pub const GHOSTTY_TERMINAL_OPT_TERMINFO_NAME: c_int = 38;
+pub const GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ: c_int = 39;
 pub const GHOSTTY_TERMINAL_OPT_MODE_DEFAULT: c_int = 34;
 pub const GHOSTTY_TERMINAL_OPT_MODE: c_int = 35;
 pub const GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK: c_int = 41;
@@ -323,6 +418,7 @@ pub const GHOSTTY_TERMINAL_DATA_SCROLLBAR: c_int = 9;
 pub const GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING: c_int = 11;
 pub const GHOSTTY_TERMINAL_DATA_TITLE: c_int = 12;
 pub const GHOSTTY_TERMINAL_DATA_PWD: c_int = 13;
+pub const GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT: c_int = 25;
 pub const GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS: c_int = 30;
 pub const GHOSTTY_TERMINAL_DATA_SELECTION: c_int = 31;
 pub const GHOSTTY_TERMINAL_DATA_VIEWPORT_ACTIVE: c_int = 32;
@@ -515,6 +611,21 @@ pub type GhosttyTerminalXtversionFn = unsafe extern "C" fn(terminal: GhosttyTerm
 pub type GhosttyTerminalRenderHoldFn = unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, held: bool);
 pub type GhosttyTerminalSizeFn =
     unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, out: *mut GhosttySizeReportSize) -> bool;
+pub type GhosttyClipboardWriteReplyFn =
+    unsafe extern "C" fn(write: *const GhosttyClipboardWrite, reply: *const GhosttyClipboardWriteReply);
+pub type GhosttyClipboardReadReplyFn =
+    unsafe extern "C" fn(read: *const GhosttyClipboardRead, reply: *const GhosttyClipboardReadReply);
+pub type GhosttyTerminalClipboardWriteFn =
+    unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, write: *const GhosttyClipboardWrite);
+pub type GhosttyTerminalClipboardReadFn =
+    unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, read: *const GhosttyClipboardRead);
+pub type GhosttyTerminalDesktopNotificationFn = unsafe extern "C" fn(
+    terminal: GhosttyTerminal,
+    userdata: *mut c_void,
+    notification: *const GhosttyTerminalDesktopNotification,
+);
+pub type GhosttyTerminalProgressReportFn =
+    unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, report: *const GhosttyTerminalProgressReport);
 
 // ---- コールバックの型（sys.h） ----
 pub type GhosttySysDecodePngFn = unsafe extern "C" fn(
@@ -562,6 +673,14 @@ unsafe extern "C" {
         terminal: GhosttyTerminal,
         point: GhosttyPoint,
         out_ref: *mut GhosttyTrackedGridRef,
+    ) -> GhosttyResult;
+
+    // grid_ref.h
+    pub fn ghostty_grid_ref_hyperlink_uri(
+        grid_ref: *const GhosttyGridRef,
+        buf: *mut u8,
+        buf_len: usize,
+        out_written: *mut usize,
     ) -> GhosttyResult;
 
     // grid_ref_tracked.h

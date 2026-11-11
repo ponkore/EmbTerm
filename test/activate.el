@@ -16,7 +16,7 @@
 (run-at-time 60 nil (lambda () (activate-write "時間切れ") (kill-emacs 1)))
 
 (defvar activate-buf nil)
-(run-at-time 1 nil (lambda () (let ((embterm-shell '("cmd.exe"))) (setq activate-buf (embterm)))))
+(run-at-time 1 nil (lambda () (let ((embterm-shell '("cmd.exe"))) (setq activate-buf (embterm-new)))))
 (run-at-time
  5 nil
  (lambda ()

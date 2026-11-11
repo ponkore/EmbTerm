@@ -920,3 +920,184 @@ fn base64(data: &[u8]) -> String {
     }
     s
 }
+
+// ---- T-034 / T-035 / T-039 ----
+
+#[test]
+fn osc_callback_layouts() {
+    let t = types();
+    check_struct!(t, "GhosttyClipboardContent", GhosttyClipboardContent, [mime, data]);
+    check_struct!(t, "GhosttyClipboardWriteReply", GhosttyClipboardWriteReply, [size, result, remember]);
+    check_struct!(t, "GhosttyClipboardWrite", GhosttyClipboardWrite, [location, contents, contents_len, name, granted, can_remember, ctx, reply]);
+    check_struct!(
+        t,
+        "GhosttyClipboardReadReply",
+        GhosttyClipboardReadReply,
+        [size, result, contents, contents_len, available, available_len, remember]
+    );
+    check_struct!(t, "GhosttyClipboardRead", GhosttyClipboardRead, [location, mimes, mimes_len, list, name, granted, can_remember, ctx, reply]);
+    check_struct!(t, "GhosttyTerminalDesktopNotification", GhosttyTerminalDesktopNotification, [title, body]);
+    check_struct!(t, "GhosttyTerminalProgressReport", GhosttyTerminalProgressReport, [state, progress]);
+    check_enum(
+        &t,
+        "GhosttyTerminalOption",
+        &[
+            ("COLOR_PALETTE", GHOSTTY_TERMINAL_OPT_COLOR_PALETTE),
+            ("DEFAULT_CURSOR_STYLE", GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE),
+            ("DEFAULT_CURSOR_BLINK", GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK),
+            ("CLIPBOARD_WRITE", GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE),
+            ("DESKTOP_NOTIFICATION", GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION),
+            ("PROGRESS_REPORT", GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT),
+            ("CLIPBOARD_READ", GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ),
+        ],
+    );
+    check_enum(&t, "GhosttyTerminalData", &[("COLOR_PALETTE_DEFAULT", GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT)]);
+    check_enum(
+        &t,
+        "GhosttyClipboardWriteResult",
+        &[
+            ("SUCCESS", GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS),
+            ("DENIED", GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED),
+            ("UNSUPPORTED", GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED),
+        ],
+    );
+    check_enum(
+        &t,
+        "GhosttyClipboardReadResult",
+        &[("SUCCESS", GHOSTTY_CLIPBOARD_READ_RESULT_SUCCESS), ("DENIED", GHOSTTY_CLIPBOARD_READ_RESULT_DENIED), ("BUSY", GHOSTTY_CLIPBOARD_READ_RESULT_BUSY)],
+    );
+    check_enum(
+        &t,
+        "GhosttyTerminalProgressState",
+        &[
+            ("REMOVE", GHOSTTY_TERMINAL_PROGRESS_STATE_REMOVE),
+            ("SET", GHOSTTY_TERMINAL_PROGRESS_STATE_SET),
+            ("ERROR", GHOSTTY_TERMINAL_PROGRESS_STATE_ERROR),
+            ("INDETERMINATE", GHOSTTY_TERMINAL_PROGRESS_STATE_INDETERMINATE),
+            ("PAUSE", GHOSTTY_TERMINAL_PROGRESS_STATE_PAUSE),
+        ],
+    );
+}
+
+#[derive(Default)]
+struct OscLog {
+    pty: Vec<u8>,
+    clipboard: Vec<String>,
+    notes: Vec<(String, String)>,
+    progress: Vec<(ProgressState, Option<u8>)>,
+    allow_write: bool,
+}
+
+struct OscRecorder(Arc<Mutex<OscLog>>);
+
+impl Effects for OscRecorder {
+    fn write_pty(&mut self, data: &[u8]) {
+        self.0.lock().unwrap().pty.extend_from_slice(data);
+    }
+    fn clipboard_write(&mut self, text: &str) -> bool {
+        let mut l = self.0.lock().unwrap();
+        l.clipboard.push(text.to_string());
+        l.allow_write
+    }
+    fn clipboard_read(&mut self) -> Option<String> {
+        Some("secret".into())
+    }
+    fn desktop_notification(&mut self, title: &str, body: &str) {
+        self.0.lock().unwrap().notes.push((title.into(), body.into()));
+    }
+    fn progress(&mut self, state: ProgressState, percent: Option<u8>) {
+        self.0.lock().unwrap().progress.push((state, percent));
+    }
+}
+
+#[test]
+fn osc_52_9_777_and_progress() {
+    let log = Arc::new(Mutex::new(OscLog { allow_write: true, ..Default::default() }));
+    let mut t = Terminal::new(40, 5, Box::new(OscRecorder(log.clone()))).unwrap();
+    // OSC 52 の書き込み
+    t.vt_write(format!("\x1b]52;c;{}\x07", base64("こんにちは clip".as_bytes())).as_bytes());
+    // OSC 52 の読み取り: 既定は答えない
+    t.vt_write(b"\x1b]52;c;?\x07");
+    assert!(log.lock().unwrap().pty.is_empty(), "既定では読み取りに答えない: {:?}", String::from_utf8_lossy(&log.lock().unwrap().pty));
+    t.set_clipboard_read_enabled(true).unwrap();
+    t.vt_write(b"\x1b]52;c;?\x07");
+    let reply = String::from_utf8_lossy(&log.lock().unwrap().pty).into_owned();
+    assert!(reply.contains(&base64(b"secret")), "有効にすると答える: {reply:?}");
+    t.set_clipboard_read_enabled(false).unwrap();
+    log.lock().unwrap().pty.clear();
+    t.vt_write(b"\x1b]52;c;?\x07");
+    assert!(log.lock().unwrap().pty.is_empty());
+    // OSC 9 / 777 / 9;4
+    t.vt_write(b"\x1b]9;hello body\x07\x1b]777;notify;Title;Body text\x07");
+    t.vt_write(b"\x1b]9;4;1;42\x07\x1b]9;4;3\x07\x1b]9;4;0\x07");
+    let l = log.lock().unwrap();
+    assert_eq!(l.clipboard, vec!["こんにちは clip".to_string()]);
+    assert_eq!(l.notes, vec![("".into(), "hello body".into()), ("Title".into(), "Body text".into())]);
+    assert_eq!(l.progress[0], (ProgressState::Set, Some(42)));
+    assert_eq!(l.progress[1].0, ProgressState::Indeterminate);
+    assert_eq!(l.progress[2].0, ProgressState::Remove);
+}
+
+#[test]
+fn osc_8_hyperlink_of_cell() {
+    let (mut t, _) = terminal(40, 3);
+    t.vt_write(b"ab \x1b]8;;https://example.com/x?y=1\x1b\\link\x1b]8;;\x1b\\ cd");
+    let at = |t: &Terminal, x| t.grid_ref(x, 0).unwrap();
+    assert_eq!(t.hyperlink_uri(at(&t, 0)), None);
+    assert_eq!(t.hyperlink_uri(at(&t, 3)).as_deref(), Some("https://example.com/x?y=1"));
+    assert_eq!(t.hyperlink_uri(at(&t, 6)).as_deref(), Some("https://example.com/x?y=1"));
+    assert_eq!(t.hyperlink_uri(at(&t, 8)), None);
+}
+
+#[test]
+fn default_palette_keeps_osc4_overrides() {
+    let (mut t, _) = terminal(10, 2);
+    let mut rs = RenderState::new().unwrap();
+    rs.update(&t).unwrap();
+    let builtin = rs.colors().palette;
+    let red = Rgb { r: 0xaa, g: 0x11, b: 0x22 };
+    let mut p = [None; 16];
+    p[1] = Some(red);
+    t.set_default_palette16(&p).unwrap();
+    rs.update(&t).unwrap();
+    let pal = rs.colors().palette;
+    assert_eq!(pal[1], red);
+    assert_eq!(pal[2], builtin[2]);
+    assert_eq!(pal[100], builtin[100]);
+    // アプリが OSC 4 で変えた色は、既定を変えても残る
+    t.vt_write(b"\x1b]4;2;rgb:01/02/03\x07");
+    p[2] = Some(Rgb { r: 9, g: 9, b: 9 });
+    t.set_default_palette16(&p).unwrap();
+    rs.update(&t).unwrap();
+    assert_eq!(rs.colors().palette[2], Rgb { r: 1, g: 2, b: 3 });
+    // 戻す（None は組み込み）
+    t.set_default_palette16(&[None; 16]).unwrap();
+    rs.update(&t).unwrap();
+    assert_eq!(rs.colors().palette[1], builtin[1]);
+}
+
+#[test]
+fn default_cursor_style_and_decscusr() {
+    let (mut t, _) = terminal(10, 2);
+    let mut rs = RenderState::new().unwrap();
+    let mut cur = |t: &Terminal| {
+        rs.update(t).unwrap();
+        let c = rs.cursor();
+        (c.shape, c.blinking)
+    };
+    assert_eq!(cur(&t), (CursorShape::Block, false));
+    // 既定を変えると、アプリが DECSCUSR で決めていない間は今のカーソルも変わる
+    t.set_default_cursor(CursorShape::Bar, true).unwrap();
+    assert_eq!(cur(&t), (CursorShape::Bar, true));
+    // アプリの DECSCUSR
+    t.vt_write(b"[2 q");
+    assert_eq!(cur(&t), (CursorShape::Block, false));
+    t.set_default_cursor(CursorShape::Underline, false).unwrap();
+    assert_eq!(cur(&t), (CursorShape::Block, false), "アプリが決めた形は既定を変えても残る");
+    t.vt_write(b"[3 q");
+    assert_eq!(cur(&t), (CursorShape::Underline, true));
+    t.vt_write(b"[0 q");
+    assert_eq!(cur(&t), (CursorShape::Underline, false), "CSI 0 q は既定へ戻す");
+    t.vt_write(b"[?12h");
+    assert_eq!(cur(&t), (CursorShape::Underline, true));
+}

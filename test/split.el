@@ -102,7 +102,7 @@
               (embterm-module-set-log (expand-file-name "module.log" split-out))
               (setq embterm-scrollback-lines 2000)
               (let ((embterm-shell '("cmd.exe")))
-                (setq split-buf (embterm)))))
+                (setq split-buf (embterm-new)))))
     (3.0 "出力を出す（スクロールバックを作る）"
          . ,(lambda ()
               (split-log "%s" (split-state))
@@ -313,7 +313,7 @@
               (split-frame-png "frame-other-buffer.png")
               (delete-other-windows)
               (switch-to-buffer split-buf)
-              (setq split-buf2 (let ((embterm-shell '("pwsh" "-NoLogo"))) (embterm)))))
+              (setq split-buf2 (let ((embterm-shell '("pwsh" "-NoLogo"))) (embterm-new)))))
     (4.0 "pwsh（ブラケットペーストのモード）に貼り付け、マウスの報告"
          . ,(lambda ()
               (with-current-buffer split-buf2

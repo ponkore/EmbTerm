@@ -15,6 +15,8 @@
 //!   - `Shrink`: 1 セルの枠に収まるよう縮める（幅・上・下の比の最小）。前後が空白で孤立しているときは
 //!     右隣の空白を借りて 2 セル分の枠にする（ghostel と同じ規則）
 //! - 描くのは呼ばれたときだけ。呼ぶ側は render state が dirty のときだけ呼ぶ
+//! - カーソルの点滅（T-035）は [`Renderer::draw_blink`]。スワップチェーンの 2 枚のバッファがどちらも同じ中身に
+//!   なってからは、カーソルのセルだけを描き直す（クリップの中で行を描く）。全体を描いたらまた 1 回は全体を描く
 //! - Kitty graphics の画像（T-088）は [`images`] モジュール。層（背景色の下・文字の下・文字の上）ごとに背景・文字と重ね、
 //!   GPU のビットマップは画像の世代ごとにキャッシュする
 //!
@@ -141,6 +143,15 @@ enum RowPass {
     Text,
 }
 
+/// 描いた回数（自動確認用）
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DrawStats {
+    /// 全体を描いた回数
+    pub full: u64,
+    /// カーソルのセルだけを描いた回数（点滅）
+    pub partial: u64,
+}
+
 /// HWND 1 枚に端末を描くもの
 pub struct Renderer {
     hwnd: HWND,
@@ -153,6 +164,9 @@ pub struct Renderer {
     /// 画像の GPU のビットマップ（画像の世代が鍵。世代が変わると一覧から外れて捨てられる。デバイスと一緒に捨てる）
     bitmaps: HashMap<u64, ID2D1Bitmap1>,
     pub theme: Theme,
+    /// 点滅でカーソルのセルだけを描き直してよいか（2 枚のバッファが、カーソルのセルのほかは同じ中身）
+    partial_ready: bool,
+    pub stats: DrawStats,
 }
 
 impl Renderer {
@@ -165,7 +179,19 @@ impl Renderer {
     pub fn with_gpu(gpu: Gpu, hwnd: HWND, width: u32, height: u32, dpi: u32, spec: FontSpec) -> Result<Self> {
         let surface = Surface::new(&gpu, hwnd, width, height)?;
         let font = FontSet::new(&gpu.dwrite, &spec, dpi)?;
-        Ok(Self { hwnd, gpu, surface, font, spec, dpi, brushes: HashMap::new(), bitmaps: HashMap::new(), theme: Theme::default() })
+        Ok(Self {
+            hwnd,
+            gpu,
+            surface,
+            font,
+            spec,
+            dpi,
+            brushes: HashMap::new(),
+            bitmaps: HashMap::new(),
+            theme: Theme::default(),
+            partial_ready: false,
+            stats: DrawStats::default(),
+        })
     }
 
     /// 使っているフォントのファミリ名
@@ -228,6 +254,9 @@ impl Renderer {
 
     /// クライアント領域の大きさが変わった（物理ピクセル）
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        if (width.max(1), height.max(1)) != self.surface.size() {
+            self.partial_ready = false;
+        }
         self.surface.resize(width, height)
     }
 
@@ -252,6 +281,7 @@ impl Renderer {
         self.surface = surface;
         self.brushes.clear();
         self.bitmaps.clear();
+        self.partial_ready = false;
         Ok(())
     }
 
@@ -264,6 +294,8 @@ impl Renderer {
     /// デバイスを失ったら作り直して、次の呼び出しで描けるようにする
     pub fn draw_view(&mut self, frame: &Frame, view: &FrameView, focused: bool, capture: Option<&Path>) -> Result<()> {
         // WM_SIZE の取りこぼしに備え、描く前にスワップチェーンの大きさを確かめるのは呼ぶ側（GenPreview §1.3 #1）
+        self.partial_ready = false;
+        self.stats.full += 1;
         self.surface.begin();
         let r = self.draw_frame(frame, view, focused);
         let end = self.surface.end();
@@ -283,7 +315,61 @@ impl Renderer {
         Ok(())
     }
 
+    /// カーソルの点滅の 1 回分を描く（T-035）。`view.show_cursor` が点いている / 消えている状態。
+    /// 2 枚のバッファがそろっていればカーソルのセルだけを描き直し、そうでなければ全体を描く
+    /// （フリップモデルの 2 枚のバッファは交互に出るので、全体を描いたあとの 1 回目は全体を描いて 2 枚目もそろえる）
+    pub fn draw_blink(&mut self, frame: &Frame, view: &FrameView, focused: bool) -> Result<()> {
+        let cols = (frame.cols as usize).min(view.cols as usize);
+        let cell = self.cursor_cell(frame, view, cols);
+        let Some((cx, cy, span)) = cell.filter(|_| self.partial_ready && frame.images.is_empty()) else {
+            self.draw_view(frame, view, focused, None)?;
+            self.partial_ready = true;
+            return Ok(());
+        };
+        self.stats.partial += 1;
+        let dc = self.surface.dc.clone();
+        self.surface.begin();
+        let (cw, ch) = (self.font.cell_w as f32, self.font.cell_h as f32);
+        let pad = self.padding() as f32;
+        let (l, t) = (pad + cx as f32 * cw, pad + cy as f32 * ch);
+        let clip = rect(l, t, l + span as f32 * cw, t + ch);
+        let cursor_color = frame.cursor_color.unwrap_or(self.theme.cursor);
+        let shown = view.show_cursor.then_some((cx, cy, span));
+        let block_cursor = focused && frame.cursor.shape == CursorShape::Block;
+        let ctx = RowContext { cols, cursor: shown, block_cursor, cursor_color };
+        unsafe {
+            dc.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            // Clear はクリップの中だけを塗る
+            dc.Clear(Some(&color_f(frame.background)));
+        }
+        let r = self.draw_rows(&dc, frame, view, &ctx, RowPass::Both, cy..cy + 1).and_then(|_| self.draw_cursor(&dc, frame, &ctx, focused));
+        unsafe { dc.PopAxisAlignedClip() };
+        let end = self.surface.end();
+        if let Err(e) = r.and(end).and_then(|_| self.surface.present()) {
+            self.recreate_device();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// カーソルのセル（ビューの中の桁・行と幅）。`view.show_cursor` は見ない。見えなければ `None`
+    fn cursor_cell(&self, frame: &Frame, view: &FrameView, cols: usize) -> Option<(u16, u16, usize)> {
+        let (x, y) = frame.cursor.pos.filter(|_| frame.cursor.visible)?;
+        let fy = frame.viewport_top as i32 + y as i32;
+        let py = fy - view.top;
+        if !(0..view.rows as i32).contains(&py) {
+            return None;
+        }
+        let x = if frame.cursor.wide_tail { x.saturating_sub(1) } else { x };
+        if x as usize >= cols {
+            return None;
+        }
+        let span = if x < frame.cols && (fy as u16) < frame.rows && frame.cell(x, fy as u16).wide == Wide::Wide { 2 } else { 1 };
+        Some((x, py as u16, span))
+    }
+
     fn recreate_device(&mut self) {
+        self.partial_ready = false;
         let size = self.surface.size();
         if let Ok(gpu) = Gpu::create()
             && let Ok(surface) = Surface::new(&gpu, self.hwnd, size.0, size.1)
@@ -308,29 +394,17 @@ impl Renderer {
 
         // カーソルの位置と幅（ビューの中の行にする。見えなければ出さない）
         let cursor_color = frame.cursor_color.unwrap_or(self.theme.cursor);
-        let cursor = frame.cursor.pos.filter(|_| frame.cursor.visible && view.show_cursor).and_then(|(x, y)| {
-            let fy = frame.viewport_top as i32 + y as i32;
-            let py = fy - view.top;
-            if !(0..view.rows as i32).contains(&py) {
-                return None;
-            }
-            let x = if frame.cursor.wide_tail { x.saturating_sub(1) } else { x };
-            if x as usize >= cols {
-                return None;
-            }
-            let span = if x < frame.cols && (fy as u16) < frame.rows && frame.cell(x, fy as u16).wide == Wide::Wide { 2 } else { 1 };
-            Some((x, py as u16, span))
-        });
+        let cursor = self.cursor_cell(frame, view, cols).filter(|_| view.show_cursor);
         let block_cursor = focused && frame.cursor.shape == CursorShape::Block;
         let ctx = RowContext { cols, cursor, block_cursor, cursor_color };
 
         if frame.images.is_empty() {
             // 画像が無いときは行ごとに背景と文字を描く
-            self.draw_rows(&dc, frame, view, &ctx, RowPass::Both)?;
+            self.draw_rows(&dc, frame, view, &ctx, RowPass::Both, 0..view.rows)?;
         } else {
             // 画像の層（T-088）: 背景色より下 → 背景色 → 文字より下 → 文字 → 文字より上（文字と背景は別に一周する）
             self.draw_images(&dc, frame, view, cols, ImageLayer::BelowBackground);
-            self.draw_rows(&dc, frame, view, &ctx, RowPass::Backgrounds)?;
+            self.draw_rows(&dc, frame, view, &ctx, RowPass::Backgrounds, 0..view.rows)?;
             self.draw_images(&dc, frame, view, cols, ImageLayer::BelowText);
             // 塗りつぶしのカーソル（セルの背景として塗り済み）が、文字より下の画像に隠れないよう塗り直す
             if block_cursor && let Some((cx, cy, span)) = cursor {
@@ -338,17 +412,22 @@ impl Renderer {
                 let (l, t) = (pad + cx as f32 * cw, pad + cy as f32 * ch);
                 unsafe { dc.FillRectangle(&rect(l, t, l + span as f32 * cw, t + ch), &b) };
             }
-            self.draw_rows(&dc, frame, view, &ctx, RowPass::Text)?;
+            self.draw_rows(&dc, frame, view, &ctx, RowPass::Text, 0..view.rows)?;
             self.draw_images(&dc, frame, view, cols, ImageLayer::AboveText);
         }
         self.prune_images(frame);
+        self.draw_cursor(&dc, frame, &ctx, focused)
+    }
 
-        // 5. カーソル（ブロックで focus があるときは色を反転して描き済み）
-        if let Some((cx, cy, span)) = cursor
+    /// 5. カーソル（ブロックで focus があるときは色を反転して描き済み）
+    fn draw_cursor(&mut self, dc: &ID2D1DeviceContext, frame: &Frame, ctx: &RowContext, focused: bool) -> Result<()> {
+        let (cw, ch) = (self.font.cell_w as f32, self.font.cell_h as f32);
+        let pad = self.padding() as f32;
+        if let Some((cx, cy, span)) = ctx.cursor
             && cy < frame.rows
-            && (cx as usize) < cols
+            && (cx as usize) < ctx.cols
         {
-            let b = self.brush(cursor_color)?;
+            let b = self.brush(ctx.cursor_color)?;
             let l = pad + cx as f32 * cw;
             let t = pad + cy as f32 * ch;
             let w = span as f32 * cw;
@@ -369,7 +448,15 @@ impl Renderer {
     }
 
     /// ビューの行を描く。`pass` で背景と文字のどちらか（画像を間に挟むとき）か、両方（ふつう）かを選ぶ
-    fn draw_rows(&mut self, dc: &ID2D1DeviceContext, frame: &Frame, view: &FrameView, ctx: &RowContext, pass: RowPass) -> Result<()> {
+    fn draw_rows(
+        &mut self,
+        dc: &ID2D1DeviceContext,
+        frame: &Frame,
+        view: &FrameView,
+        ctx: &RowContext,
+        pass: RowPass,
+        rows: std::ops::Range<u16>,
+    ) -> Result<()> {
         let (cw, ch) = (self.font.cell_w as f32, self.font.cell_h as f32);
         let pad = self.padding() as f32;
         let cols = ctx.cols;
@@ -378,7 +465,7 @@ impl Renderer {
         let mut bgs: Vec<Option<Rgb>> = vec![None; cols];
         let mut text = String::new();
 
-        for y in 0..view.rows {
+        for y in rows {
             let fy = view.top + y as i32;
             if fy < 0 || fy >= frame.rows as i32 {
                 continue; // 上や下に足りない行は空き（背景のまま）

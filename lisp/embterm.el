@@ -28,9 +28,18 @@
 ;;   クリック・プロセスの終了）。module の関数は待たない
 ;; - module は一時ディレクトリにコピーしてから読む（読み込み済みの DLL は差し替えられないため。T-030）。
 ;;   新しい版を使うには Emacs の再起動が要る
+;; - 複数の端末（T-042）: `embterm'（あれば切り替え、前置引数で新規）、`embterm-new'、`embterm-project'
+;;   （project.el のルートで開き、プロジェクトごとに使い回す）、`embterm-list-buffers'
+;; - 色（T-034）: `embterm-follow-theme' なら Emacs のテーマ（`default' `cursor' `region' と `ansi-color-*' の face）に
+;;   追従し、`enable-theme-functions' / `disable-theme-functions' で開いている端末に反映する
+;; - カーソル（T-035）: `embterm-cursor-style' / `embterm-cursor-blink'。アプリの DECSCUSR が優先
+;; - OSC（T-039）: 52 の書き込みは kill-ring へ（読み取りは既定で拒む）、9 / 777 は `embterm-notification-functions'、
+;;   9;4 は `embterm-progress-functions'、8 のハイパーリンクは Ctrl+クリックで開く。ベル（T-040）は間引く
+;; - tr-ime の再変換・前後参照は、端末のバッファでは空の文字列を渡す（T-083）
 
 ;;; Code:
 
+(require 'ansi-color)
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
@@ -61,6 +70,11 @@
 (declare-function embterm-module-poll "embterm-module")
 (declare-function embterm-module-cursor "embterm-module")
 (declare-function embterm-module-text "embterm-module")
+(declare-function embterm-module-set-colors "embterm-module")
+(declare-function embterm-module-set-cursor "embterm-module")
+(declare-function embterm-module-set-clipboard-policy "embterm-module")
+(declare-function project-root "project" (project))
+(declare-function tr-ime-modadv--notify-reconvert-string "tr-ime-modadv" (arg1 arg2 arg3))
 
 ;;;; 設定
 
@@ -134,8 +148,116 @@ tr-ime advanced（`tr-ime-modadv--set-composition-window'）があるときだ�
   :type 'boolean)
 
 (defcustom embterm-buffer-name-format "*embterm: %s*"
-  "タイトル（OSC 0 / 2）をバッファ名にするときの書式。nil ならバッファ名を変えない。"
+  "タイトル（OSC 0 / 2）をバッファ名にするときの書式。nil ならバッファ名を変えない。
+`embterm-default-buffer-name' が使う。"
   :type '(choice (const :tag "変えない" nil) string))
+
+(defcustom embterm-buffer-name-function #'embterm-default-buffer-name
+  "端末のバッファ名を決める関数（T-080）。
+タイトル（OSC 0 / 2。まだ無ければ nil）を引数に、端末のバッファで呼ばれ、バッファ名を返す。
+nil を返せば名前を変えない。同じ名前のバッファがあれば `<2>' などを付ける（`rename-buffer' の UNIQUE）。"
+  :type 'function)
+
+(defcustom embterm-buffer-name-max-length 40
+  "`embterm-default-buffer-name' が作るバッファ名の長さ（表示の幅）の上限。"
+  :type 'integer)
+
+;;;; 色・カーソル・OSC・ベルの設定（T-034 / T-035 / T-039 / T-040）
+
+(defun embterm--set-and-apply-term (sym value)
+  "SYM を VALUE にし、開いている端末の色・カーソル・クリップボードの許可に反映する。"
+  (set-default sym value)
+  (when (fboundp 'embterm--apply-term-settings-all)
+    (embterm--apply-term-settings-all)))
+
+(defcustom embterm-follow-theme t
+  "non-nil なら、端末の色を Emacs のテーマに追従させる（T-034）。
+前景・背景は `default' の face、カーソルは `cursor'、選択は `region'、16 色は `ansi-color-black' などの
+`ansi-color-*' の face から取る。テーマを替えると（`enable-theme-functions'）開いている端末にも反映する。
+nil なら `embterm-color-foreground' などの値を使う。どちらでも、アプリが OSC で変えた色はそのまま。"
+  :type 'boolean
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-color-foreground nil
+  "`embterm-follow-theme' が nil のときの前景色（色の名前か \"#rrggbb\"）。nil なら module の既定。"
+  :type '(choice (const :tag "既定" nil) color)
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-color-background nil
+  "`embterm-follow-theme' が nil のときの背景色。nil なら module の既定。"
+  :type '(choice (const :tag "既定" nil) color)
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-color-cursor nil
+  "`embterm-follow-theme' が nil のときのカーソルの色。nil なら module の既定。"
+  :type '(choice (const :tag "既定" nil) color)
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-color-selection nil
+  "`embterm-follow-theme' が nil のときの選択の背景色。nil なら module の既定。"
+  :type '(choice (const :tag "既定" nil) color)
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-color-selection-foreground nil
+  "`embterm-follow-theme' が nil のときの選択の文字の色。nil ならセルの色のまま。"
+  :type '(choice (const :tag "セルの色" nil) color)
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-color-palette nil
+  "`embterm-follow-theme' が nil のときの 16 色（黒・赤・緑・黄・青・マゼンタ・シアン・白、続いて明るい 8 色）。
+16 個までの色のリスト。nil の色は module（libghostty-vt）の組み込みの色。"
+  :type '(repeat (choice (const :tag "組み込み" nil) color))
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-cursor-style 'block
+  "カーソルの形（T-035）。アプリが DECSCUSR で形を決めたら、そちらが優先する。"
+  :type '(choice (const block) (const bar) (const underline))
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-cursor-blink nil
+  "non-nil ならカーソルを点滅させる（アプリが DECSCUSR で決めたら、そちらが優先する）。
+点滅は、端末のウィンドウを選んでいてフレームにフォーカスがあるときだけ。間隔は Windows の設定（キャレットの点滅）。"
+  :type 'boolean
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-allow-clipboard-write t
+  "non-nil なら、アプリが OSC 52 で書いたテキストを kill-ring（とクリップボード）へ入れる（T-039）。"
+  :type 'boolean
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-allow-clipboard-read nil
+  "non-nil なら、アプリが OSC 52 でクリップボードを読むのを許す（T-039）。
+許すと、端末で動くプログラム（ssh の先を含む）がクリップボードの中身を読めるので、既定では拒む。"
+  :type 'boolean
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-notification-functions (list #'embterm-notification-message)
+  "アプリのデスクトップ通知（OSC 9 / 777）を受けたときに呼ぶ関数（T-039）。
+引数は TITLE（無ければ空文字列）、BODY、BUFFER（端末のバッファ）。"
+  :type 'hook)
+
+(defcustom embterm-progress-functions nil
+  "アプリの進捗（OSC 9;4）を受けたときに呼ぶ関数（T-039）。
+引数は STATE、PERCENT（0〜100 か nil）、BUFFER。STATE は `set' `remove'
+`error' `indeterminate' `pause' のどれか。"
+  :type 'hook)
+
+(defcustom embterm-hyperlink-schemes '("http" "https" "ftp" "mailto" "file")
+  "Ctrl+クリックで開くハイパーリンク（OSC 8）の URI のスキーム。ほかのものは開かない。"
+  :type '(repeat string))
+
+(defcustom embterm-hyperlink-function #'embterm-open-hyperlink
+  "Ctrl+クリックしたハイパーリンク（OSC 8）の URI を引数に呼ぶ関数（T-039）。"
+  :type 'function)
+
+(defcustom embterm-bell-function #'ding
+  "ベル（BEL）で呼ぶ関数（T-040）。1 つの引数 t で呼ぶ（`ding' の引数。キーボードマクロを止めない）。
+nil ならベルを鳴らさない。"
+  :type '(choice (const :tag "鳴らさない" nil) function))
+
+(defcustom embterm-bell-interval 0.2
+  "ベルを鳴らす間隔の下限（秒）。これより短い間隔のベルは捨てる（連打で Emacs を詰まらせない）。"
+  :type 'number)
 
 (defcustom embterm-poll-interval 0.05
   "module の状態を読む間隔（秒）。端末があるときだけ動く。
@@ -208,6 +330,8 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 (defvar-local embterm--copy-window nil "copy モードに入ったときに選んでいたウィンドウ。")
 (defvar-local embterm--semi-char nil
   "non-nil なら `embterm-semi-char-map' が効く（`emulation-mode-map-alists' の条件）。")
+(defvar-local embterm--command nil "起動したコマンド（argv の先頭）。タイトルが無いときのバッファ名に使う。")
+(defvar-local embterm--project nil "`embterm-project' で開いた端末なら、そのプロジェクトのルート。")
 
 (defvar embterm--buffers nil "端末のバッファ。")
 (defvar embterm--timer nil "module の状態を読むタイマー。")
@@ -233,17 +357,17 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 (defun embterm--conpty-dir ()
   (embterm--native-path (or embterm-conpty-directory embterm-module-directory)))
 
-;;;###autoload
-(defun embterm ()
-  "新しい端末のバッファを開く（`embterm-shell' を `default-directory' で起動する）。"
-  (interactive)
+(defun embterm--create (dir &optional project)
+  "DIR で `embterm-shell' を起動する端末のバッファを作って出す。PROJECT はプロジェクトのルート（T-042）。"
   (embterm--load-module)
-  (let* ((dir default-directory)
+  (let* ((default-directory dir)
          (argv (embterm--argv))
          (buf (generate-new-buffer "*embterm*")))
     (with-current-buffer buf
       (setq default-directory dir)
       (embterm-mode)
+      (setq embterm--command (car argv)
+            embterm--project project)
       (condition-case err
           (setq embterm--term
                 (embterm-module-create (vconcat argv) (embterm--cwd) (embterm--conpty-dir)
@@ -252,11 +376,74 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
                                        embterm-scrollback-lines))
         (error (kill-buffer buf)
                (signal (car err) (cdr err))))
-      (push buf embterm--buffers))
+      ;; 子プロセスは最初の place で起動する。その前に色・カーソル・クリップボードの許可を積む（頼みごとは順に片付く）
+      (embterm--apply-term-settings (embterm--color-args))
+      (push buf embterm--buffers)
+      (embterm--rename-buffer nil))
     (pop-to-buffer-same-window buf)
     (embterm--activate)
     (embterm--sync)
     buf))
+
+(defun embterm--buffers-by-recency ()
+  "端末のバッファを、最近選んだ順に。"
+  (let ((live (embterm--live-buffers)))
+    (seq-filter (lambda (b) (memq b live)) (buffer-list))))
+
+;;;###autoload
+(defun embterm (&optional arg)
+  "端末のバッファに切り替える。無ければ新しく開く（`embterm-shell' を `default-directory' で起動する）。
+いま端末のバッファにいれば、ほかの端末のうち最近選んだものへ切り替える。
+前置引数 ARG があれば、必ず新しく開く（`embterm-new' と同じ）。バッファを返す。"
+  (interactive "P")
+  (let* ((bufs (embterm--buffers-by-recency))
+         (existing (and (not arg)
+                        (or (seq-find (lambda (b) (not (eq b (current-buffer)))) bufs)
+                            (car bufs)))))
+    (if existing
+        (progn (pop-to-buffer-same-window existing)
+               existing)
+      (embterm--create default-directory))))
+
+;;;###autoload
+(defun embterm-new ()
+  "新しい端末のバッファを開く（`embterm-shell' を `default-directory' で起動する）。バッファを返す。"
+  (interactive)
+  (embterm--create default-directory))
+
+;;;###autoload
+(defun embterm-project (&optional arg)
+  "今のプロジェクト（project.el）のルートで端末を開く。そのプロジェクトの端末があれば切り替える。
+前置引数 ARG があれば、必ず新しく開く。バッファを返す。"
+  (interactive "P")
+  (require 'project)
+  (let* ((root (file-name-as-directory (expand-file-name (project-root (project-current t)))))
+         (existing (and (not arg)
+                        (seq-find (lambda (b) (equal (buffer-local-value 'embterm--project b) root))
+                                  (embterm--buffers-by-recency)))))
+    (if existing
+        (progn (pop-to-buffer-same-window existing)
+               existing)
+      (embterm--create root root))))
+
+(defun embterm--annotate-buffer (name)
+  "`embterm-list-buffers' の候補 NAME の注釈（ディレクトリ）。"
+  (when-let* ((buf (get-buffer name)))
+    (concat (propertize " " 'display '(space :align-to 40))
+            (abbreviate-file-name (buffer-local-value 'default-directory buf)))))
+
+;;;###autoload
+(defun embterm-list-buffers ()
+  "端末のバッファを選んで切り替える（`completing-read'）。"
+  (interactive)
+  (let ((bufs (embterm--buffers-by-recency)))
+    (unless bufs
+      (user-error "embterm: 端末のバッファがありません"))
+    (let* ((names (mapcar #'buffer-name bufs))
+           (default (or (seq-find (lambda (n) (not (equal n (buffer-name)))) names) (car names)))
+           (completion-extra-properties (list :annotation-function #'embterm--annotate-buffer))
+           (choice (completing-read (format-prompt "端末" default) names nil t nil nil default)))
+      (pop-to-buffer-same-window (get-buffer choice)))))
 
 (defun embterm--placeholder ()
   (let ((inhibit-read-only t))
@@ -291,7 +478,26 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
   (setq-local mode-line-process '(:eval (embterm--mode-line)))
   (embterm--placeholder)
   (embterm--emulation-first)
+  (embterm--tr-ime-setup)
   (add-hook 'kill-buffer-hook #'embterm--close nil t))
+
+;;;; tr-ime の再変換・前後参照（T-083。docs/research/emacs-ime.md §3.5）
+
+(defun embterm--tr-ime-notify-empty ()
+  "tr-ime の再変換（RECONVERSION）・前後参照（DOCUMENTFEED）に空の文字列を渡す。
+端末のバッファの中身は置き物なので、ポイントの行を IME に渡さない。再変換で `delete-char' も走らない。
+tr-ime の C++ 側は通知を待つので、何も通知しないと時間切れまで止まる。"
+  (when (fboundp 'tr-ime-modadv--notify-reconvert-string)
+    (tr-ime-modadv--notify-reconvert-string
+     (string-to-number (frame-parameter nil 'window-id)) "" 0)))
+
+(defun embterm--tr-ime-setup ()
+  "端末のバッファでは、tr-ime の再変換・前後参照のフックをバッファローカルに差し替える。
+ローカルの値に t を入れないので、グローバルのフック（ポイントの行を渡すもの）は呼ばれない。
+tr-ime advanced が無い（フックの変数が無い）ときは何もしない。"
+  (dolist (hook '(tr-ime-modadv--reconvertstring-hook tr-ime-modadv--documentfeed-hook))
+    (when (boundp hook)
+      (set (make-local-variable hook) (list #'embterm--tr-ime-notify-empty)))))
 
 (defun embterm--mode-line ()
   (concat (if (eq embterm--input-mode 'copy) " [copy]" "")
@@ -495,7 +701,8 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 (defun embterm--poll-1 ()
   ;; フックが拾わない位置の変化（あれば）もここで拾う。同じなら module には送らない
   (embterm--place)
-  (let ((st (embterm-module-poll embterm--term embterm--generation)))
+  (let ((st (embterm-module-poll embterm--term embterm--generation))
+        (buf (current-buffer)))
     (when st
       (setq embterm--generation (plist-get st :generation)
             embterm--state st)
@@ -508,32 +715,127 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
       (embterm--apply-title (plist-get st :title))
       (embterm--apply-pwd (plist-get st :pwd))
       (dolist (e (plist-get st :events))
-        (pcase e
-          (`(clicked . ,pane) (embterm--select-pane-window pane))
-          (`(bell) (ding t))
-          (`(exited . ,code) (embterm--exited code))
-          (`(screenshot . ,path) (message "embterm: 画面を保存しました: %s" path))
-          (`(selected . ,text) (embterm--on-selected text))
-          (`(copy-ready) (embterm--fill-copy))
-          (`(error . ,m) (message "embterm: %s" m))
-          (_ nil))))))
+        ;; (exited) でバッファが消えたら、残りの知らせは捨てる
+        (when (and (buffer-live-p buf) (eq (current-buffer) buf))
+          (pcase e
+            (`(clicked . ,pane) (embterm--select-pane-window pane))
+            (`(bell) (embterm--bell))
+            (`(exited . ,code) (embterm--exited code))
+            (`(screenshot . ,path) (message "embterm: 画面を保存しました: %s" path))
+            (`(selected . ,text) (embterm--on-selected text))
+            (`(copy-ready) (embterm--fill-copy))
+            (`(error . ,m) (message "embterm: %s" m))
+            (`(clipboard . ,text) (embterm--on-clipboard text))
+            (`(notification ,title . ,body)
+             (run-hook-with-args 'embterm-notification-functions title body buf))
+            (`(progress ,state . ,percent)
+             (run-hook-with-args 'embterm-progress-functions state percent buf))
+            (`(link . ,uri) (funcall embterm-hyperlink-function uri))
+            (_ nil)))))))
+
+;;;; バッファ名（T-080）
+
+(defun embterm--shorten-title (title)
+  "TITLE が長いパス（`C:\\WINDOWS\\SYSTEM32\\cmd.exe' など）なら、ファイル名（拡張子なし）にする。
+cmd はコマンドを動かしている間 `パス - コマンド' にするので、` - ' より後ろはそのまま残す。"
+  (let* ((sep (string-search " - " title))
+         (head (if sep (substring title 0 sep) title))
+         (tail (if sep (substring title sep) "")))
+    (if (and (> (length head) 1)
+             (string-match-p "\\`\\(?:[A-Za-z]:[\\/]\\|[\\/]\\)" head))
+        (let ((base (file-name-base (directory-file-name head))))
+          (if (string-empty-p base) title (concat base tail)))
+      title)))
+
+(defun embterm-default-buffer-name (title)
+  "既定のバッファ名（`embterm-buffer-name-function'）。
+TITLE が長いパスならファイル名だけ（拡張子なし）、TITLE が無ければ起動したコマンドの名前を
+`embterm-buffer-name-format' に入れ、全体を `embterm-buffer-name-max-length' に収める。
+`embterm-buffer-name-format' が nil なら nil（名前を変えない）。"
+  (when embterm-buffer-name-format
+    (let* ((name (cond ((and title (not (string-empty-p title))) (embterm--shorten-title title))
+                       (embterm--command (file-name-base embterm--command))
+                       (t "embterm")))
+           (room (max 1 (- embterm-buffer-name-max-length
+                           (string-width (format embterm-buffer-name-format ""))))))
+      (format embterm-buffer-name-format
+              (truncate-string-to-width (string-replace "\n" " " name) room nil nil "…")))))
+
+(defun embterm--rename-buffer (title)
+  "TITLE（nil はまだ無い）からバッファ名を決めて付ける。同じ名前があれば `<2>' などを付ける。"
+  (let ((name (funcall embterm-buffer-name-function title)))
+    (when (and (stringp name) (not (string-empty-p name)) (not (equal name (buffer-name))))
+      (rename-buffer name t))))
 
 (defun embterm--apply-title (title)
-  (when (and embterm-buffer-name-format title (not (string-empty-p title))
-             (not (equal title embterm--title)))
+  (unless (equal title embterm--title)
     (setq embterm--title title)
-    (rename-buffer (format embterm-buffer-name-format title) t)))
+    (embterm--rename-buffer (and title (not (string-empty-p title)) title))))
+
+(defun embterm--file-uri-path (uri)
+  "`file://HOST/PATH' の URI をパスにする（`/C:/Users' は `C:/Users'）。URI でなければそのまま。"
+  (if (string-match "\\`file://[^/]*\\(/.*\\)\\'" uri)
+      (let ((p (url-unhex-string (match-string 1 uri))))
+        (if (string-match-p "\\`/[A-Za-z]:" p) (substring p 1) p))
+    uri))
 
 (defun embterm--apply-pwd (pwd)
   "カレントディレクトリ（OSC 7 の `file://HOST/PATH' か、パス）を `default-directory' にする。"
   (when (and pwd (not (string-empty-p pwd)))
-    (let ((path (if (string-match "\\`file://[^/]*\\(/.*\\)\\'" pwd)
-                    (let ((p (url-unhex-string (match-string 1 pwd))))
-                      ;; /C:/Users → C:/Users
-                      (if (string-match-p "\\`/[A-Za-z]:" p) (substring p 1) p))
-                  pwd)))
+    (let ((path (embterm--file-uri-path pwd)))
       (when (file-directory-p path)
         (setq default-directory (file-name-as-directory (expand-file-name path)))))))
+
+;;;; ベル・OSC（T-039 / T-040）
+
+(defvar embterm--last-bell 0 "最後にベルを鳴らした時刻（すべての端末で 1 つ）。")
+
+(defun embterm--bell ()
+  "`embterm-bell-function' を呼ぶ。`embterm-bell-interval' より短い間隔のベルは捨てる。
+module も、まだ読んでいないベルを 1 つにまとめている。"
+  (when embterm-bell-function
+    (let ((now (float-time)))
+      (when (>= (- now embterm--last-bell) embterm-bell-interval)
+        (setq embterm--last-bell now)
+        (funcall embterm-bell-function t)))))
+
+(defun embterm--on-clipboard (text)
+  "アプリが OSC 52 で書いた TEXT を kill-ring（とクリップボード）へ入れる。"
+  (when (and embterm-allow-clipboard-write (stringp text) (not (string-empty-p text))
+             (not (equal text (car kill-ring))))
+    (kill-new text)))
+
+(defun embterm--unattended-p (buffer)
+  "端末 BUFFER のウィンドウが選ばれていないか、フレームにフォーカスが無ければ non-nil。"
+  (or (not (eq (window-buffer (selected-window)) buffer))
+      (null (frame-focus-state (selected-frame)))))
+
+(defun embterm-notification-text (title body buffer)
+  "通知の文面。どの端末から来たか分かるよう、バッファ名を前に付ける。"
+  (let ((flat (lambda (s) (string-trim (replace-regexp-in-string "[\n\r\t]+" " " (or s ""))))))
+    (format "embterm 通知 [%s] %s%s"
+            (if (buffer-live-p buffer) (buffer-name buffer) "?")
+            (if (string-empty-p (funcall flat title)) "" (concat (funcall flat title) ": "))
+            (funcall flat body))))
+
+(defun embterm-notification-message (title body buffer)
+  "通知（OSC 9 / 777）を `message' で出す（`embterm-notification-functions' の既定）。
+端末のウィンドウが選ばれていないか、フレームにフォーカスが無いときだけ出す。"
+  (when (embterm--unattended-p buffer)
+    (message "%s" (embterm-notification-text title body buffer))))
+
+(defun embterm-open-hyperlink (uri)
+  "Ctrl+クリックしたハイパーリンク（OSC 8）の URI を開く（`embterm-hyperlink-function' の既定）。
+スキームが `embterm-hyperlink-schemes' に無いものは開かない。`file:' はシェルで開かずに
+Emacs で別のウィンドウに開く（実行ファイルを起動しないため）。ほかは `browse-url'。"
+  (let ((scheme (and (string-match "\\`\\([A-Za-z][A-Za-z0-9+.-]*\\):" uri)
+                     (downcase (match-string 1 uri)))))
+    (cond
+     ((not (member scheme embterm-hyperlink-schemes))
+      (message "embterm: 開かないリンクです（スキーム %s）: %s" scheme uri))
+     ((equal scheme "file")
+      (find-file-other-window (embterm--file-uri-path uri)))
+     (t (browse-url uri)))))
 
 (defvar embterm--last-selected-time 0 "最後に選択を kill-ring へ入れた時刻。")
 
@@ -576,6 +878,74 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
         (embterm-module-set-font embterm--term embterm-font-family embterm-font-size)
         (embterm-module-set-narrow-wide embterm--term (symbol-name embterm-narrow-wide))
         (embterm-module-set-scrollback embterm--term embterm-scrollback-lines)))))
+
+;;;; 色・カーソル・クリップボードの許可（T-034 / T-035 / T-039）
+
+(defconst embterm--ansi-faces
+  '(ansi-color-black ansi-color-red ansi-color-green ansi-color-yellow
+    ansi-color-blue ansi-color-magenta ansi-color-cyan ansi-color-white
+    ansi-color-bright-black ansi-color-bright-red ansi-color-bright-green ansi-color-bright-yellow
+    ansi-color-bright-blue ansi-color-bright-magenta ansi-color-bright-cyan ansi-color-bright-white)
+  "16 色を取る face（ansi-color.el）。")
+
+(defun embterm--color-hex (color &optional frame)
+  "COLOR（色の名前か \"#rgb\"）を \"#rrggbb\" にする。色でなければ nil。"
+  (when (and (stringp color) (not (string-prefix-p "unspecified" color)))
+    (when-let* ((v (ignore-errors (color-values color frame))))
+      (apply #'format "#%02x%02x%02x" (mapcar (lambda (x) (ash x -8)) v)))))
+
+(defun embterm--face-hex (face attribute &optional frame)
+  "FACE の ATTRIBUTE（`:foreground' か `:background'。継承を含む）の色を \"#rrggbb\" で。無ければ nil。"
+  (when (facep face)
+    (embterm--color-hex (face-attribute face attribute frame t) frame)))
+
+(defun embterm--color-args ()
+  "`embterm-module-set-colors' の、端末の後ろの引数のリスト。
+FG BG CURSOR SELECTION-BG SELECTION-FG PALETTE の順。`embterm-follow-theme' なら
+選んでいるフレームの face から、そうでなければ `embterm-color-*' から作る。"
+  (if embterm-follow-theme
+      (let ((f (selected-frame)))
+        (list (embterm--face-hex 'default :foreground f)
+              (embterm--face-hex 'default :background f)
+              (embterm--face-hex 'cursor :background f)
+              (embterm--face-hex 'region :background f)
+              (embterm--face-hex 'region :foreground f)
+              (vconcat (mapcar (lambda (face) (embterm--face-hex face :foreground f)) embterm--ansi-faces))))
+    (list (embterm--color-hex embterm-color-foreground)
+          (embterm--color-hex embterm-color-background)
+          (embterm--color-hex embterm-color-cursor)
+          (embterm--color-hex embterm-color-selection)
+          (embterm--color-hex embterm-color-selection-foreground)
+          (vconcat (seq-take (mapcar #'embterm--color-hex embterm-color-palette) 16)))))
+
+(defun embterm--apply-term-settings (colors)
+  "このバッファの端末に、色 COLORS（`embterm--color-args'）・カーソル・クリップボードの許可を送る（待たない）。"
+  (when embterm--term
+    (apply #'embterm-module-set-colors embterm--term colors)
+    (embterm-module-set-cursor embterm--term (symbol-name embterm-cursor-style) embterm-cursor-blink)
+    (embterm-module-set-clipboard-policy embterm--term embterm-allow-clipboard-write embterm-allow-clipboard-read)))
+
+(defun embterm--apply-term-settings-all ()
+  "開いているすべての端末に、色・カーソル・クリップボードの許可を送る。"
+  (when (and embterm--module-loaded (embterm--live-buffers))
+    (let ((colors (embterm--color-args)))
+      (dolist (buf (embterm--live-buffers))
+        (with-current-buffer buf
+          (ignore-errors (embterm--apply-term-settings colors)))))))
+
+(defun embterm-sync-colors ()
+  "開いている端末の色・カーソルを今の設定（と face）に合わせ直す。
+テーマを替えたときは自動で呼ばれる。`set-face-attribute' で face を直接変えたときに使う。"
+  (interactive)
+  (embterm--apply-term-settings-all))
+
+(defun embterm--on-theme-change (&rest _)
+  "テーマが変わった（`enable-theme-functions' / `disable-theme-functions'）。追従するなら色を送り直す。"
+  (when embterm-follow-theme
+    (embterm--apply-term-settings-all)))
+
+(add-hook 'enable-theme-functions #'embterm--on-theme-change)
+(add-hook 'disable-theme-functions #'embterm--on-theme-change)
 
 ;;;; キー（T-009 の案 A）
 
