@@ -20,7 +20,7 @@ use std::sync::Mutex;
 
 use emacs::{Env, IntoLisp, Result, Value, Vector, defun};
 use et_render::NarrowWide;
-use term::{Event, Request, SpawnOptions, Term};
+use term::{Event, Request, ScrollAmount, SpawnOptions, Term};
 
 emacs::plugin_is_GPL_compatible!();
 
@@ -87,7 +87,8 @@ fn set_log(file: Option<String>) -> Result<()> {
 
 /// 端末を作る。ARGV はコマンドと引数の文字列のベクタ、CWD は作業ディレクトリ（nil なら Emacs と同じ）、
 /// CONPTY-DIR は conpty.dll（と x64/OpenConsole.exe）のあるディレクトリ（nil か無ければ OS 同梱の ConPTY）。
-/// FONT-FAMILY・FONT-SIZE（ポイント）・NARROW-WIDE（"overlap" か "shrink"）は nil なら既定。
+/// FONT-FAMILY・FONT-SIZE（ポイント）・NARROW-WIDE（"overlap" か "shrink"）は nil なら既定、
+/// SCROLLBACK はスクロールバックの行数の上限（nil なら 10000）。
 /// 子プロセスは最初の `embterm-module-place' で起動する（そのときの大きさで）
 #[defun(user_ptr)]
 fn create(
@@ -97,6 +98,7 @@ fn create(
     font_family: Option<String>,
     font_size: Value<'_>,
     narrow_wide_: Option<String>,
+    scrollback: Option<i64>,
 ) -> Result<RefCell<Term>> {
     let mut args = Vec::with_capacity(argv.len());
     for i in 0..argv.len() {
@@ -109,23 +111,39 @@ fn create(
         font_family,
         font_size: opt_num(font_size)?.map(|f| f as f32),
         narrow_wide: narrow_wide(narrow_wide_)?,
+        scrollback_lines: scrollback.map(|n| n.max(0) as usize),
     };
     Ok(RefCell::new(term::spawn(opts).map_err(lisp_err)?))
 }
 
-/// フレーム WINDOW-ID（`(frame-parameter nil \\='window-id)'）のクライアント座標 X Y に W x H（画素）で置いて見せる。
-/// `window-inside-pixel-edges' の値をそのまま渡す。フレームが変わったら付け替え、子 HWND が消えていれば作り直す
+/// ペイン PANE（端末の中で一意の整数。Lisp が決める）を、フレーム WINDOW-ID（`(frame-parameter nil \\='window-id)'）の
+/// クライアント座標 X Y に W x H（画素）で置いて見せる。`window-inside-pixel-edges' の値をそのまま渡す。
+/// ペインが無ければ作り、フレームが変わったら付け替え、子 HWND が消えていれば作り直す
 #[defun]
-fn place(term: &RefCell<Term>, window_id_: String, x: i64, y: i64, w: i64, h: i64) -> Result<()> {
+fn place(term: &RefCell<Term>, pane: i64, window_id_: String, x: i64, y: i64, w: i64, h: i64) -> Result<()> {
     let parent = window_id(&window_id_)?;
-    term.borrow().request(Request::Place { parent, x: x as i32, y: y as i32, w: w as i32, h: h as i32 });
+    term.borrow().request(Request::Place { pane, parent, x: x as i32, y: y as i32, w: w as i32, h: h as i32 });
     Ok(())
 }
 
-/// 隠す（バッファが見えなくなった）
+/// ペイン PANE を隠す（nil なら全部）。スクロール位置は残す
 #[defun]
-fn hide(term: &RefCell<Term>) -> Result<()> {
-    term.borrow().request(Request::Hide);
+fn hide(term: &RefCell<Term>, pane: Option<i64>) -> Result<()> {
+    term.borrow().request(Request::Hide(pane));
+    Ok(())
+}
+
+/// ペイン PANE を消す（Emacs のウィンドウが無くなった）
+#[defun]
+fn remove(term: &RefCell<Term>, pane: i64) -> Result<()> {
+    term.borrow().request(Request::Remove(pane));
+    Ok(())
+}
+
+/// 選んでいるペイン PANE を伝える（nil は端末のウィンドウを選んでいない）。端末の大きさはこのペインに合わせる
+#[defun]
+fn select(term: &RefCell<Term>, pane: Option<i64>) -> Result<()> {
+    term.borrow().request(Request::Select(pane));
     Ok(())
 }
 
@@ -151,11 +169,70 @@ fn paste(term: &RefCell<Term>, text: String) -> Result<()> {
     Ok(())
 }
 
-/// スクロールバックを LINES 行動かす（負は上）。nil ならいちばん下へ
+/// ペイン PANE をスクロールする。KIND は "lines"（N 行。負は上）、"pages"（N ページ）、"top"、"bottom"、
+/// "wheel"（N ノッチ。子 HWND が受けたときと同じ扱い。マウスの報告が有効ならアプリへ）
 #[defun]
-fn scroll(term: &RefCell<Term>, lines: Option<i64>) -> Result<()> {
-    term.borrow().request(Request::Scroll(lines.map(|n| n as isize)));
+fn scroll(term: &RefCell<Term>, pane: i64, kind: String, n: Option<i64>) -> Result<()> {
+    let n = n.unwrap_or(0);
+    let amount = match kind.as_str() {
+        "lines" => ScrollAmount::Lines(n),
+        "pages" => ScrollAmount::Pages(n),
+        "top" => ScrollAmount::Top,
+        "bottom" => ScrollAmount::Bottom,
+        "wheel" => ScrollAmount::Wheel(n as i32),
+        _ => return Err(lisp_err(format!("知らない KIND: {kind}"))),
+    };
+    term.borrow().request(Request::Scroll { pane, amount });
     Ok(())
+}
+
+/// スクロールバックの行数の上限を変える
+#[defun]
+fn set_scrollback(term: &RefCell<Term>, lines: i64) -> Result<()> {
+    term.borrow().request(Request::SetScrollback(lines.max(0) as usize));
+    Ok(())
+}
+
+/// 今の選択のテキスト（選択を終えたときに UI スレッドが作って置いたもの。端末をロックしない）。選択が無ければ nil
+#[defun]
+fn selection(term: &RefCell<Term>) -> Result<Option<String>> {
+    Ok(term.borrow().shared().selection_text())
+}
+
+/// 選択を消す
+#[defun]
+fn clear_selection(term: &RefCell<Term>) -> Result<()> {
+    term.borrow().request(Request::ClearSelection);
+    Ok(())
+}
+
+/// copy モードの準備を頼む（待たない）。スクロールバックごとのテキストを UI スレッドで作り、
+/// できたら `embterm-module-poll' の :events に (copy-ready)。PANE は位置を合わせるペイン（nil は選んでいるペイン）
+#[defun]
+fn request_copy(term: &RefCell<Term>, pane: Option<i64>) -> Result<()> {
+    term.borrow().request(Request::Copy(pane));
+    Ok(())
+}
+
+/// copy モードのテキストを受け取る。`(TEXT TOP POINT)`（TOP は見ていたペインの先頭の行、POINT はポイントを置く行。どちらも 0 から）。
+/// まだできていなければ nil
+#[defun]
+fn take_copy<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
+    match term.borrow().shared().take_copy() {
+        Some(c) => env.list((c.text, c.top, c.point)),
+        None => ().into_lisp(env),
+    }
+}
+
+/// 貼り付けの前の確認（端末のロックを一瞬だけ持ってモードを読む）。TEXT を確かめなしで送ってよければ t。
+/// ブラケットペーストのモードでなく、かつ改行などを含むときは nil
+#[defun]
+fn paste_safe_p(term: &RefCell<Term>, text: String) -> Result<bool> {
+    Ok(et_vt::paste_is_safe(&text)
+        || match term.borrow().shared().session() {
+            Some(s) => s.lock().mode(et_vt::Mode::BRACKETED_PASTE),
+            None => true,
+        })
 }
 
 /// フォントを替える（FAMILY・SIZE が nil なら既定）
@@ -180,10 +257,10 @@ fn focus(term: &RefCell<Term>, flag: Value<'_>) -> Result<()> {
     Ok(())
 }
 
-/// 今の画面を PNG（PATH）に保存する（待たない。終わると `embterm-module-poll' の :events に (screenshot . PATH)）
+/// ペイン PANE（nil は選んでいるペイン）の今の画面を PNG（PATH）に保存する（待たない。終わると `embterm-module-poll' の :events に (screenshot . PATH)）
 #[defun]
-fn screenshot(term: &RefCell<Term>, path: String) -> Result<()> {
-    term.borrow().request(Request::Screenshot(PathBuf::from(path)));
+fn screenshot(term: &RefCell<Term>, path: String, pane: Option<i64>) -> Result<()> {
+    term.borrow().request(Request::Screenshot { pane, path: PathBuf::from(path) });
     Ok(())
 }
 
@@ -195,8 +272,10 @@ fn close(term: &RefCell<Term>) -> Result<()> {
 }
 
 /// 端末の状態。世代が GENERATION と同じで知らせも無ければ nil。変わっていれば plist
-/// `(:generation :alive :view :hwnd :started :pid :conpty :font :title :pwd :exited :exit-code :closed :cols :rows :events)`。
-/// :events は前回から溜まった知らせ `(clicked)` `(bell)` `(exited . CODE)` `(screenshot . PATH)` `(error . MESSAGE)` のリスト
+/// `(:generation :alive :view :hwnd :panes :started :pid :conpty :font :title :pwd :exited :exit-code :closed :cols :rows :events)`。
+/// :panes は `(ID HWND COLS ROWS SCROLLED)` のリスト。
+/// :events は前回から溜まった知らせ `(clicked . PANE)` `(bell)` `(exited . CODE)` `(screenshot . PATH)`
+/// `(selected . TEXT)` `(copy-ready)` `(error . MESSAGE)` のリスト
 #[defun]
 fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Result<Value<'e>> {
     let t = term.borrow();
@@ -207,14 +286,20 @@ fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Resu
     let mut events = Vec::new();
     for e in t.shared().take_events() {
         events.push(match e {
-            Event::Clicked => env.list([env.intern("clicked")?])?,
+            Event::Clicked(id) => env.cons(env.intern("clicked")?, id)?,
             Event::Bell => env.list([env.intern("bell")?])?,
             Event::Exited(code) => env.cons(env.intern("exited")?, code.map(|c| c as i64))?,
             Event::Screenshot(p) => env.cons(env.intern("screenshot")?, p)?,
+            Event::Selected(t) => env.cons(env.intern("selected")?, t)?,
+            Event::CopyReady => env.list([env.intern("copy-ready")?])?,
             Event::Error(m) => env.cons(env.intern("error")?, m)?,
         });
     }
     let b = |v: bool| -> Result<Value<'e>> { v.into_lisp(env) };
+    let mut panes = Vec::with_capacity(s.panes.len());
+    for p in &s.panes {
+        panes.push(env.list((p.id, p.hwnd as i64, p.cols as i64, p.rows as i64, b(p.scrolled)?))?);
+    }
     let items = [
         env.intern(":generation")?,
         (s.generation as i64).into_lisp(env)?,
@@ -224,6 +309,8 @@ fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Resu
         b(s.view)?,
         env.intern(":hwnd")?,
         (s.hwnd as i64).into_lisp(env)?,
+        env.intern(":panes")?,
+        env.list(&panes)?,
         env.intern(":started")?,
         b(s.started)?,
         env.intern(":pid")?,
@@ -252,7 +339,8 @@ fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Resu
     env.list(&items)
 }
 
-/// カーソルの矩形 `(X Y W H)`（子 HWND の中の画素。`window-inside-pixel-edges' の左上からの位置）。見えなければ nil。
+/// カーソルの矩形 `(X Y W H)`（選んでいるペインの子 HWND の中の画素。`window-inside-pixel-edges' の左上からの位置）。
+/// 見えなければ（遡っているペインでも）nil。
 /// IME の変換ウィンドウの位置合わせに使う（T-010）
 #[defun]
 fn cursor<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
@@ -260,6 +348,14 @@ fn cursor<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
         Some((x, y, w, h)) => env.list((x as i64, y as i64, w as i64, h as i64)),
         None => ().into_lisp(env),
     }
+}
+
+/// ペイン PANE の見えている行のテキスト（UI スレッドに頼んで最大 2 秒待つ。デバッグ・自動確認用）
+#[defun]
+fn pane_text(term: &RefCell<Term>, pane: i64) -> Result<Option<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    term.borrow().request(Request::PaneText { pane, reply: tx });
+    Ok(rx.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten())
 }
 
 /// 今の画面（ビューポート）のテキスト。行末の空白は落とし、行ごとに改行を付ける。まだ起動していなければ nil。

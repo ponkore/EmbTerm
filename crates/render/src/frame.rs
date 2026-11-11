@@ -46,7 +46,10 @@ impl Cell {
 #[derive(Clone)]
 pub struct Frame {
     pub cols: u16,
+    /// 写した行数（overscan の分を含む）
     pub rows: u16,
+    /// ビューポートの先頭の行が `cells` の何行目か（overscan の上の行数）
+    pub viewport_top: u16,
     /// 行ごとに `cols` 個
     pub cells: Vec<Cell>,
     /// 行ごとの選択範囲（両端を含む桁）
@@ -64,6 +67,7 @@ impl Default for Frame {
         Self {
             cols: 0,
             rows: 0,
+            viewport_top: 0,
             cells: Vec::new(),
             selection: Vec::new(),
             cursor: Cursor { pos: None, wide_tail: false, visible: false, blinking: false, shape: CursorShape::Block },
@@ -89,8 +93,13 @@ impl Frame {
     /// 何か変わったら true（描き直しが要る）
     pub fn update(&mut self, rs: &mut RenderState) -> bool {
         let dirty = rs.dirty();
-        let (cols, rows) = rs.size();
-        if (cols, rows) != (self.cols, self.rows) {
+        let (cols, vrows) = rs.size();
+        let (above, below) = rs.overscan();
+        let rows = vrows + above + below;
+        self.viewport_top = above;
+        // 大きさが変わると中身が消えるので、全部の行を写し直す（部分の dirty のままでも）
+        let resized = (cols, rows) != (self.cols, self.rows);
+        if resized {
             self.cols = cols;
             self.rows = rows;
             self.cells = vec![Cell::default(); cols as usize * rows as usize];
@@ -111,10 +120,10 @@ impl Frame {
         self.palette = colors.palette;
         self.cursor = cursor;
 
-        if dirty != et_vt::Dirty::Clean {
+        if dirty != et_vt::Dirty::Clean || resized {
             let mut text = Vec::new();
-            let mut rows_it = rs.dirty_rows();
-            while let Some(y) = rows_it.next_dirty() {
+            let mut rows_it = if resized { rs.all_rows() } else { rs.dirty_rows() };
+            while let Some(y) = if resized { rows_it.next_row() } else { rows_it.next_dirty() } {
                 if y >= rows {
                     continue;
                 }

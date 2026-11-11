@@ -12,14 +12,18 @@
 ;;
 ;; - `M-x embterm' で新しい端末のバッファを開く。バッファの中身は置き物（端末は子 HWND が描く）
 ;; - 位置合わせ: `window-size-change-functions' / `window-buffer-change-functions' /
-;;   `window-selection-change-functions' で、端末のバッファを出しているウィンドウの
-;;   `window-inside-pixel-edges' を module に送る。見えなくなったら隠す。同じバッファを複数の
-;;   ウィンドウに出したときは、子 HWND は 1 枚だけ（選んでいるウィンドウ → 前に出していたウィンドウ →
-;;   最初のウィンドウ。GenPreview と同じ。本格的な split は T-063）
+;;   `window-selection-change-functions' で、端末のバッファを出している**すべてのウィンドウ**に
+;;   ペイン（子 HWND 1 枚）を置き（`C-x 2' / `C-x 3'。T-063）、`window-inside-pixel-edges' を module に送る。
+;;   別のフレームに同じ端末を出したときは、今のフレームのウィンドウだけに置く（要件 T-016）。ペインごとに
+;;   別のスクロール位置を持ち、端末の大きさは選んでいるペインに合わせる（module）
 ;; - キー（T-009 の案 A）: フォーカスは Emacs に残る。semi-char モードでは
 ;;   `embterm-keymap-exceptions' 以外のキーを module に送る（ghostel の semi-char と同じ）。
 ;;   キーマップは `emulation-mode-map-alists' の先頭に置く（cua-mode などに負けないため）
-;;   `C-c C-k' で copy モード（キーを Emacs に返し、画面のテキストをバッファに写す）、`C-c C-j' で戻る
+;;   `C-c C-k' で copy モード（キーを Emacs に返し、スクロールバックごとバッファに写す。T-017）、`C-c C-j' で戻る
+;; - スクロール（T-037）: ホイールと `S-<prior>' `S-<next>' `S-<home>' `S-<end>' でペインごとに遡る。
+;;   入力すると、そのペインはいちばん下へ戻る
+;; - 選択（T-036）: 子 HWND のドラッグ（Shift+ドラッグはマウスの報告が有効なアプリの間でも選択）。
+;;   `embterm-copy-on-select' なら kill-ring へ。`M-w' は選択があればコピー、無ければ端末へ送る
 ;; - module → Lisp はタイマー（`embterm-poll-interval'）でポーリングする（タイトル・カレントディレクトリ・
 ;;   クリック・プロセスの終了）。module の関数は待たない
 ;; - module は一時ディレクトリにコピーしてから読む（読み込み済みの DLL は差し替えられないため。T-030）。
@@ -37,10 +41,18 @@
 (declare-function embterm-module-create "embterm-module")
 (declare-function embterm-module-place "embterm-module")
 (declare-function embterm-module-hide "embterm-module")
+(declare-function embterm-module-remove "embterm-module")
+(declare-function embterm-module-select "embterm-module")
 (declare-function embterm-module-send-string "embterm-module")
 (declare-function embterm-module-send-key "embterm-module")
 (declare-function embterm-module-paste "embterm-module")
+(declare-function embterm-module-paste-safe-p "embterm-module")
 (declare-function embterm-module-scroll "embterm-module")
+(declare-function embterm-module-set-scrollback "embterm-module")
+(declare-function embterm-module-selection "embterm-module")
+(declare-function embterm-module-clear-selection "embterm-module")
+(declare-function embterm-module-request-copy "embterm-module")
+(declare-function embterm-module-take-copy "embterm-module")
 (declare-function embterm-module-set-font "embterm-module")
 (declare-function embterm-module-set-narrow-wide "embterm-module")
 (declare-function embterm-module-focus "embterm-module")
@@ -104,6 +116,19 @@ tr-ime advanced（`tr-ime-modadv--set-composition-window'）があるときだ�
 無ければ変換ウィンドウは Emacs のポイント（隠れたバッファ）の位置に出る。"
   :type 'boolean)
 
+(defcustom embterm-scrollback-lines 10000
+  "端末のスクロールバックの行数の上限。開いている端末にも反映する。"
+  :type 'integer
+  :set #'embterm--set-and-apply)
+
+(defcustom embterm-copy-on-select t
+  "non-nil なら、端末の選択を終えたときに kill-ring とクリップボードへ入れる。"
+  :type 'boolean)
+
+(defcustom embterm-confirm-unsafe-paste t
+  "non-nil なら、改行を含む文字列を、ブラケットペーストでないときに貼り付ける前に確かめる。"
+  :type 'boolean)
+
 (defcustom embterm-kill-buffer-on-exit t
   "non-nil なら、プロセスが終わったら端末のバッファを消す。"
   :type 'boolean)
@@ -163,17 +188,24 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 
 ;;;; バッファの状態
 
+(cl-defstruct (embterm--pane (:constructor embterm--make-pane (window id)))
+  "Emacs のウィンドウ 1 つに対応するペイン（子 HWND 1 枚。T-063）。"
+  window id
+  (placed nil))
+
 (defvar-local embterm--term nil "module の端末（user-ptr）。")
-(defvar-local embterm--window nil "子 HWND を出しているウィンドウ。")
-(defvar-local embterm--placed nil "最後に置いた (WINDOW-ID WINDOW EDGES)。同じなら置き直さない。")
-(defvar-local embterm--view-seen nil "子 HWND があるのを見たか（消えたら置き直すため）。")
+(defvar-local embterm--panes nil "このバッファのペイン（`embterm--pane' のリスト）。")
+(defvar-local embterm--next-pane 1 "次に作るペインの番号。")
+(defvar-local embterm--selected-pane 'unknown "最後に module に伝えた選択ペインの番号（nil は選んでいない）。")
+(defvar-local embterm--pane-frame nil "ペインを置いているフレーム。")
 (defvar-local embterm--generation nil "最後に読んだ module の状態の世代。")
 (defvar-local embterm--state nil "最後に読んだ module の状態（plist）。")
 (defvar-local embterm--title nil "最後に反映したタイトル。")
 (defvar-local embterm--focused 'unknown "最後に module に伝えたフォーカスの状態。")
 (defvar-local embterm--exited nil "プロセスが終わったか。")
 (defvar-local embterm--input-mode 'semi-char
-  "入力モード。`semi-char'（キーを端末に送る）か `copy'（キーを Emacs に返し、画面のテキストを写す）。")
+  "入力モード。`semi-char'（キーを端末に送る）か `copy'（キーを Emacs に返し、スクロールバックごと写す）。")
+(defvar-local embterm--copy-window nil "copy モードに入ったときに選んでいたウィンドウ。")
 (defvar-local embterm--semi-char nil
   "non-nil なら `embterm-semi-char-map' が効く（`emulation-mode-map-alists' の条件）。")
 
@@ -216,7 +248,8 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
           (setq embterm--term
                 (embterm-module-create (vconcat argv) (embterm--cwd) (embterm--conpty-dir)
                                        embterm-font-family embterm-font-size
-                                       (symbol-name embterm-narrow-wide)))
+                                       (symbol-name embterm-narrow-wide)
+                                       embterm-scrollback-lines))
         (error (kill-buffer buf)
                (signal (car err) (cdr err))))
       (push buf embterm--buffers))
@@ -312,29 +345,75 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
   (unless embterm--buffers
     (embterm--deactivate)))
 
-(defun embterm--pick-window ()
-  "子 HWND を出すウィンドウ。選んでいるウィンドウ → 前に出していたウィンドウ → 最初のウィンドウ。"
-  (let ((wins (get-buffer-window-list (current-buffer) nil 'visible)))
-    (cond ((memq (selected-window) wins) (selected-window))
-          ((memq embterm--window wins) embterm--window)
-          (t (car wins)))))
+(defun embterm--windows ()
+  "ペインを置くウィンドウのリスト。
+別のフレームに同じバッファを出しているときは 1 つのフレームのウィンドウだけ
+（選んでいるウィンドウのフレーム → 前に置いていたフレーム → 最初のウィンドウのフレーム）。要件 T-016。"
+  (let* ((all (get-buffer-window-list (current-buffer) nil 'visible))
+         (frame (cond ((memq (selected-window) all) (selected-frame))
+                      ((and (frame-live-p embterm--pane-frame)
+                            (seq-find (lambda (w) (eq (window-frame w) embterm--pane-frame)) all))
+                       embterm--pane-frame)
+                      (all (window-frame (car all))))))
+    (setq embterm--pane-frame frame)
+    (seq-filter (lambda (w) (eq (window-frame w) frame)) all)))
+
+(defun embterm--pane-of (window)
+  "WINDOW のペイン（このバッファの）。"
+  (seq-find (lambda (p) (eq (embterm--pane-window p) window)) embterm--panes))
+
+(defun embterm--pane-by-id (id)
+  "番号 ID のペイン。"
+  (seq-find (lambda (p) (eql (embterm--pane-id p) id)) embterm--panes))
+
+(defun embterm--place-pane (pane)
+  "ペイン PANE を、そのウィンドウの本文の位置に置く（同じ位置なら送らない）。"
+  (let* ((win (embterm--pane-window pane))
+         (id (frame-parameter (window-frame win) 'window-id))
+         (edges (window-inside-pixel-edges win))
+         (key (list id edges)))
+    (unless (equal key (embterm--pane-placed pane))
+      (pcase-let ((`(,l ,tp ,r ,b) edges))
+        (embterm-module-place embterm--term (embterm--pane-id pane) id l tp (- r l) (- b tp)))
+      (setf (embterm--pane-placed pane) key))))
+
+(defun embterm--hide-pane (pane)
+  (when (embterm--pane-placed pane)
+    (embterm-module-hide embterm--term (embterm--pane-id pane))
+    (setf (embterm--pane-placed pane) nil)))
 
 (defun embterm--place ()
-  "このバッファの端末を置く（出しているウィンドウが無い・copy モードなら隠す）。"
-  (let ((win (and (eq embterm--input-mode 'semi-char) (embterm--pick-window))))
-    (if (not win)
-        (when embterm--placed
-          (embterm-module-hide embterm--term)
-          (setq embterm--placed nil))
-      (let* ((frame (window-frame win))
-             (id (frame-parameter frame 'window-id))
-             (edges (window-inside-pixel-edges win))
-             (key (list id win edges)))
-        (setq embterm--window win)
-        (unless (equal key embterm--placed)
-          (pcase-let ((`(,l ,tp ,r ,b) edges))
-            (embterm-module-place embterm--term id l tp (- r l) (- b tp)))
-          (setq embterm--placed key))))))
+  "このバッファの端末を、出しているすべてのウィンドウに置く。
+ウィンドウが無くなったペインは消し、copy モードの間は隠す（スクロール位置は残る）。"
+  (let ((windows (embterm--windows)))
+    ;; ウィンドウが無くなった（または別のフレームを選んだ）ペインを消す
+    (setq embterm--panes
+          (seq-filter (lambda (p)
+                        (or (memq (embterm--pane-window p) windows)
+                            (progn (embterm-module-remove embterm--term (embterm--pane-id p))
+                                   nil)))
+                      embterm--panes))
+    (dolist (win windows)
+      (let ((pane (or (embterm--pane-of win)
+                      (let ((new (embterm--make-pane win embterm--next-pane)))
+                        (cl-incf embterm--next-pane)
+                        (setq embterm--panes (append embterm--panes (list new)))
+                        new))))
+        (if (eq embterm--input-mode 'semi-char)
+            (embterm--place-pane pane)
+          (embterm--hide-pane pane))))
+    (embterm--send-selected-pane)))
+
+(defun embterm--send-selected-pane ()
+  "選んでいるウィンドウのペインを module に伝える（変わったときだけ）。
+端末の大きさはこのペインに合わせる。端末のウィンドウを選んでいないときは nil。"
+  (let* ((pane (and (eq (window-buffer (selected-window)) (current-buffer))
+                    (eq embterm--input-mode 'semi-char)
+                    (embterm--pane-of (selected-window))))
+         (id (and pane (embterm--pane-id pane))))
+    (unless (eq id embterm--selected-pane)
+      (setq embterm--selected-pane id)
+      (embterm-module-select embterm--term id))))
 
 ;;;; フォーカス（T-070）
 
@@ -370,7 +449,7 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
            (args
             (with-current-buffer (window-buffer win)
               (when (and embterm--term
-                         (eq embterm--window win)
+                         (embterm--pane-of win)
                          (eq embterm--input-mode 'semi-char))
                 (pcase (ignore-errors (embterm-module-cursor embterm--term))
                   (`(,x ,y ,_w ,_h)
@@ -421,20 +500,21 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
       (setq embterm--generation (plist-get st :generation)
             embterm--state st)
       ;; 親のフレームが消されると子 HWND も消える（端末は残る）。置き直せば作り直される
-      (if (plist-get st :view)
-          (setq embterm--view-seen t)
-        (when (and embterm--view-seen (plist-get st :alive))
-          (setq embterm--view-seen nil
-                embterm--placed nil)
-          (embterm--place)))
+      (dolist (info (plist-get st :panes))
+        (pcase info
+          (`(,id 0 . ,_)
+           (let ((pane (embterm--pane-by-id id)))
+             (when pane (setf (embterm--pane-placed pane) nil))))))
       (embterm--apply-title (plist-get st :title))
       (embterm--apply-pwd (plist-get st :pwd))
       (dolist (e (plist-get st :events))
         (pcase e
-          (`(clicked) (embterm--select-window))
+          (`(clicked . ,pane) (embterm--select-pane-window pane))
           (`(bell) (ding t))
           (`(exited . ,code) (embterm--exited code))
           (`(screenshot . ,path) (message "embterm: 画面を保存しました: %s" path))
+          (`(selected . ,text) (embterm--on-selected text))
+          (`(copy-ready) (embterm--fill-copy))
           (`(error . ,m) (message "embterm: %s" m))
           (_ nil))))))
 
@@ -455,9 +535,23 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
       (when (file-directory-p path)
         (setq default-directory (file-name-as-directory (expand-file-name path)))))))
 
-(defun embterm--select-window ()
-  "クリックされた端末のウィンドウを選ぶ（子 HWND はフォーカスを取らないため）。"
-  (let ((win embterm--window))
+(defvar embterm--last-selected-time 0 "最後に選択を kill-ring へ入れた時刻。")
+
+(defun embterm--on-selected (text)
+  "選択を終えたときの TEXT を（`embterm-copy-on-select' なら）kill-ring へ入れる。
+ダブル・トリプルクリックは押すたびに知らせが来るので、すぐ続いて前の内容を含むものは前の項目を置き換える。"
+  (when embterm-copy-on-select
+    (let ((now (float-time)))
+      (kill-new text
+                (and kill-ring
+                     (< (- now embterm--last-selected-time) 0.6)
+                     (string-match-p (regexp-quote (current-kill 0)) text)))
+      (setq embterm--last-selected-time now))))
+
+(defun embterm--select-pane-window (id)
+  "クリックされたペイン ID のウィンドウを選ぶ（子 HWND はフォーカスを取らないため）。"
+  (let* ((pane (embterm--pane-by-id id))
+         (win (and pane (embterm--pane-window pane))))
     (when (window-live-p win)
       (unless (eq (window-frame win) (selected-frame))
         (select-frame-set-input-focus (window-frame win)))
@@ -475,12 +569,13 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 ;;;; 設定の反映
 
 (defun embterm--apply-settings ()
-  "フォントと広いグリフの描き方を、開いている端末に反映する。"
+  "フォント・広いグリフの描き方・スクロールバックの行数を、開いている端末に反映する。"
   (dolist (buf (embterm--live-buffers))
     (with-current-buffer buf
       (ignore-errors
         (embterm-module-set-font embterm--term embterm-font-family embterm-font-size)
-        (embterm-module-set-narrow-wide embterm--term (symbol-name embterm-narrow-wide))))))
+        (embterm-module-set-narrow-wide embterm--term (symbol-name embterm-narrow-wide))
+        (embterm-module-set-scrollback embterm--term embterm-scrollback-lines)))))
 
 ;;;; キー（T-009 の案 A）
 
@@ -548,21 +643,71 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
   "kill-ring の先頭を端末に貼り付ける（ブラケットペーストのモードなら包む）。"
   (interactive)
   (embterm--require-term)
-  (embterm-module-paste embterm--term (current-kill 0)))
+  (let ((text (current-kill 0)))
+    (when (or (embterm-module-paste-safe-p embterm--term text)
+              (not embterm-confirm-unsafe-paste)
+              (y-or-n-p "embterm: 改行を含むテキストを貼り付けますか？ "))
+      (embterm-module-paste embterm--term text))))
+
+(defun embterm-copy-or-send ()
+  "端末の選択があれば kill-ring へ入れて選択を消す。無ければ `M-w' を端末に送る。"
+  (interactive)
+  (embterm--require-term)
+  (let ((text (embterm-module-selection embterm--term)))
+    (if text
+        (progn
+          (kill-new text)
+          (embterm-module-clear-selection embterm--term)
+          (message "embterm: 選択をコピーしました（%d 文字）" (length text)))
+      (embterm--send-event))))
 
 (defun embterm-wheel (event)
-  "ホイールを Emacs が受けたとき（`MouseWheelRouting' の設定による）、端末のスクロールバックを動かす。"
+  "ホイールを Emacs が受けたとき（`MouseWheelRouting' の設定による）、そのウィンドウのペインを動かす。
+マウスの報告が有効なアプリならアプリへ送る（module が判断する）。"
   (interactive "e")
+  (let* ((win (posn-window (event-start event)))
+         (buf (if (windowp win) (window-buffer win) (current-buffer))))
+    (when (buffer-local-value 'embterm--term buf)
+      (with-current-buffer buf
+        (let ((pane (or (embterm--pane-of win) (car embterm--panes)))
+              (notches (pcase (event-basic-type event)
+                         ((or 'wheel-up 'mouse-4) 1)
+                         ((or 'wheel-down 'mouse-5) -1))))
+          (when (and pane notches)
+            (embterm-module-scroll embterm--term (embterm--pane-id pane) "wheel" notches)))))))
+
+(defun embterm--scroll-selected (kind &optional n)
+  "選んでいるウィンドウのペインをスクロールする。KIND と N は `embterm-module-scroll' と同じ。"
   (embterm--require-term)
-  (pcase (event-basic-type event)
-    ((or 'wheel-down 'mouse-5) (embterm-module-scroll embterm--term 3))
-    ((or 'wheel-up 'mouse-4) (embterm-module-scroll embterm--term -3))))
+  (let ((pane (embterm--pane-of (selected-window))))
+    (when pane
+      (embterm-module-scroll embterm--term (embterm--pane-id pane) kind n))))
+
+(defun embterm-scroll-page-up ()
+  "このウィンドウのペインを 1 ページ遡る（スクロールバック）。"
+  (interactive)
+  (embterm--scroll-selected "pages" -1))
+
+(defun embterm-scroll-page-down ()
+  "このウィンドウのペインを 1 ページ戻す。"
+  (interactive)
+  (embterm--scroll-selected "pages" 1))
+
+(defun embterm-scroll-top ()
+  "このウィンドウのペインをスクロールバックの先頭へ。"
+  (interactive)
+  (embterm--scroll-selected "top"))
+
+(defun embterm-scroll-bottom ()
+  "このウィンドウのペインをいちばん下へ戻す。"
+  (interactive)
+  (embterm--scroll-selected "bottom"))
 
 (defun embterm-screenshot (file)
   "端末の今の画面を PNG の FILE に保存する（デバッグ用。待たない）。"
   (interactive "F保存する PNG: ")
   (embterm--require-term)
-  (embterm-module-screenshot embterm--term (expand-file-name file)))
+  (embterm-module-screenshot embterm--term (expand-file-name file) nil))
 
 (defun embterm-screen-text ()
   "端末の今の画面のテキスト（デバッグ用）。"
@@ -590,6 +735,11 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
         (funcall bind map (concat mod key))))
     (dolist (key '("RET" "TAB" "DEL" "<backtab>" "C-@" "M-DEL" "M-SPC" "C-]" "C-/" "C-M-]" "C-M-/"))
       (funcall bind map key))
+    ;; スクロールバックは Emacs に残す（T-037）。送るキーの一覧で束縛したあとで上書きする
+    (define-key map (kbd "S-<prior>") #'embterm-scroll-page-up)
+    (define-key map (kbd "S-<next>") #'embterm-scroll-page-down)
+    (define-key map (kbd "S-<home>") #'embterm-scroll-top)
+    (define-key map (kbd "S-<end>") #'embterm-scroll-bottom)
     ;; C-<英字>（C-i = TAB、C-m = RET は上。C-y は貼り付け）と C-M-<英字>
     (dolist (c (number-sequence ?a ?z))
       (unless (memq c '(?i ?m ?y))
@@ -598,6 +748,9 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
     ;; M-<ASCII の印字可能な文字>
     (dolist (c (number-sequence ?! ?~))
       (funcall bind map (format "M-%c" c)))
+    ;; 選択があれば M-w はコピー（T-036）
+    (unless (member "M-w" embterm-keymap-exceptions)
+      (define-key map (kbd "M-w") #'embterm-copy-or-send))
     ;; 貼り付けとホイール
     (unless (member "C-y" embterm-keymap-exceptions)
       (define-key map (kbd "C-y") #'embterm-yank))
@@ -629,29 +782,54 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
   (embterm--require-term)
   (setq embterm--input-mode 'semi-char
         embterm--semi-char t
+        embterm--copy-window nil
         cursor-type nil)
   (embterm--placeholder)
   (force-mode-line-update)
   (embterm--sync))
 
 (defun embterm-copy-mode ()
-  "copy モードにする。端末を隠し、今の画面のテキストをバッファに写して、キーを Emacs に返す。
-\\<embterm-mode-map>\\[embterm-semi-char-mode] で戻る。"
+  "copy モードにする。端末を隠し、スクロールバックごとのテキストをバッファに写して、キーを Emacs に返す。
+\\<embterm-mode-map>\\[embterm-semi-char-mode] で戻る（ペインのスクロール位置はそのまま）。
+テキストは module が裏で作り、できたら（`embterm--fill-copy'）バッファに入る。"
   (interactive)
   (embterm--require-term)
-  (let ((text (or (embterm-module-text embterm--term) "")))
+  (let ((pane (embterm--pane-of (selected-window)))
+        (inhibit-read-only t))
     (setq embterm--input-mode 'copy
           embterm--semi-char nil
+          embterm--copy-window (selected-window)
           cursor-type t)
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert text)
-      (goto-char (point-max))
-      (skip-chars-backward " \n")))
+    (erase-buffer)
+    (insert (propertize "EmbTerm: スクロールバックを写しています…\n" 'face 'shadow))
+    (goto-char (point-min))
+    (embterm-module-request-copy embterm--term (and pane (embterm--pane-id pane))))
   (force-mode-line-update)
   (embterm--sync)
   (message "embterm: copy モード（%s で戻る）"
            (substitute-command-keys "\\<embterm-mode-map>\\[embterm-semi-char-mode]")))
+
+(defun embterm--fill-copy ()
+  "module が作った copy モードのテキストをバッファに入れる。
+ポイントは見ていた位置（ペインのスクロール位置 / カーソルの行）にする。copy モードを抜けていたら捨てる。"
+  (pcase (embterm-module-take-copy embterm--term)
+    (`(,text ,top ,point)
+     (when (eq embterm--input-mode 'copy)
+       (let ((inhibit-read-only t))
+         (erase-buffer)
+         (insert text)
+         (goto-char (point-min)))
+       (let* ((window embterm--copy-window)
+              (goto (lambda (line)
+                      (goto-char (point-min))
+                      (forward-line line)
+                      (point)))
+              (top-pos (funcall goto top))
+              (point-pos (funcall goto point)))
+         (goto-char point-pos)
+         (when (and (window-live-p window) (eq (window-buffer window) (current-buffer)))
+           (set-window-start window top-pos t)
+           (set-window-point window point-pos)))))))
 
 (provide 'embterm)
 

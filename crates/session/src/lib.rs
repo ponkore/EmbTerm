@@ -142,6 +142,8 @@ impl Session {
         term.set_mode(Mode::GRAPHEME_CLUSTER, true, true).map_err(|e| e.to_string())?;
         term.set_default_colors(opts.foreground, opts.background, None).map_err(|e| e.to_string())?;
         term.set_terminfo_name("xterm-256color").map_err(|e| e.to_string())?;
+        // バイト数の上限の既定は 10,000 バイトと小さいので外し、行数の上限だけで決める
+        term.set_scrollback_max_bytes(usize::MAX).map_err(|e| e.to_string())?;
         term.set_scrollback_max_lines(opts.scrollback_lines).map_err(|e| e.to_string())?;
         term.resize(opts.cols, opts.rows, opts.cell_px.0, opts.cell_px.1).map_err(|e| e.to_string())?;
 

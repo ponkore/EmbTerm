@@ -204,6 +204,11 @@ fn layout_matches_type_json() {
     check_struct!(t, "GhosttyTerminalScrollbar", GhosttyTerminalScrollbar, [total, offset, len]);
     check_struct!(t, "GhosttyTerminalModeConfig", GhosttyTerminalModeConfig, [mode, value]);
     check_struct!(t, "GhosttyRenderStateRowSelection", GhosttyRenderStateRowSelection, [size, start_x, end_x]);
+    check_struct!(t, "GhosttyRenderStateOverscan", GhosttyRenderStateOverscan, [above, below]);
+    check_struct!(t, "GhosttySurfacePosition", GhosttySurfacePosition, [x, y]);
+    check_struct!(t, "GhosttySelectionGestureGeometry", GhosttySelectionGestureGeometry, [columns, cell_width, padding_left, screen_height]);
+    check_struct!(t, "GhosttyMouseEncoderSize", GhosttyMouseEncoderSize, [size, screen_width, screen_height, cell_width, cell_height, padding_top, padding_bottom, padding_right, padding_left]);
+    check_struct!(t, "GhosttyMousePosition", GhosttyMousePosition, [x, y]);
     check_struct!(
         t,
         "GhosttyRenderStateCursor",
@@ -496,4 +501,109 @@ fn scroll_viewport_and_keys() {
     // モード
     t.vt_write(b"\x1b[?1004h");
     assert!(t.mode(Mode::FOCUS_EVENT));
+}
+
+fn rs_rows(rs: &mut RenderState) -> Vec<String> {
+    // 写した行を、全部テキストにして返す
+    let mut out = Vec::new();
+    let mut it = rs.all_rows();
+    let mut buf = Vec::new();
+    while it.next_row().is_some() {
+        let mut line = String::new();
+        let mut cells = it.cells();
+        while cells.next_cell() {
+            cells.graphemes(&mut buf);
+            line.extend(buf.iter());
+        }
+        out.push(line.trim_end().to_string());
+    }
+    out
+}
+
+#[test]
+fn tracked_ref_stays_on_its_line() {
+    let (mut t, _) = terminal(10, 3);
+    for i in 0..50 {
+        t.vt_write(format!("line{i}\r\n").as_bytes());
+    }
+    let total = t.total_rows();
+    assert!(total > 40, "スクロールバックがある: {total}");
+    let anchor = t.track(0, 10).unwrap();
+    assert_eq!(anchor.screen_row(&t), Some(10));
+    // 出力が増えても同じ行を指す（上限で消えない間は）
+    for i in 50..80 {
+        t.vt_write(format!("line{i}\r\n").as_bytes());
+    }
+    assert_eq!(anchor.screen_row(&t), Some(10));
+    // そこへビューポートを動かすと、同じ行が見える
+    t.scroll_viewport(Scroll::Row(10));
+    assert!(!t.viewport_at_bottom());
+    let mut rs = RenderState::new().unwrap();
+    rs.update(&t).unwrap();
+    assert_eq!(rs_rows(&mut rs), vec!["line10", "line11", "line12"]);
+    t.scroll_viewport(Scroll::Bottom);
+    assert!(t.viewport_at_bottom());
+}
+
+#[test]
+fn overscan_captures_scrollback() {
+    let (mut t, _) = terminal(10, 3);
+    for i in 0..50 {
+        t.vt_write(format!("line{i}\r\n").as_bytes());
+    }
+    let mut rs = RenderState::new().unwrap();
+    rs.set_overscan(4, 0).unwrap();
+    rs.update(&t).unwrap();
+    assert_eq!(rs.overscan(), (4, 0));
+    let rows = rs_rows(&mut rs);
+    // 上に 4 行 + 画面の 3 行（最後の行はカーソルの行で空）
+    assert_eq!(rows, vec!["line44", "line45", "line46", "line47", "line48", "line49", ""]);
+    // 行が足りないときは、写せた分だけ
+    let (t2, _) = terminal(10, 3);
+    let mut rs2 = RenderState::new().unwrap();
+    rs2.set_overscan(4, 0).unwrap();
+    rs2.update(&t2).unwrap();
+    assert_eq!(rs2.overscan(), (0, 0));
+}
+
+#[test]
+fn format_plain_includes_scrollback_and_selection() {
+    let (mut t, _) = terminal(10, 3);
+    for i in 0..30 {
+        t.vt_write(format!("line{i}\r\n").as_bytes());
+    }
+    let text = t.format_plain(false, false).unwrap().unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.first(), Some(&"line0"));
+    assert_eq!(lines.last(), Some(&"line29"));
+    assert_eq!(lines.len(), 30);
+    // 選択（画面の座標）
+    assert!(!t.has_selection());
+    assert_eq!(t.format_plain(true, true).unwrap(), None);
+    let a = t.grid_ref(0, 5).unwrap();
+    let b = t.grid_ref(4, 6).unwrap();
+    assert!(t.gesture_press(a, (1.0, 1.0), 1_000, 400_000_000).unwrap().is_none());
+    let geo = Geometry { columns: 10, cell_width: 8, padding_left: 0, screen_height: 54 };
+    let s = t.gesture_drag(b, (39.0, 28.0), geo).unwrap().expect("ドラッグで選択ができる");
+    t.apply_selection(Some(s)).unwrap();
+    t.gesture_release(Some(b)).unwrap();
+    assert!(t.has_selection());
+    assert_eq!(t.format_plain(true, true).unwrap().as_deref(), Some("line5\nline6"));
+}
+
+#[test]
+fn mouse_and_paste() {
+    let (mut t, _) = terminal(80, 24);
+    let mut enc = MouseEncoder::new().unwrap();
+    let geo = MouseGeometry { screen_width: 640, screen_height: 480, cell_width: 8, cell_height: 20, padding: 0 };
+    assert!(!t.mouse_tracking());
+    assert!(enc.encode(&t, geo, MouseAction::Press, Some(MouseButton::WheelUp), false, (4.0, 10.0), Mods::default()).is_empty());
+    t.vt_write(b"\x1b[?1000h\x1b[?1006h");
+    assert!(t.mouse_tracking());
+    assert_eq!(
+        enc.encode(&t, geo, MouseAction::Press, Some(MouseButton::WheelUp), false, (4.0, 10.0), Mods::default()),
+        b"\x1b[<64;1;1M"
+    );
+    assert!(paste_is_safe("abc"));
+    assert!(!paste_is_safe("a\nb"));
 }

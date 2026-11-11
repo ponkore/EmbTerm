@@ -48,7 +48,7 @@
 (defun smoke-state (buf)
   (if (buffer-live-p buf)
       (with-current-buffer buf
-        (format "win=%s mode=%s state=%S" embterm--window embterm--input-mode
+        (format "win=%s mode=%s state=%S" (mapcar #'embterm--pane-window embterm--panes) embterm--input-mode
                 (cl-loop for (k v) on embterm--state by #'cddr
                          unless (eq k :events) append (list k v))))
     "（バッファは消えた）"))
@@ -136,7 +136,7 @@
               (smoke-save-text smoke-cmd "cmd1.txt")
               (smoke-capture-frame "frame-cmd1.png")
               (smoke-log "%s" (smoke-state smoke-cmd))))
-    (1.0 "C-x 2（上下に分割。選んでいる上のウィンドウに出る）"
+    (1.0 "C-x 2（上下に分割。両方のウィンドウに出る。T-063）"
          . ,(lambda ()
               (split-window-below)
               (smoke-log "%s / 選択 %s" (smoke-state smoke-cmd) (selected-window))))
@@ -145,7 +145,7 @@
               (smoke-capture-frame "frame-split-v-top.png")
               (smoke-log "%s" (smoke-state smoke-cmd))
               (other-window 1)))
-    (1.5 "下のウィンドウを選ぶ（ビューが付いていく）"
+    (1.5 "下のウィンドウを選ぶ（端末の大きさはこのペインに合わせる）"
          . ,(lambda ()
               (smoke-capture-frame "frame-split-v-bottom.png")
               (smoke-log "%s / 選択 %s" (smoke-state smoke-cmd) (selected-window))

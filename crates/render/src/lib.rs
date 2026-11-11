@@ -23,6 +23,7 @@ mod frame;
 mod gpu;
 mod png;
 mod surface;
+mod view;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -37,6 +38,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 pub use font::FontSpec;
 pub use frame::{Cell, Frame};
+pub use view::FrameView;
 pub use gpu::Gpu;
 
 use font::{FontSet, fit_scale, style_index};
@@ -135,7 +137,11 @@ pub struct Renderer {
 impl Renderer {
     /// `width` / `height` はクライアント領域の物理ピクセル、`dpi` はウィンドウの DPI
     pub fn new(hwnd: HWND, width: u32, height: u32, dpi: u32, spec: FontSpec) -> Result<Self> {
-        let gpu = Gpu::create()?;
+        Self::with_gpu(Gpu::create()?, hwnd, width, height, dpi, spec)
+    }
+
+    /// デバイスを呼ぶ側と分け合って作る（端末の複数のペインで GPU デバイスを 1 つにする。T-067 の第一歩）
+    pub fn with_gpu(gpu: Gpu, hwnd: HWND, width: u32, height: u32, dpi: u32, spec: FontSpec) -> Result<Self> {
         let surface = Surface::new(&gpu, hwnd, width, height)?;
         let font = FontSet::new(&gpu.dwrite, &spec, dpi)?;
         Ok(Self { hwnd, gpu, surface, font, spec, dpi, brushes: HashMap::new(), theme: Theme::default() })
@@ -216,12 +222,28 @@ impl Renderer {
         Ok(b)
     }
 
-    /// フレームを描いて画面に出す。`capture` を渡すと、出す前の画面を PNG に保存する（デバッグ用）。
-    /// デバイスを失ったら作り直して、次の呼び出しで描けるようにする
+    /// デバイスを失ったあと、新しいデバイス（`Gpu`）に載せ替える（端末の全ペインで同じ `Gpu` を分け合うため）。
+    /// 失敗したら今のデバイスのまま
+    pub fn adopt_gpu(&mut self, gpu: Gpu) -> Result<()> {
+        let size = self.surface.size();
+        let surface = Surface::new(&gpu, self.hwnd, size.0, size.1)?;
+        self.gpu = gpu;
+        self.surface = surface;
+        self.brushes.clear();
+        Ok(())
+    }
+
+    /// 全部の行を描く（embterm.exe 用。`frame` の大きさに合わせる）
     pub fn draw(&mut self, frame: &Frame, focused: bool, capture: Option<&Path>) -> Result<()> {
+        self.draw_view(frame, &FrameView::whole(frame), focused, capture)
+    }
+
+    /// `frame` の一部を描く（ペインの大きさに合わせて切り取る / 空ける）。`capture` を渡すと、出す前の画面を PNG に保存する（デバッグ用）。
+    /// デバイスを失ったら作り直して、次の呼び出しで描けるようにする
+    pub fn draw_view(&mut self, frame: &Frame, view: &FrameView, focused: bool, capture: Option<&Path>) -> Result<()> {
         // WM_SIZE の取りこぼしに備え、描く前にスワップチェーンの大きさを確かめるのは呼ぶ側（GenPreview §1.3 #1）
         self.surface.begin();
-        let r = self.draw_frame(frame, focused);
+        let r = self.draw_frame(frame, view, focused);
         let end = self.surface.end();
         if let Err(e) = r.and(end) {
             self.recreate_device();
@@ -250,22 +272,31 @@ impl Renderer {
         }
     }
 
-    fn draw_frame(&mut self, frame: &Frame, focused: bool) -> Result<()> {
+    fn draw_frame(&mut self, frame: &Frame, view: &FrameView, focused: bool) -> Result<()> {
         let dc = self.surface.dc.clone();
         unsafe { dc.Clear(Some(&color_f(frame.background))) };
-        if frame.cols == 0 || frame.rows == 0 {
+        if frame.cols == 0 || frame.rows == 0 || view.cols == 0 || view.rows == 0 {
             return Ok(());
         }
         let (cw, ch) = (self.font.cell_w as f32, self.font.cell_h as f32);
         let pad = self.padding() as f32;
-        let cols = frame.cols as usize;
+        // 描く桁数（フレームより狭ければ右を切り取り、広ければ右側は背景のまま）
+        let cols = (frame.cols as usize).min(view.cols as usize);
 
-        // カーソルの位置と幅
+        // カーソルの位置と幅（ビューの中の行にする。見えなければ出さない）
         let cursor_color = frame.cursor_color.unwrap_or(self.theme.cursor);
-        let cursor = frame.cursor.pos.filter(|_| frame.cursor.visible).map(|(x, y)| {
+        let cursor = frame.cursor.pos.filter(|_| frame.cursor.visible && view.show_cursor).and_then(|(x, y)| {
+            let fy = frame.viewport_top as i32 + y as i32;
+            let py = fy - view.top;
+            if !(0..view.rows as i32).contains(&py) {
+                return None;
+            }
             let x = if frame.cursor.wide_tail { x.saturating_sub(1) } else { x };
-            let span = if x < frame.cols && y < frame.rows && frame.cell(x, y).wide == Wide::Wide { 2 } else { 1 };
-            (x, y, span)
+            if x as usize >= cols {
+                return None;
+            }
+            let span = if x < frame.cols && (fy as u16) < frame.rows && frame.cell(x, fy as u16).wide == Wide::Wide { 2 } else { 1 };
+            Some((x, py as u16, span))
         });
         let block_cursor = focused && frame.cursor.shape == CursorShape::Block;
 
@@ -273,11 +304,16 @@ impl Renderer {
         let mut bgs: Vec<Option<Rgb>> = vec![None; cols];
         let mut text = String::new();
 
-        for y in 0..frame.rows {
-            let row = frame.row(y);
+        for y in 0..view.rows {
+            let fy = view.top + y as i32;
+            if fy < 0 || fy >= frame.rows as i32 {
+                continue; // 上や下に足りない行は空き（背景のまま）
+            }
+            let fy = fy as u16;
+            let row = &frame.row(fy)[..cols];
             let top = pad + y as f32 * ch;
             let base_y = top + self.font.baseline;
-            let sel = frame.selection.get(y as usize).copied().flatten();
+            let sel = frame.selection.get(fy as usize).copied().flatten();
 
             // 1. セルごとの実際の前景・背景
             for (x, c) in row.iter().enumerate() {

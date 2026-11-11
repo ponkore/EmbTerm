@@ -89,6 +89,8 @@ pub enum Scroll {
     Bottom,
     /// 行数だけ動かす。負は上（古いほう）
     Delta(isize),
+    /// スクロールバックの先頭から数えた行（画面の座標）を、ビューポートの先頭にする
+    Row(u64),
 }
 
 /// スクロールバーの状態（行数）
@@ -121,6 +123,48 @@ impl Mode {
 pub struct Terminal {
     raw: ffi::GhosttyTerminal,
     inner: *mut Inner,
+    /// ドラッグの選択の解釈（最初に使うときに作る）
+    gesture: Option<Gesture>,
+}
+
+/// 画面の中のセルを指すもの。次に端末が変わるまで有効
+#[derive(Clone, Copy, Debug)]
+pub struct GridRef(ffi::GhosttyGridRef);
+
+/// 選択の範囲（[`Terminal::gesture_press`] など）。次に端末が変わるまで有効
+#[derive(Clone, Copy, Debug)]
+pub struct Selection(ffi::GhosttySelection);
+
+/// ドラッグを解釈するための表示の形（画素）
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Geometry {
+    pub columns: u32,
+    pub cell_width: u32,
+    pub padding_left: u32,
+    pub screen_height: u32,
+}
+
+/// 端末が変わっても同じセルを指し続ける位置（[`Terminal::track`]）。**端末のロックを持っている間に読み、落とすこと**
+pub struct TrackedRef {
+    raw: ffi::GhosttyTrackedGridRef,
+}
+
+unsafe impl Send for TrackedRef {}
+
+impl TrackedRef {
+    /// 今の画面の座標での行。スクロールバックの上限で行が消えていれば `None`。
+    /// `_terminal` はロックを持っていることの確認（同じ端末を渡す）
+    pub fn screen_row(&self, _terminal: &Terminal) -> Option<u32> {
+        let mut c = ffi::GhosttyPointCoordinate::default();
+        let r = unsafe { ffi::ghostty_tracked_grid_ref_point(self.raw, ffi::GHOSTTY_POINT_TAG_SCREEN, &mut c) };
+        (r == ffi::GHOSTTY_SUCCESS).then_some(c.y)
+    }
+}
+
+impl Drop for TrackedRef {
+    fn drop(&mut self) {
+        unsafe { ffi::ghostty_tracked_grid_ref_free(self.raw) };
+    }
 }
 
 // libghostty-vt の端末は別のスレッドへ動かしてよい（同時に触らなければよい）。同時に触らないことは
@@ -133,7 +177,7 @@ impl Terminal {
         let mut raw = ptr::null_mut();
         check(unsafe { ffi::ghostty_terminal_new(ptr::null(), &mut raw, cols.max(1), rows.max(1)) })?;
         let inner = Box::into_raw(Box::new(Inner { effects, cell_px: (1, 1) }));
-        let t = Self { raw, inner };
+        let t = Self { raw, inner, gesture: None };
         unsafe {
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_USERDATA, inner as *const c_void))?;
             let write_pty: ffi::GhosttyTerminalWritePtyFn = cb_write_pty;
@@ -208,6 +252,25 @@ impl Terminal {
         v == 1
     }
 
+    /// スクロールバックを含めた全体の行数（[`Scrollbar::total`]。[`Scroll::Row`] の行の範囲）
+    pub fn total_rows(&self) -> u64 {
+        self.scrollbar().total
+    }
+
+    /// マウスの報告（X10 / 通常 / ボタン / すべて）のどれかが有効か
+    pub fn mouse_tracking(&self) -> bool {
+        let mut v = false;
+        unsafe { ffi::ghostty_terminal_get(self.raw, ffi::GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &mut v as *mut _ as *mut c_void) };
+        v
+    }
+
+    /// 選択があるか
+    pub fn has_selection(&self) -> bool {
+        let mut sel = empty_selection();
+        let r = unsafe { ffi::ghostty_terminal_get(self.raw, ffi::GHOSTTY_TERMINAL_DATA_SELECTION, &mut sel as *mut _ as *mut c_void) };
+        r == ffi::GHOSTTY_SUCCESS
+    }
+
     /// スクロールバーの状態
     pub fn scrollbar(&self) -> Scrollbar {
         let mut s = ffi::GhosttyTerminalScrollbar::default();
@@ -230,6 +293,7 @@ impl Terminal {
             Scroll::Top => (ffi::GHOSTTY_TERMINAL_SCROLL_VIEWPORT_TOP, 0),
             Scroll::Bottom => (ffi::GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM, 0),
             Scroll::Delta(d) => (ffi::GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA, d),
+            Scroll::Row(r) => (ffi::GHOSTTY_TERMINAL_SCROLL_VIEWPORT_ROW, r as isize),
         };
         let behavior = ffi::GhosttyTerminalScrollViewport {
             tag,
@@ -267,6 +331,14 @@ impl Terminal {
         })
     }
 
+    /// スクロールバックのバイト数の上限（`usize::MAX` で無制限）。**既定は 10,000 バイトと小さい**ので、
+    /// 行数の上限（[`Terminal::set_scrollback_max_lines`]）で決めたいときは無制限にする
+    pub fn set_scrollback_max_bytes(&mut self, bytes: usize) -> Result<()> {
+        check(unsafe {
+            ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &bytes as *const _ as *const c_void)
+        })
+    }
+
     /// 既定の前景・背景・カーソルの色（OSC 10/11/12 で上書きされうる）
     pub fn set_default_colors(&mut self, fg: Rgb, bg: Rgb, cursor: Option<Rgb>) -> Result<()> {
         unsafe {
@@ -293,6 +365,29 @@ impl Terminal {
         Ok(r)
     }
 
+    /// 画面の座標（スクロールバックの先頭からの行）の (桁, 行) のセルを指す。次に端末が変わるまで有効
+    pub fn grid_ref(&self, x: u16, y: u32) -> Result<GridRef> {
+        let point = ffi::GhosttyPoint {
+            tag: ffi::GHOSTTY_POINT_TAG_SCREEN,
+            value: ffi::GhosttyPointValue { coordinate: ffi::GhosttyPointCoordinate { x, y } },
+        };
+        let mut r = ffi::GhosttyGridRef { node: ptr::null_mut(), x: 0, y: 0 };
+        check(unsafe { ffi::ghostty_terminal_grid_ref(self.raw, point, &mut r) })?;
+        Ok(GridRef(r))
+    }
+
+    /// 画面の座標の (桁, 行) のセルを、端末が変わっても追いかけて指し続ける（[`TrackedRef`]）。
+    /// スクロールバックの上限で行が消えると、その [`TrackedRef`] は値を失う
+    pub fn track(&self, x: u16, y: u32) -> Result<TrackedRef> {
+        let point = ffi::GhosttyPoint {
+            tag: ffi::GHOSTTY_POINT_TAG_SCREEN,
+            value: ffi::GhosttyPointValue { coordinate: ffi::GhosttyPointCoordinate { x, y } },
+        };
+        let mut raw: ffi::GhosttyTrackedGridRef = ptr::null_mut();
+        check(unsafe { ffi::ghostty_terminal_grid_ref_track(self.raw, point, &mut raw) })?;
+        Ok(TrackedRef { raw })
+    }
+
     /// ビューポートの (桁, 行) で選択範囲を決める（両端を含む）。`None` で消す。
     /// 選択はスクロールバックの中の位置として持つので、スクロールしても同じ文字に付いて動く
     pub fn set_selection(&mut self, range: Option<((u16, u16), (u16, u16))>) -> Result<()> {
@@ -312,9 +407,317 @@ impl Terminal {
     }
 }
 
+impl Terminal {
+    /// 選択（[`Selection`]）を端末の現在の選択にする。`None` で消す
+    pub fn apply_selection(&mut self, selection: Option<Selection>) -> Result<()> {
+        match selection {
+            None => check(unsafe { ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_SELECTION, ptr::null()) }),
+            Some(s) => check(unsafe {
+                ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_SELECTION, &s.0 as *const _ as *const c_void)
+            }),
+        }
+    }
+
+    fn gesture(&mut self) -> Result<&mut Gesture> {
+        if self.gesture.is_none() {
+            self.gesture = Some(Gesture::new()?);
+        }
+        Ok(self.gesture.as_mut().expect("直前に作った"))
+    }
+
+    /// 左ボタンを押した。単語・行の選択（ダブル・トリプルクリック）なら選択を返す。`time_ns` は単調な時刻、
+    /// `repeat_ns` はクリックの繰り返しとみなす間隔
+    pub fn gesture_press(&mut self, at: GridRef, pos: (f64, f64), time_ns: u64, repeat_ns: u64) -> Result<Option<Selection>> {
+        let raw = self.raw;
+        let g = self.gesture()?;
+        let event = g.press;
+        unsafe {
+            let position = ffi::GhosttySurfacePosition { x: pos.0, y: pos.1 };
+            check(ffi::ghostty_selection_gesture_event_set(event, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF, &at.0 as *const _ as *const c_void))?;
+            check(ffi::ghostty_selection_gesture_event_set(event, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, &position as *const _ as *const c_void))?;
+            check(ffi::ghostty_selection_gesture_event_set(event, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS, &time_ns as *const _ as *const c_void))?;
+            check(ffi::ghostty_selection_gesture_event_set(event, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS, &repeat_ns as *const _ as *const c_void))?;
+        }
+        gesture_result(g.raw, raw, event)
+    }
+
+    /// 押したままマウスを動かした
+    pub fn gesture_drag(&mut self, at: GridRef, pos: (f64, f64), geometry: Geometry) -> Result<Option<Selection>> {
+        let raw = self.raw;
+        let g = self.gesture()?;
+        let event = g.drag;
+        let geo = ffi::GhosttySelectionGestureGeometry {
+            columns: geometry.columns.max(1),
+            cell_width: geometry.cell_width.max(1),
+            padding_left: geometry.padding_left,
+            screen_height: geometry.screen_height.max(1),
+        };
+        unsafe {
+            let position = ffi::GhosttySurfacePosition { x: pos.0, y: pos.1 };
+            check(ffi::ghostty_selection_gesture_event_set(event, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF, &at.0 as *const _ as *const c_void))?;
+            check(ffi::ghostty_selection_gesture_event_set(event, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, &position as *const _ as *const c_void))?;
+            check(ffi::ghostty_selection_gesture_event_set(event, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY, &geo as *const _ as *const c_void))?;
+        }
+        gesture_result(g.raw, raw, event)
+    }
+
+    /// ボタンを離した
+    pub fn gesture_release(&mut self, at: Option<GridRef>) -> Result<()> {
+        let raw = self.raw;
+        let g = self.gesture()?;
+        let event = g.release;
+        unsafe {
+            let value = at.as_ref().map_or(ptr::null(), |r| &r.0 as *const _ as *const c_void);
+            check(ffi::ghostty_selection_gesture_event_set(event, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF, value))?;
+        }
+        gesture_result(g.raw, raw, event).map(|_| ())
+    }
+
+    /// テキストを取り出す。`selection` が true なら今の選択を、false なら画面全体（スクロールバックを含む）。
+    /// `unwrap` は端末が折り返した行をつなげる（クリップボードに入れるときの形）。選択が無ければ `None`。
+    /// **端末のロックを持っている間に呼ぶ**
+    pub fn format_plain(&self, selection: bool, unwrap: bool) -> Result<Option<String>> {
+        let mut sel = empty_selection();
+        if selection {
+            let r = unsafe { ffi::ghostty_terminal_get(self.raw, ffi::GHOSTTY_TERMINAL_DATA_SELECTION, &mut sel as *mut _ as *mut c_void) };
+            if r == ffi::GHOSTTY_NO_VALUE {
+                return Ok(None);
+            }
+            check(r)?;
+        }
+        let mut f: ffi::GhosttyFormatter = ptr::null_mut();
+        check(unsafe { ffi::ghostty_formatter_terminal_new(ptr::null(), &mut f, self.raw) })?;
+        let result = (|| unsafe {
+            let emit = ffi::GHOSTTY_FORMATTER_FORMAT_PLAIN;
+            check(ffi::ghostty_formatter_set(f, ffi::GHOSTTY_FORMATTER_OPT_EMIT, &emit as *const _ as *const c_void))?;
+            let trim = true;
+            check(ffi::ghostty_formatter_set(f, ffi::GHOSTTY_FORMATTER_OPT_TRIM, &trim as *const _ as *const c_void))?;
+            check(ffi::ghostty_formatter_set(f, ffi::GHOSTTY_FORMATTER_OPT_UNWRAP, &unwrap as *const _ as *const c_void))?;
+            if selection {
+                check(ffi::ghostty_formatter_set(f, ffi::GHOSTTY_FORMATTER_OPT_SELECTION, &sel as *const _ as *const c_void))?;
+            }
+            let mut buf: *mut u8 = ptr::null_mut();
+            let mut len = 0usize;
+            check(ffi::ghostty_formatter_format_alloc(f, ptr::null(), &mut buf, &mut len))?;
+            let text = if buf.is_null() || len == 0 {
+                String::new()
+            } else {
+                String::from_utf8_lossy(std::slice::from_raw_parts(buf, len)).into_owned()
+            };
+            ffi::ghostty_free(ptr::null(), buf, len);
+            Ok(text)
+        })();
+        unsafe { ffi::ghostty_formatter_free(f) };
+        result.map(Some)
+    }
+}
+
+/// 貼り付けの安全確認（ghostty_paste_is_safe）。改行やブラケットペーストの終わりの列を含むと false
+pub fn paste_is_safe(text: &str) -> bool {
+    unsafe { ffi::ghostty_paste_is_safe(text.as_ptr() as *const std::ffi::c_char, text.len()) }
+}
+
+fn empty_selection() -> ffi::GhosttySelection {
+    ffi::GhosttySelection {
+        start: ffi::GhosttyGridRef { node: ptr::null_mut(), x: 0, y: 0 },
+        end: ffi::GhosttyGridRef { node: ptr::null_mut(), x: 0, y: 0 },
+        rectangle: false,
+    }
+}
+
+fn gesture_result(gesture: ffi::GhosttySelectionGesture, terminal: ffi::GhosttyTerminal, event: ffi::GhosttySelectionGestureEvent) -> Result<Option<Selection>> {
+    let mut sel = empty_selection();
+    let r = unsafe { ffi::ghostty_selection_gesture_event(gesture, terminal, event, &mut sel) };
+    match r {
+        ffi::GHOSTTY_NO_VALUE => Ok(None),
+        _ => {
+            check(r)?;
+            Ok(Some(Selection(sel)))
+        }
+    }
+}
+
+/// 選択のドラッグを解釈する状態（端末につき 1 つ）
+struct Gesture {
+    raw: ffi::GhosttySelectionGesture,
+    press: ffi::GhosttySelectionGestureEvent,
+    drag: ffi::GhosttySelectionGestureEvent,
+    release: ffi::GhosttySelectionGestureEvent,
+}
+
+impl Gesture {
+    fn new() -> Result<Self> {
+        let mut g = Self { raw: ptr::null_mut(), press: ptr::null_mut(), drag: ptr::null_mut(), release: ptr::null_mut() };
+        unsafe {
+            if let Err(e) = (|| {
+                check(ffi::ghostty_selection_gesture_new(ptr::null(), &mut g.raw))?;
+                check(ffi::ghostty_selection_gesture_event_new(ptr::null(), &mut g.press, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS))?;
+                check(ffi::ghostty_selection_gesture_event_new(ptr::null(), &mut g.drag, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG))?;
+                check(ffi::ghostty_selection_gesture_event_new(ptr::null(), &mut g.release, ffi::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE))?;
+                Ok::<(), Error>(())
+            })() {
+                g.free(ptr::null_mut());
+                return Err(e);
+            }
+        }
+        Ok(g)
+    }
+
+    /// `terminal` が生きていれば渡す（無ければ NULL）
+    unsafe fn free(&mut self, terminal: ffi::GhosttyTerminal) {
+        unsafe {
+            ffi::ghostty_selection_gesture_event_free(self.release);
+            ffi::ghostty_selection_gesture_event_free(self.drag);
+            ffi::ghostty_selection_gesture_event_free(self.press);
+            ffi::ghostty_selection_gesture_free(self.raw, terminal);
+        }
+    }
+}
+
+/// マウスの出来事を VT の列にするもの（マウスの報告が有効なアプリのとき）
+pub struct MouseEncoder {
+    raw: ffi::GhosttyMouseEncoder,
+    event: ffi::GhosttyMouseEvent,
+}
+
+unsafe impl Send for MouseEncoder {}
+
+/// マウスの出来事の種類
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseAction {
+    Press,
+    Release,
+    Motion,
+}
+
+/// マウスのボタン
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    /// ホイールを上へ
+    WheelUp,
+    /// ホイールを下へ
+    WheelDown,
+}
+
+/// エンコーダに渡す大きさの情報（画素）
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MouseGeometry {
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub cell_width: u32,
+    pub cell_height: u32,
+    pub padding: u32,
+}
+
+impl MouseEncoder {
+    pub fn new() -> Result<Self> {
+        let mut raw = ptr::null_mut();
+        let mut event = ptr::null_mut();
+        unsafe {
+            check(ffi::ghostty_mouse_encoder_new(ptr::null(), &mut raw))?;
+            if let Err(e) = check(ffi::ghostty_mouse_event_new(ptr::null(), &mut event)) {
+                ffi::ghostty_mouse_encoder_free(raw);
+                return Err(e);
+            }
+        }
+        let track = true;
+        unsafe { ffi::ghostty_mouse_encoder_set(raw, ffi::GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL, &track as *const _ as *const c_void) };
+        Ok(Self { raw, event })
+    }
+
+    /// 出来事を VT の列にする。端末のロックを持って呼ぶ（モードを読むため）。何も送らないときは空
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode(
+        &mut self,
+        terminal: &Terminal,
+        geometry: MouseGeometry,
+        action: MouseAction,
+        button: Option<MouseButton>,
+        any_pressed: bool,
+        pos: (f32, f32),
+        mods: Mods,
+    ) -> Vec<u8> {
+        let mut m = 0u16;
+        if mods.shift {
+            m |= ffi::GHOSTTY_MODS_SHIFT;
+        }
+        if mods.ctrl {
+            m |= ffi::GHOSTTY_MODS_CTRL;
+        }
+        if mods.alt {
+            m |= ffi::GHOSTTY_MODS_ALT;
+        }
+        let size = ffi::GhosttyMouseEncoderSize {
+            size: std::mem::size_of::<ffi::GhosttyMouseEncoderSize>(),
+            screen_width: geometry.screen_width.max(1),
+            screen_height: geometry.screen_height.max(1),
+            cell_width: geometry.cell_width.max(1),
+            cell_height: geometry.cell_height.max(1),
+            padding_top: geometry.padding,
+            padding_bottom: geometry.padding,
+            padding_right: geometry.padding,
+            padding_left: geometry.padding,
+        };
+        let mut buf = [0u8; 128];
+        let mut written = 0usize;
+        unsafe {
+            ffi::ghostty_mouse_encoder_set_from_terminal(self.raw, terminal.raw);
+            ffi::ghostty_mouse_encoder_set(self.raw, ffi::GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size as *const _ as *const c_void);
+            let any = any_pressed;
+            ffi::ghostty_mouse_encoder_set(self.raw, ffi::GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any as *const _ as *const c_void);
+            ffi::ghostty_mouse_event_set_action(
+                self.event,
+                match action {
+                    MouseAction::Press => ffi::GHOSTTY_MOUSE_ACTION_PRESS,
+                    MouseAction::Release => ffi::GHOSTTY_MOUSE_ACTION_RELEASE,
+                    MouseAction::Motion => ffi::GHOSTTY_MOUSE_ACTION_MOTION,
+                },
+            );
+            match button {
+                Some(b) => {
+                    ffi::ghostty_mouse_event_set_button(
+                        self.event,
+                        match b {
+                            MouseButton::Left => ffi::GHOSTTY_MOUSE_BUTTON_LEFT,
+                            MouseButton::Right => ffi::GHOSTTY_MOUSE_BUTTON_RIGHT,
+                            MouseButton::Middle => ffi::GHOSTTY_MOUSE_BUTTON_MIDDLE,
+                            MouseButton::WheelUp => ffi::GHOSTTY_MOUSE_BUTTON_FOUR,
+                            MouseButton::WheelDown => ffi::GHOSTTY_MOUSE_BUTTON_FIVE,
+                        },
+                    );
+                }
+                None => {
+                    ffi::ghostty_mouse_event_clear_button(self.event);
+                }
+            }
+            ffi::ghostty_mouse_event_set_mods(self.event, m);
+            ffi::ghostty_mouse_event_set_position(self.event, ffi::GhosttyMousePosition { x: pos.0, y: pos.1 });
+            if ffi::ghostty_mouse_encoder_encode(self.raw, self.event, buf.as_mut_ptr(), buf.len(), &mut written) != ffi::GHOSTTY_SUCCESS {
+                return Vec::new();
+            }
+        }
+        buf[..written.min(buf.len())].to_vec()
+    }
+}
+
+impl Drop for MouseEncoder {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::ghostty_mouse_event_free(self.event);
+            ffi::ghostty_mouse_encoder_free(self.raw);
+        }
+    }
+}
+
 impl Drop for Terminal {
     fn drop(&mut self) {
         unsafe {
+            if let Some(mut g) = self.gesture.take() {
+                g.free(self.raw);
+            }
             ffi::ghostty_terminal_free(self.raw);
             drop(Box::from_raw(self.inner));
         }
@@ -616,12 +1019,34 @@ impl RenderState {
         }
     }
 
+    /// 次の update で、ビューポートの上下に余分に写す行数を求める（スクロールバックを埋めるのに使う）。
+    /// 変えると次の update は全体の描き直しになる
+    pub fn set_overscan(&mut self, above: u16, below: u16) -> Result<()> {
+        let v = ffi::GhosttyRenderStateOverscan { above, below };
+        check(unsafe { ffi::ghostty_render_state_set(self.raw, ffi::GHOSTTY_RENDER_STATE_OPT_OVERSCAN, &v as *const _ as *const c_void) })
+    }
+
+    /// 前の update で実際に写せた余分の行数（上, 下）
+    pub fn overscan(&self) -> (u16, u16) {
+        let mut v = ffi::GhosttyRenderStateOverscan::default();
+        unsafe { ffi::ghostty_render_state_get(self.raw, ffi::GHOSTTY_RENDER_STATE_DATA_OVERSCAN, &mut v as *mut _ as *mut c_void) };
+        (v.above, v.below)
+    }
+
+    /// 行の反復を始める。写した行（overscan を含む）を上から順にすべて返す
+    pub fn all_rows(&mut self) -> Rows<'_> {
+        unsafe {
+            ffi::ghostty_render_state_get(self.raw, ffi::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &mut self.rows as *mut _ as *mut c_void)
+        };
+        Rows { state: self, index: 0 }
+    }
+
     /// 行の反復を始める。描き直しの要る行（全体が dirty なら全部の行）だけを上から順に返す
     pub fn dirty_rows(&mut self) -> Rows<'_> {
         unsafe {
             ffi::ghostty_render_state_get(self.raw, ffi::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &mut self.rows as *mut _ as *mut c_void)
         };
-        Rows { state: self }
+        Rows { state: self, index: 0 }
     }
 }
 
@@ -638,13 +1063,24 @@ impl Drop for RenderState {
 /// 行の反復子（[`RenderState::dirty_rows`]）
 pub struct Rows<'a> {
     state: &'a mut RenderState,
+    /// `next_row` で数えた行の位置
+    index: u16,
 }
 
 impl Rows<'_> {
-    /// 次の描き直しの要る行へ進み、その行の y（ビューポートの行番号）を返す
+    /// 次の描き直しの要る行へ進み、その行の y（反復の先頭（overscan があれば一番上の余分の行）からの位置）を返す
     pub fn next_dirty(&mut self) -> Option<u16> {
         let mut y: u16 = 0;
         unsafe { ffi::ghostty_render_state_row_iterator_next_dirty(self.state.rows, &mut y) }.then_some(y)
+    }
+
+    /// 次の行へ進み、その行の位置（反復の先頭からの番号）を返す
+    pub fn next_row(&mut self) -> Option<u16> {
+        unsafe { ffi::ghostty_render_state_row_iterator_next(self.state.rows) }.then(|| {
+            let y = self.index;
+            self.index += 1;
+            y
+        })
     }
 
     /// 今の行の選択範囲（両端を含む桁）。選択と重ならなければ `None`

@@ -25,6 +25,12 @@ pub type GhosttyRenderStateRowIterator = *mut c_void;
 pub type GhosttyRenderStateRowCells = *mut c_void;
 pub type GhosttyKeyEncoder = *mut c_void;
 pub type GhosttyKeyEvent = *mut c_void;
+pub type GhosttyTrackedGridRef = *mut c_void;
+pub type GhosttyFormatter = *mut c_void;
+pub type GhosttySelectionGesture = *mut c_void;
+pub type GhosttySelectionGestureEvent = *mut c_void;
+pub type GhosttyMouseEncoder = *mut c_void;
+pub type GhosttyMouseEvent = *mut c_void;
 /// アロケータ。使わない（NULL を渡して既定のものにする）
 pub type GhosttyAllocator = c_void;
 
@@ -163,6 +169,7 @@ pub struct GhosttyTerminalScrollViewport {
 pub const GHOSTTY_TERMINAL_SCROLL_VIEWPORT_TOP: c_int = 0;
 pub const GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM: c_int = 1;
 pub const GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA: c_int = 2;
+pub const GHOSTTY_TERMINAL_SCROLL_VIEWPORT_ROW: c_int = 3;
 
 /// terminal.h
 #[repr(C)]
@@ -179,6 +186,14 @@ pub struct GhosttyTerminalScrollbar {
 pub struct GhosttyTerminalModeConfig {
     pub mode: u16,
     pub value: bool,
+}
+
+/// render.h
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GhosttyRenderStateOverscan {
+    pub above: u16,
+    pub below: u16,
 }
 
 /// render.h（大きさ付きの構造体。`size` に `size_of` を入れてから渡す）
@@ -217,6 +232,47 @@ pub struct GhosttyRenderStateColors {
     pub palette: [GhosttyColorRgb; 256],
 }
 
+/// types.h（surface の座標。画素）
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GhosttySurfacePosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// selection.h（ドラッグを解釈するための表示の形）
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GhosttySelectionGestureGeometry {
+    pub columns: u32,
+    pub cell_width: u32,
+    pub padding_left: u32,
+    pub screen_height: u32,
+}
+
+/// mouse/encoder.h（大きさ付き）
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GhosttyMouseEncoderSize {
+    pub size: usize,
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub cell_width: u32,
+    pub cell_height: u32,
+    pub padding_top: u32,
+    pub padding_bottom: u32,
+    pub padding_right: u32,
+    pub padding_left: u32,
+}
+
+/// mouse/event.h
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GhosttyMousePosition {
+    pub x: f32,
+    pub y: f32,
+}
+
 // ---- 列挙の値（使うものだけ） ----
 
 // GhosttyTerminalOption
@@ -230,6 +286,7 @@ pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: c_int = 13;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_CURSOR: c_int = 14;
 pub const GHOSTTY_TERMINAL_OPT_SELECTION: c_int = 22;
 pub const GHOSTTY_TERMINAL_OPT_PWD_CHANGED: c_int = 26;
+pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES: c_int = 28;
 pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES: c_int = 29;
 pub const GHOSTTY_TERMINAL_OPT_TERMINFO_NAME: c_int = 38;
 pub const GHOSTTY_TERMINAL_OPT_MODE_DEFAULT: c_int = 34;
@@ -243,8 +300,10 @@ pub const GHOSTTY_TERMINAL_DATA_CURSOR_X: c_int = 3;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_Y: c_int = 4;
 pub const GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN: c_int = 6;
 pub const GHOSTTY_TERMINAL_DATA_SCROLLBAR: c_int = 9;
+pub const GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING: c_int = 11;
 pub const GHOSTTY_TERMINAL_DATA_TITLE: c_int = 12;
 pub const GHOSTTY_TERMINAL_DATA_PWD: c_int = 13;
+pub const GHOSTTY_TERMINAL_DATA_SELECTION: c_int = 31;
 pub const GHOSTTY_TERMINAL_DATA_VIEWPORT_ACTIVE: c_int = 32;
 pub const GHOSTTY_TERMINAL_DATA_MODE: c_int = 37;
 
@@ -255,6 +314,10 @@ pub const GHOSTTY_RENDER_STATE_DATA_DIRTY: c_int = 3;
 pub const GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR: c_int = 4;
 pub const GHOSTTY_RENDER_STATE_DATA_CURSOR: c_int = 18;
 pub const GHOSTTY_RENDER_STATE_DATA_COLORS: c_int = 19;
+pub const GHOSTTY_RENDER_STATE_DATA_OVERSCAN: c_int = 20;
+
+// GhosttyRenderStateOption
+pub const GHOSTTY_RENDER_STATE_OPT_OVERSCAN: c_int = 2;
 
 // GhosttyRenderStateDirty
 pub const GHOSTTY_RENDER_STATE_DIRTY_FALSE: c_int = 0;
@@ -273,6 +336,36 @@ pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN: c_int = 3;
 pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF: c_int = 4;
 pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR: c_int = 5;
 pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR: c_int = 6;
+
+// GhosttyFormatterFormat（types.h）/ GhosttyFormatterOption（formatter.h）
+pub const GHOSTTY_FORMATTER_FORMAT_PLAIN: c_int = 0;
+pub const GHOSTTY_FORMATTER_OPT_EMIT: c_int = 1;
+pub const GHOSTTY_FORMATTER_OPT_UNWRAP: c_int = 2;
+pub const GHOSTTY_FORMATTER_OPT_TRIM: c_int = 3;
+pub const GHOSTTY_FORMATTER_OPT_SELECTION: c_int = 4;
+
+// GhosttySelectionGestureEventType / Option（selection.h）
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS: c_int = 0;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE: c_int = 1;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG: c_int = 2;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF: c_int = 1;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION: c_int = 2;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS: c_int = 4;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS: c_int = 5;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY: c_int = 9;
+
+// GhosttyMouseAction / GhosttyMouseButton（mouse/event.h）/ GhosttyMouseEncoderOption
+pub const GHOSTTY_MOUSE_ACTION_PRESS: c_int = 0;
+pub const GHOSTTY_MOUSE_ACTION_RELEASE: c_int = 1;
+pub const GHOSTTY_MOUSE_ACTION_MOTION: c_int = 2;
+pub const GHOSTTY_MOUSE_BUTTON_LEFT: c_int = 1;
+pub const GHOSTTY_MOUSE_BUTTON_RIGHT: c_int = 2;
+pub const GHOSTTY_MOUSE_BUTTON_MIDDLE: c_int = 3;
+pub const GHOSTTY_MOUSE_BUTTON_FOUR: c_int = 4;
+pub const GHOSTTY_MOUSE_BUTTON_FIVE: c_int = 5;
+pub const GHOSTTY_MOUSE_ENCODER_OPT_SIZE: c_int = 3;
+pub const GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED: c_int = 4;
+pub const GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL: c_int = 5;
 
 // GhosttyCellData / GhosttyCellWide（screen.h）
 pub type GhosttyCell = u64;
@@ -349,6 +442,86 @@ unsafe extern "C" {
         point: GhosttyPoint,
         out_ref: *mut GhosttyGridRef,
     ) -> GhosttyResult;
+    pub fn ghostty_terminal_grid_ref_track(
+        terminal: GhosttyTerminal,
+        point: GhosttyPoint,
+        out_ref: *mut GhosttyTrackedGridRef,
+    ) -> GhosttyResult;
+
+    // grid_ref_tracked.h
+    pub fn ghostty_tracked_grid_ref_free(tracked: GhosttyTrackedGridRef);
+    pub fn ghostty_tracked_grid_ref_point(
+        tracked: GhosttyTrackedGridRef,
+        tag: c_int,
+        out_point: *mut GhosttyPointCoordinate,
+    ) -> GhosttyResult;
+
+    // formatter.h、allocator.h
+    pub fn ghostty_formatter_terminal_new(
+        allocator: *const GhosttyAllocator,
+        formatter: *mut GhosttyFormatter,
+        terminal: GhosttyTerminal,
+    ) -> GhosttyResult;
+    pub fn ghostty_formatter_set(formatter: GhosttyFormatter, option: c_int, value: *const c_void) -> GhosttyResult;
+    pub fn ghostty_formatter_format_alloc(
+        formatter: GhosttyFormatter,
+        allocator: *const GhosttyAllocator,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> GhosttyResult;
+    pub fn ghostty_formatter_free(formatter: GhosttyFormatter);
+    pub fn ghostty_free(allocator: *const GhosttyAllocator, ptr: *mut u8, len: usize);
+
+    // selection.h
+    pub fn ghostty_selection_gesture_new(
+        allocator: *const GhosttyAllocator,
+        out_gesture: *mut GhosttySelectionGesture,
+    ) -> GhosttyResult;
+    pub fn ghostty_selection_gesture_free(gesture: GhosttySelectionGesture, terminal: GhosttyTerminal);
+    pub fn ghostty_selection_gesture_event_new(
+        allocator: *const GhosttyAllocator,
+        out_event: *mut GhosttySelectionGestureEvent,
+        kind: c_int,
+    ) -> GhosttyResult;
+    pub fn ghostty_selection_gesture_event_free(event: GhosttySelectionGestureEvent);
+    pub fn ghostty_selection_gesture_event_set(
+        event: GhosttySelectionGestureEvent,
+        option: c_int,
+        value: *const c_void,
+    ) -> GhosttyResult;
+    pub fn ghostty_selection_gesture_event(
+        gesture: GhosttySelectionGesture,
+        terminal: GhosttyTerminal,
+        event: GhosttySelectionGestureEvent,
+        out_selection: *mut GhosttySelection,
+    ) -> GhosttyResult;
+
+    // mouse/encoder.h、mouse/event.h
+    pub fn ghostty_mouse_encoder_new(
+        allocator: *const GhosttyAllocator,
+        encoder: *mut GhosttyMouseEncoder,
+    ) -> GhosttyResult;
+    pub fn ghostty_mouse_encoder_free(encoder: GhosttyMouseEncoder);
+    pub fn ghostty_mouse_encoder_set(encoder: GhosttyMouseEncoder, option: c_int, value: *const c_void) -> GhosttyResult;
+    pub fn ghostty_mouse_encoder_set_from_terminal(encoder: GhosttyMouseEncoder, terminal: GhosttyTerminal)
+    -> GhosttyResult;
+    pub fn ghostty_mouse_encoder_encode(
+        encoder: GhosttyMouseEncoder,
+        event: GhosttyMouseEvent,
+        buf: *mut u8,
+        buf_len: usize,
+        out_written: *mut usize,
+    ) -> GhosttyResult;
+    pub fn ghostty_mouse_event_new(allocator: *const GhosttyAllocator, event: *mut GhosttyMouseEvent) -> GhosttyResult;
+    pub fn ghostty_mouse_event_free(event: GhosttyMouseEvent);
+    pub fn ghostty_mouse_event_set_action(event: GhosttyMouseEvent, action: c_int) -> GhosttyResult;
+    pub fn ghostty_mouse_event_set_button(event: GhosttyMouseEvent, button: c_int) -> GhosttyResult;
+    pub fn ghostty_mouse_event_clear_button(event: GhosttyMouseEvent) -> GhosttyResult;
+    pub fn ghostty_mouse_event_set_mods(event: GhosttyMouseEvent, mods: u16) -> GhosttyResult;
+    pub fn ghostty_mouse_event_set_position(event: GhosttyMouseEvent, position: GhosttyMousePosition) -> GhosttyResult;
+
+    // paste.h
+    pub fn ghostty_paste_is_safe(data: *const c_char, len: usize) -> bool;
 
     // render.h
     pub fn ghostty_render_state_new(allocator: *const GhosttyAllocator, state: *mut GhosttyRenderState)
@@ -356,12 +529,14 @@ unsafe extern "C" {
     pub fn ghostty_render_state_free(state: GhosttyRenderState);
     pub fn ghostty_render_state_update(state: GhosttyRenderState, terminal: GhosttyTerminal) -> GhosttyResult;
     pub fn ghostty_render_state_clean(state: GhosttyRenderState) -> GhosttyResult;
+    pub fn ghostty_render_state_set(state: GhosttyRenderState, option: c_int, value: *const c_void) -> GhosttyResult;
     pub fn ghostty_render_state_get(state: GhosttyRenderState, data: c_int, out: *mut c_void) -> GhosttyResult;
     pub fn ghostty_render_state_row_iterator_new(
         allocator: *const GhosttyAllocator,
         out: *mut GhosttyRenderStateRowIterator,
     ) -> GhosttyResult;
     pub fn ghostty_render_state_row_iterator_free(iterator: GhosttyRenderStateRowIterator);
+    pub fn ghostty_render_state_row_iterator_next(iterator: GhosttyRenderStateRowIterator) -> bool;
     pub fn ghostty_render_state_row_iterator_next_dirty(
         iterator: GhosttyRenderStateRowIterator,
         out_y: *mut u16,
