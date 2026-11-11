@@ -1421,6 +1421,16 @@ impl App {
                 s.rows = grid.1;
                 s.cell = cell;
             });
+        } else if let (Some(grid), Some(cell), Some(s)) = (target_grid, cell, &self.session)
+            && let Some(now) = s.size_drift(grid)
+        {
+            // アプリが DECCOLM で 80 / 132 桁にした（libghostty-vt と ConPTY の両方が従う）。ペインの大きさに戻す（T-055）
+            s.resize(grid.0, grid.1, cell);
+            log(&format!("端末の大きさが {}x{} に変わった（DECCOLM）のでペインの {}x{} に戻す", now.0, now.1, grid.0, grid.1));
+            for p in &mut self.panes {
+                p.needs_sync = true;
+                p.needs_draw = true;
+            }
         }
         if changed {
             self.publish_panes();

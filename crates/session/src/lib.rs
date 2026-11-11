@@ -544,6 +544,14 @@ impl Session {
         self.lock().size()
     }
 
+    /// 端末の大きさが `grid`（窓から決めた桁数・行数）と違えば今の大きさを返す。
+    /// アプリが DECCOLM（`CSI ? 40 h` の後の `CSI ? 3 h` / `l`）を送ると、libghostty-vt は自分で 132 / 80 桁になり、
+    /// ConPTY も同じ桁数に変わる。窓の大きさは変えられないので、呼ぶ側が [`Session::resize`] で戻す（T-055）
+    pub fn size_drift(&self, grid: (u16, u16)) -> Option<(u16, u16)> {
+        let now = self.size();
+        (now != grid && grid.0 > 0 && grid.1 > 0).then_some(now)
+    }
+
     pub fn title(&self) -> String {
         self.title.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }

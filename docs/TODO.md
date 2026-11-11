@@ -236,7 +236,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-052** yazi（画像のプレビュー、マウス）（2026-11-11）→ embterm.exe と別起動の `emacs -Q` で、プレビュー・`j` での切り替え・`q` で画面が戻る・クリック・ホイールを確認。`Drivers.matches: Kgp`。手元での確認は T-091
 - ✅ **T-053** vim（2026-11-11）→ 日本語入力の表示・`:set number`・`Esc`（T-069 の `:set mouse=a` のクリックも確認済み）OK。`-u NONE` の MSYS 版 vim は encoding が latin1 になり化けるが vim の設定の問題
 - ✅ **T-054** 性能を測る（大量の出力、入力の遅れ、端末を何個も開いたとき）（2026-11-11）→ Emacs の 10 ms タイマーの p99 はどの場面でも 17〜22 ms（止まらない）。`cat` 10 MB は 5.3 秒で Windows Terminal と同じ（ConPTY が律速）。入力から `Present` まで 1〜2 ms。端末 15 個でプライベート 123 MB。docs/notes/t054-performance.md、`test/perf.el`
-- 🔄 **T-055** 端末としての適合を測る（vttest など）（2026-11-11: 利用者の了承を得て WSL に vttest 2.7 を入れた。測定中）
+- ✅ **T-055** 端末としての適合を測る（vttest など）（2026-11-11）→ vttest 2.7 のメニュー 1〜11。ふだん使う範囲は合格。落ちたのは libghostty-vt が持たない機能（DECDWL/DECDHL、VT52 の画面、矩形の操作、いくつかの報告。Ghostty 本体と同じ）。ConPTY は出力をそのまま通す（ConPTY を通さない画面と 100 画面あまり一致）。DECCOLM の後に端末の大きさが窓と食い違ったまま残るのを直した。docs/notes/t055-vttest.md
 
 ## 6. ghostel からの移行
 
@@ -315,3 +315,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-109** 子の環境変数を Emacs の `process-environment` から作る（2026-11-11）→ 起動時の環境からの差分（設定・削除）を module に渡す。`setenv` が子に届く（`make-process` と同じ）。`setenv` のユニバイトの値は `locale-coding-system` で戻す。`test/env.el`
 - ✅ **T-110** コマンド・作業ディレクトリ・環境・バッファ名を指定して開く `embterm-run`（2026-11-11）→ `(embterm-run COMMAND &key DIRECTORY ENVIRONMENT NAME DISPLAY)`。`my:claude-term` の置き換え（T-059）に使う
 - ✅ **T-111** 普段使いの置き場に入れる `cargo xtask install [DIR]`（2026-11-11）→ 既定 `C:\Apps\embterm`。使用中の conpty.dll / OpenConsole.exe / exe は `.old-<時刻>` に退避して入れ替える。`target/dist` を普段の Emacs に読ませると dist と試験が上書きに失敗するため
+- ⬜ **T-112** 文字の点滅（SGR 5）を描く。カーソルの点滅（T-035）と同じタイマーで（T-055 で見つけた。低）
+- ⬜ **T-113** `CSI 0 S` / `CSI 0 T` を libghostty-vt が 1 行として扱わない（何もしない）件を上流に知らせるか決める（T-055）
+- ⬜ **T-114** vttest の自動確認を回帰テストにする（T-078 と合わせる。T-055 の道具はリポジトリに入れていない）
+- ⬜ **T-115** Windows Terminal と vttest を手で見比べる（DECCOLM・倍幅の行。T-055 では自動の比較を省いた）

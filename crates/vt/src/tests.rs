@@ -765,6 +765,19 @@ fn xtversion_and_da1() {
     assert!(!attrs.contains(&"28") && !attrs.contains(&"4"), "28 と 4 を名乗らない: {da:?}");
 }
 
+/// DECCOLM（T-055）: `CSI ? 40 h` の後の `CSI ? 3 h` / `l` で libghostty-vt は自分で 132 / 80 桁になる
+/// （`CSI ? 40 h` が無ければ変わらない）。et-session の `size_drift` はこれを前提に窓の大きさへ戻す
+#[test]
+fn deccolm_resizes_terminal() {
+    let mut t = Terminal::new(100, 24, Box::new(NoEffects)).unwrap();
+    t.vt_write(b"\x1b[?3h");
+    assert_eq!(t.size(), (100, 24));
+    t.vt_write(b"\x1b[?40h\x1b[?3h");
+    assert_eq!(t.size(), (132, 24));
+    t.vt_write(b"\x1b[?3l");
+    assert_eq!(t.size(), (80, 24));
+}
+
 /// 同期出力の hold（T-074）。始まったときの画面が写され、時限で解ける
 #[test]
 fn render_hold() {

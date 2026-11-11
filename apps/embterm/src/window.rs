@@ -450,6 +450,10 @@ impl App {
             self.cell = cell;
             self.session.resize(grid.0, grid.1, cell);
             log(&format!("リサイズ: {}x{}（セル {}x{} px）{}", grid.0, grid.1, cell.0, cell.1, window_state(self.hwnd)));
+        } else if let Some(now) = self.session.size_drift(grid) {
+            // アプリが DECCOLM で 80 / 132 桁にした（libghostty-vt と ConPTY の両方が従う）。窓の大きさは変えないので戻す（T-055）
+            self.session.resize(grid.0, grid.1, cell);
+            log(&format!("端末の大きさが {}x{} に変わった（DECCOLM）ので窓の {}x{} に戻す", now.0, now.1, grid.0, grid.1));
         }
     }
 
