@@ -2,7 +2,9 @@
 --
 -- EmbTerm の端末の中でだけ読み込む（~/.nyagos などから）:
 --
---   if nyagos.env.TERM_PROGRAM == "EmbTerm" then dofile("C:/Apps/embterm/etc/embterm.lua") end
+--   if nyagos.env.TERM_PROGRAM == "EmbTerm" then
+--       dofile(nyagos.env.USERPROFILE .. "/.emacs.d/embterm/etc/embterm.lua")  -- Emacs が読む配布物の場所
+--   end
 --
 -- - embterm_cmd 名前 引数...   Emacs の関数を呼ぶ（OSC 51;E。T-118）。呼べるのは embterm.el の
 --                              `embterm-shell-commands' に載っているものだけ

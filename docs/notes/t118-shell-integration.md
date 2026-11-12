@@ -30,9 +30,9 @@
 
 | ファイル | 読み込み方 |
 |---|---|
-| `embterm.ps1`（pwsh 7・Windows PowerShell 5.1） | `if ($env:TERM_PROGRAM -eq 'EmbTerm') { . 'C:/Apps/embterm/etc/embterm.ps1' }` |
-| `embterm.bash`（Git Bash・MSYS2・WSL） | `[ "$TERM_PROGRAM" = EmbTerm ] && . /c/Apps/embterm/etc/embterm.bash` |
-| `embterm.lua`（nyagos） | `if nyagos.env.TERM_PROGRAM == "EmbTerm" then dofile("C:/Apps/embterm/etc/embterm.lua") end` |
+| `embterm.ps1`（pwsh 7・Windows PowerShell 5.1） | `if ($env:TERM_PROGRAM -eq 'EmbTerm') { . '<配布物>/etc/embterm.ps1' }` |
+| `embterm.bash`（Git Bash・MSYS2・WSL） | `[ "$TERM_PROGRAM" = EmbTerm ] && . <配布物>/etc/embterm.bash` |
+| `embterm.lua`（nyagos） | `if nyagos.env.TERM_PROGRAM == "EmbTerm" then dofile("<配布物>/etc/embterm.lua") end` |
 
 - 関数: `embterm_cmd 名前 引数...`、`embterm_find_file パス...`（`find-file-other-window`）、`embterm_dired [パス]`（`dired-other-window`）。
   短い名前はそれぞれのシェルの alias で（例: `Set-Alias ef embterm_find_file`）
@@ -93,13 +93,9 @@
 - 利用者の普段の pwsh の初期化（`~/.emacs.d/etc/pwsh-emacs-shell.ps1`。starship の 2 行のプロンプトと OSC 7）に重ねても、直前の出力と終了コードが取れた
   （その場限りの確認）
 
-## 3. 使い始めるには（利用者の作業）
+## 3. 使い始めるには
 
-`~/.emacs.d/etc/pwsh-emacs-shell.ps1` の最後（starship の後）に足す:
+`<配布物>` は Emacs が読む配布物の場所（`~/.emacs.d/embterm`。T-120）。
 
-```powershell
-if ($env:TERM_PROGRAM -eq 'EmbTerm') { . 'C:/Apps/embterm/etc/embterm.ps1' }
-```
-
-nyagos は `~/.config/nyagos/nyagos.lua` のプロンプトの設定の後に
-`if nyagos.env.TERM_PROGRAM == "EmbTerm" then dofile("C:/Apps/embterm/etc/embterm.lua") end`。
+- pwsh: `~/.emacs.d/etc/pwsh-emacs-shell.ps1` が starship と OSC 7 の後で `embterm/etc/embterm.ps1` を読み込む（2026-11-12 に足した）
+- nyagos・bash: このリポジトリの外の設定に手で足す（`~/.emacs.d` の README の「EmbTerm の端末」に書いた）

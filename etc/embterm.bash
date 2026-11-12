@@ -2,8 +2,9 @@
 #
 # EmbTerm の端末の中でだけ読み込む（~/.bashrc から）:
 #
-#   [ "$TERM_PROGRAM" = EmbTerm ] && . /c/Apps/embterm/etc/embterm.bash      # Git Bash
-#   [ "$TERM_PROGRAM" = EmbTerm ] && . /mnt/c/Apps/embterm/etc/embterm.bash  # WSL（WSLENV に TERM_PROGRAM を足す）
+#   [ "$TERM_PROGRAM" = EmbTerm ] && . ~/.emacs.d/embterm/etc/embterm.bash                 # Git Bash
+#   [ "$TERM_PROGRAM" = EmbTerm ] && . /mnt/c/Users/<名前>/.emacs.d/embterm/etc/embterm.bash  # WSL（WSLENV に TERM_PROGRAM を足す）
+#   （~/.emacs.d/embterm は Emacs が読む配布物の場所。置き場所を変えていればそこ）
 #
 # - embterm_cmd 名前 引数...   Emacs の関数を呼ぶ（OSC 51;E。T-118）。呼べるのは embterm.el の
 #                              `embterm-shell-commands' に載っているものだけ

@@ -327,10 +327,16 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ❌ **T-108** `box: ┌──┬──┐` の `─` が描かれていないように見える（SGR の確かめの画面。T-054 の変更の前後で同じ）。overlap の既知の見え方（T-013）か別の問題かを調べる（2026-11-11 → 不具合ではない。30pt で撮ると `┌──┬──┐`・`x─x`・`━`・`═`・`╭─╮` はすべて描かれていた。12pt では角と横線がつながって見分けにくいだけ）
 - ✅ **T-109** 子の環境変数を Emacs の `process-environment` から作る（2026-11-11）→ 起動時の環境からの差分（設定・削除）を module に渡す。`setenv` が子に届く（`make-process` と同じ）。`setenv` のユニバイトの値は `locale-coding-system` で戻す。`test/env.el`
 - ✅ **T-110** コマンド・作業ディレクトリ・環境・バッファ名を指定して開く `embterm-run`（2026-11-11）→ `(embterm-run COMMAND &key DIRECTORY ENVIRONMENT NAME DISPLAY)`。`my:claude-term` の置き換え（T-059）に使う
-- ✅ **T-111** 普段使いの置き場に入れる `cargo xtask install [DIR]`（2026-11-11）→ 既定 `C:\Apps\embterm`。使用中の conpty.dll / OpenConsole.exe / exe は `.old-<時刻>` に退避して入れ替える。`target/dist` を普段の Emacs に読ませると dist と試験が上書きに失敗するため
+- ❌ **T-111**（2026-11-12 に廃止 → T-120）普段使いの置き場に入れる `cargo xtask install [DIR]`（2026-11-11）→ 既定 `C:\Apps\embterm`。使用中の conpty.dll / OpenConsole.exe / exe は `.old-<時刻>` に退避して入れ替える。`target/dist` を普段の Emacs に読ませると dist と試験が上書きに失敗するため
 - ✅ **T-112** 文字の点滅（SGR 5）を描く。カーソルの点滅（T-035）と同じタイマーで（T-055 で見つけた。低）（2026-11-12）→ 点滅の文字が見えているときだけ 600 ms ごとに切り替える（カーソルとは別のタイマー）。docs/notes/t078-tests.md
 - ⏸ **T-113** `CSI 0 S` / `CSI 0 T` を libghostty-vt が 1 行として扱わない（何もしない）件を上流に知らせるか決める（T-055）（2026-11-12: 送るかは利用者が決める。下書き docs/notes/t113-upstream-draft.md）
 - ✅ **T-114** vttest の自動確認を回帰テストにする（T-078 と合わせる。T-055 の道具はリポジトリに入れていない）（2026-11-12）→ T-055 で合格した 38 画面を `cargo xtask test-screens` のケースにした。期待値は T-055 で見て確かめた画面と一致。docs/notes/t078-tests.md
+- ✅ **T-120** 普段の Emacs への入れ方を、~/.emacs.d の側から写す形にする（2026-11-12）→ `~/.emacs.d` の `M-x my:embterm-update`（`my-embterm.el`）が
+  このリポジトリの `target/dist/` を `~/.emacs.d/embterm/`（git の管理外）に写す（`C-u` で先に `cargo xtask dist`）。中身が同じものは写さず、
+  使用中の `conpty.dll` / `OpenConsole.exe` は `.old-<時刻>` に名前を変えてから写す（次に写すときに消える）。`cargo xtask install` は削除した。
+  `target/dist` を直接読ませない理由は変わらない（使用中のファイルがロックされ dist と試験が失敗する）。手順は `~/.emacs.d` の README の「EmbTerm の端末」。
+  `~/.emacs.d/etc/pwsh-emacs-shell.ps1` がシェル統合（`embterm/etc/embterm.ps1`）を読み込む。写す処理は、写した先の embterm.exe を動かして
+  conpty.dll と OpenConsole.exe を使用中にした状態で確かめた
 - ⏸ **T-115** Windows Terminal と vttest を手で見比べる（DECCOLM・倍幅の行。T-055 では自動の比較を省いた）（2026-11-12: 手で見る作業なので利用者に。合格した画面は T-114 の回帰テストにした）
 - ✅ **T-116** 子の作業ディレクトリのドライブレターを大文字にする（2026-11-11）→ Emacs は `~` の展開や `directory-file-name` で小文字に落とす。claude は cwd を `.claude.json` のプロジェクトのキーに使うので、Emacs から開いたものと端末から開いたものでプロジェクトが割れる。プロンプトもほかの端末と同じ `C:\` になる
 - ✅ **T-117** 子に `PWD` / `OLDPWD` を渡さない（2026-11-11）→ Git Bash などから起動した Emacs の `PWD` が残り、starship（nyagos・pwsh のプロンプト）と yazi が実際の作業ディレクトリより `PWD` を信じて、Emacs を起動したディレクトリで開いたように見えた。`~/.emacs.d` の `M-x nyagos` / `yazi` を作っていて見つけた

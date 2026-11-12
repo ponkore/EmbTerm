@@ -13,13 +13,9 @@
 //! cargo xtask dist
 //!     release でビルドし、target/dist/ に配布物を集める（T-028 / T-030）:
 //!     embterm_module.dll、embterm.el、embterm.exe、conpty.dll、x64/OpenConsole.exe、etc/embterm.{ps1,bash,lua}（シェル統合）
-//!     （ConPTY は vendor/conpty から。無ければ先に `cargo xtask fetch-conpty`）
-//!
-//! cargo xtask install [DIR]
-//!     release でビルドし、配布物を DIR（既定 C:\Apps\embterm）に写す（T-057）。普段使いの Emacs はここを読む。
-//!     中身が同じファイルは写さない。使用中（Emacs が読み込んだ conpty.dll、動いている OpenConsole.exe）で
-//!     上書きできないものは `<名前>.old-<時刻>` に名前を変えてから写す（使用中のファイルも名前は変えられる）。
-//!     新しい版が使われるのは、module なら Emacs の再起動後、ConPTY なら次に開く端末から
+//!     （ConPTY は vendor/conpty から。無ければ先に `cargo xtask fetch-conpty`）。
+//!     普段使いの Emacs へは、Emacs の側（~/.emacs.d の `my:embterm-update`）が target/dist を写して入れる（T-120）。
+//!     **普段の Emacs に target/dist を直接読ませない**（conpty.dll と OpenConsole.exe がロックされ、dist と試験が上書きに失敗する）
 //!
 //! cargo xtask test-screens [--bless] [--no-dist] [名前の一部...]
 //!     画面の回帰テスト（T-078 / T-114）。test/screens/cases.txt のケースを embterm.exe で動かし、画面のテキストを
@@ -46,8 +42,6 @@ const CONPTY_VERSION: &str = "1.25.260930003";
 const CONPTY_NUPKG_SHA256: &str = "02b07b349af66d801159bdf9e440d4a1ce78bb951f37fc8609731665afdae7ee";
 /// Zig の版は libghostty-vt の build.zig.zon の minimum_zig_version と minor まで一致させる
 const ZIG_MINOR: &str = "0.17.";
-/// `cargo xtask install` の既定の置き場（GenPreview の C:\Apps\genpreview と同じ形）
-const DEFAULT_INSTALL_DIR: &str = r"C:\Apps\embterm";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -57,12 +51,11 @@ fn main() -> ExitCode {
         "fetch-ghostty-vt" => fetch_ghostty_vt(force),
         "fetch-conpty" => fetch_conpty(force),
         "dist" => dist(),
-        "install" => install(args.get(1).map_or_else(|| PathBuf::from(DEFAULT_INSTALL_DIR), PathBuf::from)),
         "test-screens" => tests::test_screens(&args[1..]),
         "test-emacs" => tests::test_emacs(&args[1..]),
         _ => {
             eprintln!(
-                "使い方: cargo xtask <fetch-ghostty-vt | fetch-conpty> [--force] | dist | install [DIR] | test-screens [--bless] [--no-dist] [名前...] | test-emacs [--no-dist] [名前...]"
+                "使い方: cargo xtask <fetch-ghostty-vt | fetch-conpty> [--force] | dist | test-screens [--bless] [--no-dist] [名前...] | test-emacs [--no-dist] [名前...]"
             );
             return ExitCode::from(2);
         }
@@ -281,47 +274,5 @@ fn dist() -> Result<(), String> {
         eprintln!("{}", dst.display());
     }
     eprintln!("できた: {}", dist.display());
-    Ok(())
-}
-
-/// release でビルドし、配布物を DIR に写す（target/dist は経由しない）。使用中で上書きできないファイルは名前を変えて退避してから写す
-fn install(dir: PathBuf) -> Result<(), String> {
-    let files = build_release()?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    std::fs::create_dir_all(dir.join("x64")).map_err(|e| format!("{}: {e}", dir.display()))?;
-    // 前に退避したもの。もう使われていなければ消せる（使用中なら残す）
-    for sub in [dir.clone(), dir.join("x64")] {
-        if let Ok(entries) = std::fs::read_dir(&sub) {
-            for e in entries.flatten() {
-                if e.file_name().to_string_lossy().contains(".old-") {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
-    }
-    for (src, name) in &files {
-        let dst = dir.join(name);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
-        let new = std::fs::read(src).map_err(|e| format!("{}: {e}", src.display()))?;
-        if std::fs::read(&dst).is_ok_and(|old| old == new) {
-            eprintln!("同じ: {}", dst.display());
-            continue;
-        }
-        if std::fs::write(&dst, &new).is_err() {
-            // 使用中（読み込まれた DLL・動いている exe）は書けないが、名前は変えられる
-            let moved = dst.with_file_name(format!("{}.old-{stamp}", dst.file_name().unwrap().to_string_lossy()));
-            std::fs::rename(&dst, &moved).map_err(|e| format!("{} を退避できない: {e}", dst.display()))?;
-            std::fs::write(&dst, &new).map_err(|e| format!("{}: {e}", dst.display()))?;
-            eprintln!("入れ替え（使用中のものは {} に退避）: {}", moved.display(), dst.display());
-        } else {
-            eprintln!("写した: {}", dst.display());
-        }
-    }
-    eprintln!("できた: {}（module の新しい版は Emacs の再起動後に使われる）", dir.display());
     Ok(())
 }

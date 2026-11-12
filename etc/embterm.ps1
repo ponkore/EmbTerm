@@ -1,8 +1,9 @@
 # EmbTerm のシェル統合（PowerShell 7 / Windows PowerShell 5.1）。
 #
-# EmbTerm の端末の中でだけ読み込む（プロファイルや Emacs 用の初期化スクリプトから）:
+# EmbTerm の端末の中でだけ読み込む（プロファイルや Emacs 用の初期化スクリプトから。<配布物> は Emacs が読む
+# 配布物の場所。~/.emacs.d の設定なら ~/.emacs.d/embterm）:
 #
-#   if ($env:TERM_PROGRAM -eq 'EmbTerm') { . 'C:/Apps/embterm/etc/embterm.ps1' }
+#   if ($env:TERM_PROGRAM -eq 'EmbTerm') { . '<配布物>/etc/embterm.ps1' }
 #
 # - embterm_cmd 名前 引数...   Emacs の関数を呼ぶ（OSC 51;E。T-118）。呼べるのは embterm.el の
 #                              `embterm-shell-commands' に載っているものだけ
