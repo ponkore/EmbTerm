@@ -100,3 +100,14 @@
   `WT_SESSION`・`WT_PROFILE_ID`・`TERM_SESSION_ID`・`LC_TERMINAL` など）。Emacs で `setenv` したもの（差分として渡る）は残る
 - `TERM_PROGRAM_VERSION` は EmbTerm の版にする
 - 確かめたこと: 単体テスト、`test/env.el`（WezTerm から起動した Emacs の子に `WEZTERM_PANE` が渡らない）
+
+## 11. T-099 / T-100 / T-103（Emacs との統合の小物）
+
+- **T-099 通知**: 既定を `embterm-notification-default` にした（利用者が選んだ「Emacs が裏ならトースト」）。
+  Emacs のフレームにフォーカスが無ければ `embterm-notification-toast`（`w32-notification-notify`。タイトルは「通知のタイトル — バッファ名」）、
+  フォーカスはあるが端末を見ていなければ `message`、端末を見ていれば何もしない。Emacs の通知は消すまで通知領域にアイコンが残るので
+  `embterm-notification-toast-seconds`（10 秒）で消す。前の通知が残っていれば先に消す（フレームごとに 1 つしか出せない）。
+  **試験では `w32-notification-notify` を差し替えた**（本物は利用者の画面に出るため）。本物のトーストの見え方は手で確かめる
+- **T-100 進捗**: OSC 9;4 をモードラインに出す（` [42%]`・` […]`・` [エラー 70%]`・` [一時停止 …]`。`remove` で消える）。`embterm-show-progress`（既定 t）
+- **T-103**: `embterm-project` で開いた端末のバッファ名はプロジェクト名を前に付ける（`*embterm: EmbTerm: pwsh*`）
+- 確かめたこと（`test/integration.el`、64 件）

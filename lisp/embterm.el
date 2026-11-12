@@ -262,10 +262,21 @@ nil なら `embterm-color-foreground' などの値を使う。どちらでも、
   :type 'boolean
   :set #'embterm--set-and-apply-term)
 
-(defcustom embterm-notification-functions (list #'embterm-notification-message)
+(defcustom embterm-notification-functions (list #'embterm-notification-default)
   "アプリのデスクトップ通知（OSC 9 / 777）を受けたときに呼ぶ関数（T-039）。
-引数は TITLE（無ければ空文字列）、BODY、BUFFER（端末のバッファ）。"
+引数は TITLE（無ければ空文字列）、BODY、BUFFER（端末のバッファ）。
+用意してあるもの: `embterm-notification-default'（既定。Emacs が裏ならトースト、前なら `message'）、
+`embterm-notification-message'、`embterm-notification-toast'。"
   :type 'hook)
+
+(defcustom embterm-notification-toast-seconds 10
+  "`embterm-notification-toast' の通知を消すまでの秒数（T-099）。
+Emacs の通知（`w32-notification-notify'）は消すまで通知領域にアイコンが残るので、この秒数で消す。"
+  :type 'number)
+
+(defcustom embterm-show-progress t
+  "non-nil なら、アプリの進捗（OSC 9;4）をモードラインに出す（T-100）。"
+  :type 'boolean)
 
 (defcustom embterm-progress-functions nil
   "アプリの進捗（OSC 9;4）を受けたときに呼ぶ関数（T-039）。
@@ -362,6 +373,7 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 (defvar-local embterm--title nil "最後に反映したタイトル。")
 (defvar-local embterm--focused 'unknown "最後に module に伝えたフォーカスの状態。")
 (defvar-local embterm--exited nil "プロセスが終わったか。")
+(defvar-local embterm--progress nil "アプリの進捗（OSC 9;4）の (STATE . PERCENT)。無ければ nil（T-100）。")
 (defvar-local embterm--input-mode 'semi-char
   "入力モード。`semi-char'（キーを端末に送る）か `copy'（キーを Emacs に返し、スクロールバックごと写す）。")
 (defvar-local embterm--copy-window nil "copy モードに入ったときに選んでいたウィンドウ。")
@@ -614,7 +626,26 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
 
 (defun embterm--mode-line ()
   (concat (if (eq embterm--input-mode 'copy) " [copy]" "")
-          (when embterm--exited " [終了]")))
+          (when embterm--exited " [終了]")
+          (when (and embterm-show-progress embterm--progress) (embterm--progress-text))))
+
+(defun embterm--set-progress (state percent)
+  "アプリの進捗（OSC 9;4）を覚えてモードラインを更新する（T-100）。`remove' で消す。"
+  (let ((new (unless (eq state 'remove) (cons state percent))))
+    (unless (equal new embterm--progress)
+      (setq embterm--progress new)
+      (force-mode-line-update))))
+
+(defun embterm--progress-text ()
+  "モードラインの進捗の表示（` [42%]' など）。"
+  (pcase-let ((`(,state . ,percent) embterm--progress))
+    (let ((pct (if percent (format "%d%%" percent) "")))
+      (pcase state
+        ('set (propertize (format " [%s]" pct) 'face 'success))
+        ('indeterminate (propertize " […]" 'face 'success))
+        ('error (propertize (format " [エラー %s]" pct) 'face 'error))
+        ('pause (propertize (format " [一時停止 %s]" pct) 'face 'warning))
+        (_ "")))))
 
 ;;;; 閉じる
 
@@ -864,6 +895,7 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
             (`(notification ,title . ,body)
              (run-hook-with-args 'embterm-notification-functions title body buf))
             (`(progress ,state . ,percent)
+             (embterm--set-progress state percent)
              (run-hook-with-args 'embterm-progress-functions state percent buf))
             (`(link . ,uri) (funcall embterm-hyperlink-function uri))
             (_ nil)))))))
@@ -891,6 +923,10 @@ TITLE が長いパスならファイル名だけ（拡張子なし）、TITLE �
     (let* ((name (cond ((and title (not (string-empty-p title))) (embterm--shorten-title title))
                        (embterm--command (file-name-base embterm--command))
                        (t "embterm")))
+           ;; `embterm-project' で開いた端末はプロジェクト名を前に付ける（T-103）
+           (name (if embterm--project
+                     (format "%s: %s" (file-name-nondirectory (directory-file-name embterm--project)) name)
+                   name))
            (room (max 1 (- embterm-buffer-name-max-length
                            (string-width (format embterm-buffer-name-format ""))))))
       (format embterm-buffer-name-format
@@ -956,10 +992,51 @@ module も、まだ読んでいないベルを 1 つにまとめている。"
             (funcall flat body))))
 
 (defun embterm-notification-message (title body buffer)
-  "通知（OSC 9 / 777）を `message' で出す（`embterm-notification-functions' の既定）。
+  "通知（OSC 9 / 777）を `message' で出す。
 端末のウィンドウが選ばれていないか、フレームにフォーカスが無いときだけ出す。"
   (when (embterm--unattended-p buffer)
     (message "%s" (embterm-notification-text title body buffer))))
+
+(declare-function w32-notification-notify "w32fns.c" (&rest params))
+(declare-function w32-notification-close "w32fns.c" (id))
+
+(defvar embterm--toast nil
+  "出している通知 (FRAME ID TIMER)。Emacs の通知はフレームごとに 1 つで、作ったフレームを選んで消す。")
+
+(defun embterm--toast-close ()
+  "出している通知を消す。"
+  (pcase embterm--toast
+    (`(,frame ,id ,timer)
+     (setq embterm--toast nil)
+     (when (timerp timer) (cancel-timer timer))
+     (when (frame-live-p frame)
+       (with-selected-frame frame
+         (ignore-errors (w32-notification-close id)))))))
+
+(defun embterm-notification-toast (title body buffer)
+  "通知（OSC 9 / 777）を Windows の通知（トースト）で出す（T-099）。
+`embterm-notification-toast-seconds' 秒で消す。前の通知が残っていれば先に消す。
+`w32-notification-notify' が無ければ `message'。"
+  (if (not (fboundp 'w32-notification-notify))
+      (message "%s" (embterm-notification-text title body buffer))
+    (embterm--toast-close)
+    (let* ((flat (lambda (s) (string-trim (replace-regexp-in-string "[\n\r\t]+" " " (or s "")))))
+           (head (format "%s%s" (if (string-empty-p (funcall flat title)) "" (concat (funcall flat title) " — "))
+                         (if (buffer-live-p buffer) (buffer-name buffer) "embterm")))
+           (id (w32-notification-notify :title (truncate-string-to-width head 63)
+                                        :body (truncate-string-to-width (funcall flat body) 255)
+                                        :tip "EmbTerm" :level 'info)))
+      (when id
+        (setq embterm--toast
+              (list (selected-frame) id
+                    (run-at-time embterm-notification-toast-seconds nil #'embterm--toast-close)))))))
+
+(defun embterm-notification-default (title body buffer)
+  "通知（OSC 9 / 777）の既定（`embterm-notification-functions'。T-099）。
+Emacs のフレームにフォーカスが無ければトースト（`embterm-notification-toast'）、
+フォーカスはあるが端末のウィンドウを選んでいなければ `message'、端末を見ていれば何もしない。"
+  (cond ((null (frame-focus-state (selected-frame))) (embterm-notification-toast title body buffer))
+        ((embterm--unattended-p buffer) (embterm-notification-message title body buffer))))
 
 (defun embterm-open-hyperlink (uri)
   "Ctrl+クリックしたハイパーリンク（OSC 8）の URI を開く（`embterm-hyperlink-function' の既定）。
