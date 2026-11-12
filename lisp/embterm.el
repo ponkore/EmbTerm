@@ -324,9 +324,11 @@ Emacs の通知（`w32-notification-notify'）は消すまで通知領域にア�
     ("dired-other-window" . dired-other-window)
     ("message" . message))
   "シェルから呼べる Emacs の関数（T-118）。(名前 . 関数) のリスト。
-シェルは `ESC ] 51 ; E \"名前\" \"引数\" ... ESC \\' を出す（vterm と同じ形。etc/embterm.ps1 の `embterm_cmd'）。
-関数は端末のバッファで、引数をすべて文字列にして呼ばれる。`default-directory' はシェルのカレントディレクトリ
-（OSC 7 で追っていれば）なので、相対パスはそこから解決される。"
+シェルは `ESC ] 51 ; E \"名前\" \"引数\" ... ESC \\' を出す
+（vterm と同じ形。etc/embterm.ps1 の `embterm_cmd'）。
+関数は端末のバッファで、引数をすべて文字列にして呼ばれる。
+`default-directory' はシェルのカレントディレクトリ（OSC 7 で追っていれば）なので、
+相対パスはそこから解決される。"
   :type '(alist :key-type string :value-type function))
 
 (defcustom embterm-show-link-on-hover t
@@ -1152,8 +1154,9 @@ Emacs のフレームにフォーカスが無ければトースト（`embterm-no
         ((embterm--unattended-p buffer) (embterm-notification-message title body buffer))))
 
 (defun embterm--shell-command (payload)
-  "シェルから来た OSC 51;E の中身 PAYLOAD（`\"名前\" \"引数\" ...'）を、`embterm-shell-commands' の関数で呼ぶ（T-118）。
-載っていない名前は呼ばずに知らせる。関数のエラーは `message' で出す（ポーリングを止めない）。"
+  "シェルから来た OSC 51;E の中身 PAYLOAD（`\"名前\" \"引数\" ...'）を呼ぶ（T-118）。
+呼ぶのは `embterm-shell-commands' の関数。載っていない名前は呼ばずに知らせる。
+関数のエラーは `message' で出す（ポーリングを止めない）。"
   (when embterm-allow-shell-commands
     (pcase-let ((`(,name . ,args) (ignore-errors (split-string-and-unquote payload))))
       (let ((fn (and name (cdr (assoc name embterm-shell-commands)))))
