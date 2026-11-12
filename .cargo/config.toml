@@ -2,7 +2,7 @@
 xtask = "run --quiet --package xtask --"
 
 # C ランタイムを静的にリンクする（VC++ の再頒布パッケージを不要にする。GenPreview と同じ）。
-# CRT を静的リンクした module では open_channel が使えない（GenPreview ADR 0006）ので、
-# module → Lisp の知らせはポーリングで受ける。
+# CRT を静的リンクした module では open_channel の fd を自分の CRT で引けない（GenPreview ADR 0006）ので、
+# module → Lisp の知らせは Emacs の CRT の _get_osfhandle を実行時に引いて使う（apps/embterm-module/src/notify.rs。T-104）。
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

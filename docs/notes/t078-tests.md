@@ -129,3 +129,27 @@
 - `CSI ? 996 n` には libghostty-vt のコールバック（`GHOSTTY_TERMINAL_OPT_COLOR_SCHEME`）で `CSI ? 997 ; 1 n`（ダーク）/ `; 2 n`（ライト）と答える
 - 色が変わってダーク / ライトが変わり、アプリが mode 2031 を立てていれば、同じ列を PTY に送る（`Terminal::set_dark`）
 - 確かめたこと: 単体テスト `color_scheme_query_and_report`、`test/scheme.el`（`emacs -Q` の白い背景でライト、`modus-vivendi` でダークを知らせ、外すとライト）
+
+## 14. T-104 何もしていないときの CPU（module → Lisp の知らせ）
+
+- 原因は Lisp の 50 ms ごとの見回り（全端末で位置合わせ・状態の読み出し・フォーカス・IME）
+- **module が状態の変化を知らせる**ようにした（`apps/embterm-module/src/notify.rs`）:
+  - Lisp が `make-pipe-process` でパイプのプロセスを作り、module が Emacs 28 の `open_channel` で受ける（`embterm-module-set-channel`）
+  - 状態が変わる（`Shared::update`。世代が増えるもの全部）か、カーソルが動いたら 1 バイト書く。Lisp が読み始める（`embterm-module-ack-notify`）までは
+    書き足さない
+  - Lisp はフィルタで受けて読む。読む間隔の下限 `embterm-notify-min-interval`（20 ms）。念のための見回りは `embterm-poll-idle-interval`（0.5 秒）。
+    知らせが使えなければ今までどおり `embterm-poll-interval`（50 ms）。`embterm-use-notify` で切れる
+  - 隠れた端末（ウィンドウにもペインにも無い）は位置合わせを飛ばす
+- **CRT**: module は CRT を静的にリンクしているので、`open_channel` の fd を自分の CRT では引けない。ghostel と同じく、Emacs の exe の
+  import 表から `_get_osfhandle` を取り込んでいる DLL（この Emacs は UCRT の `api-ms-win-crt-*`）を探して引き、ハンドルを複製して使う
+- **踏んだもの: fd を CRT の `_close` で閉じると、Emacs の `fd_info`（w32.c）に記録が残り、同じ番号でファイルを開いた Emacs が
+  `insert-file-contents` で `Bad file descriptor` になった**（`test/meta.el` と `test/scheme.el` が子のログを読めなくなって見つかった）。
+  fd は閉じずに持ち続ける（Emacs 1 つにつき 1 本）
+- 測ったこと（`test/idle.el`。端末 15 個、4 個が見える）:
+
+| | 何もしていないときの CPU | 10 秒の見回り | クリックからウィンドウが選ばれるまで | 隠れた端末のタイトルが届くまで |
+|---|---|---|---|---|
+| 知らせ | 0.3〜1.6%（CPU 時間は 15.6 ms 刻みで揺れる） | 20 回（念のための分だけ） | 1 ms | 16 ms |
+| 50 ms のポーリング（`IDLE_POLL=1`） | 6.1% | 200 回 | 12 ms | 63 ms |
+
+- 大量の出力の最中の Emacs のタイマーの間隔の最大は 30 ms（前は 23 ms。読む回数が増えた分。`test/smoke.el`）

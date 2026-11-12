@@ -11,6 +11,7 @@
 //!   user-ptr の `Drop` は自分で `catch_unwind` する（T-031。term.rs）
 //! - **`SetProcessDpiAwareness` 系は呼ばない**（Emacs のプロセスの設定を変えてしまう）
 
+mod notify;
 mod term;
 
 use std::cell::RefCell;
@@ -475,6 +476,21 @@ fn process_report(term: &RefCell<Term>) -> Result<Option<String>> {
 fn debug_hover(term: &RefCell<Term>, pane: i64, x: i64, y: i64) -> Result<()> {
     term.borrow().request(Request::DebugHover { pane, x: x as i32, y: y as i32 });
     Ok(())
+}
+
+/// module → Lisp の知らせの口を開く（T-104）。変数 `embterm--notify-process' の pipe プロセスに `open_channel' し、
+/// 端末の状態が変わったらそこへ 1 バイト書く。Lisp はそれを受けて `embterm-module-poll' で読みに来る。
+/// 開けなければエラー（Lisp はポーリングだけで動く）
+#[defun]
+fn set_channel(env: &Env) -> Result<()> {
+    notify::open(env).map_err(lisp_err)
+}
+
+/// Lisp が状態を読み始めた（次の変化をまた知らせてよい。T-104）。知らせの口がつながっていれば t
+#[defun]
+fn ack_notify() -> Result<bool> {
+    notify::ack();
+    Ok(notify::connected())
 }
 
 /// GPU デバイスを失ったことにする（デバッグ・自動確認用。T-067）。分け合うデバイスを捨て、開いている全部の端末に

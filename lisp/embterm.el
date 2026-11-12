@@ -24,8 +24,10 @@
 ;;   入力すると、そのペインはいちばん下へ戻る
 ;; - 選択（T-036）: 子 HWND のドラッグ（Shift+ドラッグはマウスの報告が有効なアプリの間でも選択）。
 ;;   `embterm-copy-on-select' なら kill-ring へ。`M-w' は選択があればコピー、無ければ端末へ送る
-;; - module → Lisp はタイマー（`embterm-poll-interval'）でポーリングする（タイトル・カレントディレクトリ・
-;;   クリック・プロセスの終了）。module の関数は待たない
+;; - module → Lisp: 状態（タイトル・カレントディレクトリ・クリック・プロセスの終了など）が変わると、module が
+;;   `open_channel' のパイプに 1 バイト書き、Lisp はそれを受けて `embterm-module-poll' で読む（T-104）。念のための
+;;   見回りは `embterm-poll-idle-interval' ごと。知らせが使えなければ `embterm-poll-interval' ごとのポーリング。
+;;   module の関数は待たない
 ;; - module は一時ディレクトリにコピーしてから読む（読み込み済みの DLL は差し替えられないため。T-030）。
 ;;   新しい版を使うには Emacs の再起動が要る
 ;; - 複数の端末（T-042）: `embterm'（あれば切り替え、前置引数で新規）、`embterm-new'、`embterm-project'
@@ -56,6 +58,8 @@
 (declare-function embterm-module-select "embterm-module")
 (declare-function embterm-module-start "embterm-module")
 (declare-function embterm-module-reset-keyboard "embterm-module")
+(declare-function embterm-module-set-channel "embterm-module")
+(declare-function embterm-module-ack-notify "embterm-module")
 (declare-function embterm-module-send-string "embterm-module")
 (declare-function embterm-module-send-key "embterm-module")
 (declare-function embterm-module-paste "embterm-module")
@@ -308,7 +312,22 @@ nil ならベルを鳴らさない。"
 
 (defcustom embterm-poll-interval 0.05
   "module の状態を読む間隔（秒）。端末があるときだけ動く。
-クリックしてからウィンドウが選ばれるまでの遅れになる（キー入力と表示の遅れには関わらない）。"
+module からの知らせ（T-104）が使えないときの間隔。クリックしてからウィンドウが選ばれるまでの遅れになる
+（キー入力と表示の遅れには関わらない）。"
+  :type 'number)
+
+(defcustom embterm-poll-idle-interval 0.5
+  "module からの知らせ（`open_channel'。T-104）が使えるときの、念のための見回りの間隔（秒）。
+状態の変化は知らせで読むので、これはフックが拾わないウィンドウの位置の変化などのため。"
+  :type 'number)
+
+(defcustom embterm-use-notify t
+  "non-nil なら、module が状態の変化を `open_channel' のパイプで知らせ、Lisp はそれを受けて読む（T-104）。
+nil なら `embterm-poll-interval' ごとに読む（何もしていなくても CPU を少し使う）。次に端末を開いたときから効く。"
+  :type 'boolean)
+
+(defcustom embterm-notify-min-interval 0.02
+  "module からの知らせで状態を読む間隔の下限（秒）。大量の出力の間に読みすぎないように。"
   :type 'number)
 
 (defcustom embterm-keymap-exceptions
@@ -393,6 +412,12 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 
 (defvar embterm--buffers nil "端末のバッファ。")
 (defvar embterm--timer nil "module の状態を読むタイマー。")
+(defvar embterm--notify-process nil
+  "module が状態の変化を知らせるパイプのプロセス（T-104）。
+`make-pipe-process' で作り、module が `open_channel' する。")
+(defvar embterm--notify-connected nil "module からの知らせがつながっているか。")
+(defvar embterm--notify-timer nil "知らせを受けて状態を読むタイマー（読む間隔の下限を守るため）。")
+(defvar embterm--last-poll 0 "最後に状態を読んだ時刻。")
 
 (defun embterm--live-buffers ()
   (setq embterm--buffers
@@ -679,8 +704,42 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
   (add-hook 'window-selection-change-functions #'embterm--sync)
   (add-function :after after-focus-change-function #'embterm--update-focus)
   (add-hook 'kill-emacs-hook #'embterm--close-all)
+  (embterm--notify-setup)
   (unless embterm--timer
-    (setq embterm--timer (run-with-timer embterm-poll-interval embterm-poll-interval #'embterm--poll))))
+    (let ((interval (if embterm--notify-connected embterm-poll-idle-interval embterm-poll-interval)))
+      (setq embterm--timer (run-with-timer interval interval #'embterm--poll)))))
+
+;;;; module からの知らせ（T-104）
+
+(defun embterm--notify-setup ()
+  "module からの知らせの口を（まだなら）作る。作れなければポーリングだけで動く。"
+  (unless (or (not embterm-use-notify) (process-live-p embterm--notify-process))
+    (setq embterm--notify-connected nil)
+    (condition-case err
+        (progn
+          (setq embterm--notify-process
+                (make-pipe-process :name " *embterm-notify*" :buffer nil :noquery t
+                                   :coding 'binary :filter #'embterm--notify-filter))
+          (embterm-module-set-channel)
+          (setq embterm--notify-connected t))
+      (error
+       (when (process-live-p embterm--notify-process)
+         (delete-process embterm--notify-process))
+       (setq embterm--notify-process nil)
+       (message "embterm: module からの知らせを使えないので、%s 秒ごとに読みます（%s）"
+                embterm-poll-interval (error-message-string err))))))
+
+(defun embterm--notify-filter (_process _string)
+  "module が状態の変化を知らせた。`embterm-notify-min-interval' を守って状態を読む。"
+  (unless embterm--notify-timer
+    (setq embterm--notify-timer
+          (run-at-time (max 0 (- embterm-notify-min-interval (- (float-time) embterm--last-poll)))
+                       nil #'embterm--notify-poll))))
+
+(defun embterm--notify-poll ()
+  (setq embterm--notify-timer nil)
+  (when embterm--buffers
+    (embterm--poll)))
 
 (defun embterm--deactivate ()
   (embterm--ime-reset)
@@ -855,6 +914,14 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
 ;;;; ポーリング
 
 (defun embterm--poll ()
+  ;; 読み始める前に知らせを受け取り済みにする（読んでいる間の変化はまた知らせてもらう。T-104）
+  (setq embterm--last-poll (float-time))
+  (when embterm--notify-connected
+    (unless (embterm-module-ack-notify)
+      ;; Lisp のプロセスが消されたなどで切れた。ポーリングに戻す
+      (setq embterm--notify-connected nil)
+      (when embterm--timer (cancel-timer embterm--timer) (setq embterm--timer nil))
+      (setq embterm--timer (run-with-timer embterm-poll-interval embterm-poll-interval #'embterm--poll))))
   ;; あとから有効になったモード（`cua-mode' など）に前を取られていたら、取り返す
   (unless (eq (car emulation-mode-map-alists) 'embterm--emulation-alist)
     (embterm--emulation-first))
@@ -870,8 +937,10 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
     (embterm--deactivate)))
 
 (defun embterm--poll-1 ()
-  ;; フックが拾わない位置の変化（あれば）もここで拾う。同じなら module には送らない
-  (embterm--place)
+  ;; フックが拾わない位置の変化（あれば）もここで拾う。同じなら module には送らない。
+  ;; どのウィンドウにも出ておらずペインも無い（隠れた）端末は飛ばす（T-104）
+  (when (or embterm--panes (get-buffer-window (current-buffer) 'visible))
+    (embterm--place))
   (let ((st (embterm-module-poll embterm--term embterm--generation))
         (buf (current-buffer)))
     (when st

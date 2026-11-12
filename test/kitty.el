@@ -53,11 +53,16 @@
     (kitty-log "マウス: %s（%s）" actions status)))
 
 (defun kitty-panes ()
-  "ペインの一覧 ((ID HWND COLS ROWS SCROLLED) ...)。ウィンドウの並びの順。"
+  "端末を出しているウィンドウのペインの一覧 ((ID HWND COLS ROWS SCROLLED) ...)。フレームのウィンドウの並びの順。
+ウィンドウが消えたあと隠して取っておくペイン（T-087）は入れない。"
   (with-current-buffer kitty-buf
     (embterm--poll-1)
     (let ((infos (plist-get embterm--state :panes)))
-      (delq nil (mapcar (lambda (p) (assq (embterm--pane-id p) infos)) embterm--panes)))))
+      (delq nil (mapcar (lambda (w)
+                          (let ((p (embterm--pane-of w)))
+                            (and p (assq (embterm--pane-id p) infos))))
+                        (seq-filter (lambda (w) (eq (window-buffer w) kitty-buf))
+                                    (window-list nil 'nomini (frame-first-window))))))))
 
 (defun kitty-pane-text (info)
   (with-current-buffer kitty-buf

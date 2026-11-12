@@ -372,9 +372,12 @@ struct LatencyProbe {
 
 impl Shared {
     fn update(&self, f: impl FnOnce(&mut State)) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        f(&mut s);
-        s.generation += 1;
+        {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            f(&mut s);
+            s.generation += 1;
+        }
+        crate::notify::notify();
     }
 
     fn emit(&self, e: Event) {
@@ -1924,7 +1927,12 @@ impl App {
             Some((pad + x as i32 * cw as i32, pad + py * ch as i32, cw as i32, ch as i32))
         });
         let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        s.cursor = rect;
+        if s.cursor != rect {
+            s.cursor = rect;
+            drop(s);
+            // カーソルが動いた（IME の変換ウィンドウを合わせ直してもらう。T-104）
+            crate::notify::notify();
+        }
     }
 
     /// 端末から知らせが来た（タイトル・カレントディレクトリ・子の終了）
