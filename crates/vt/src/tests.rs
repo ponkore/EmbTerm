@@ -1127,3 +1127,16 @@ fn row_wrap_flags() {
     assert!(!t.row_wraps(2));
     assert!(!t.row_wraps(99), "無い行");
 }
+
+#[test]
+fn copy_text_drops_kitty_placeholders() {
+    // T-094: placeholder（U+10EEEE）とその後ろの行・桁の結合文字は、コピーするテキストに入れない
+    assert_eq!(strip_kitty_placeholders("ab"), "ab");
+    assert_eq!(strip_kitty_placeholders("x\u{10EEEE}\u{305}\u{305}\u{10EEEE}\u{305}\u{30d}y é"), "xy é");
+    let (mut term, _log) = image_terminal();
+    term.vt_write(b"\x1b_Ga=T,U=1,f=32,i=3,s=1,v=1,c=2,r=1,q=2;AP8A/w==\x1b\\");
+    term.vt_write(b"\x1b[5;1HL\x1b[38;5;3m\xf4\x8e\xbb\xae\xcc\x85\xcc\x85\xf4\x8e\xbb\xae\xcc\x85\xcc\x8d\x1b[39mR");
+    let text = term.format_plain(false, false).unwrap().unwrap_or_default();
+    assert!(text.contains("LR"), "{text:?}");
+    assert!(!text.contains('\u{10EEEE}'), "{text:?}");
+}

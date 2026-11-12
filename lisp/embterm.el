@@ -55,6 +55,7 @@
 (declare-function embterm-module-remove "embterm-module")
 (declare-function embterm-module-select "embterm-module")
 (declare-function embterm-module-start "embterm-module")
+(declare-function embterm-module-reset-keyboard "embterm-module")
 (declare-function embterm-module-send-string "embterm-module")
 (declare-function embterm-module-send-key "embterm-module")
 (declare-function embterm-module-paste "embterm-module")
@@ -704,19 +705,27 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
     (embterm-module-hide embterm--term (embterm--pane-id pane))
     (setf (embterm--pane-placed pane) nil)))
 
+(defconst embterm--max-parked-panes 4
+  "ウィンドウが消えたあとも隠して取っておくペインの数の上限（T-087）。")
+
 (defun embterm--place ()
-  "このバッファの端末を、出しているすべてのウィンドウに置く。
-ウィンドウが無くなったペインは消し、copy モードの間は隠す（スクロール位置は残る）。"
-  (let ((windows (embterm--windows)))
-    ;; ウィンドウが無くなった（または別のフレームを選んだ）ペインを消す
-    (setq embterm--panes
-          (seq-filter (lambda (p)
-                        (or (memq (embterm--pane-window p) windows)
-                            (progn (embterm-module-remove embterm--term (embterm--pane-id p))
-                                   nil)))
-                      embterm--panes))
+  "このバッファの端末を、出しているすべてのウィンドウに置く。copy モードの間は隠す（スクロール位置は残る）。
+ペインは module がスクロール位置を持つので、ウィンドウが替わってもできるだけ同じペインを使う（T-087）:
+- 端末が別のウィンドウへ移った（`window-swap-states' や、バッファの入れ替え）なら、そのペインを新しいウィンドウに付け替える
+- ウィンドウが消えた（タブの切り替え・`delete-window'）ペインは隠して取っておき、同じウィンドウが
+  `set-window-configuration' で戻ったら（tab-bar がタブに戻るとき・winner-mode）そのまま使う。
+  取っておくのは `embterm--max-parked-panes' まで（古いものから消す）"
+  (let* ((windows (embterm--windows))
+         (gone (seq-remove (lambda (p) (memq (embterm--pane-window p) windows)) embterm--panes))
+         ;; 生きているウィンドウから外れたペイン（端末が別のウィンドウへ移った）を先に使う
+         (movable (seq-filter (lambda (p) (window-live-p (embterm--pane-window p))) gone)))
     (dolist (win windows)
       (let ((pane (or (embterm--pane-of win)
+                      (when-let* ((p (pop movable)))
+                        (setq gone (delq p gone))
+                        (setf (embterm--pane-window p) win
+                              (embterm--pane-placed p) nil)
+                        p)
                       (let ((new (embterm--make-pane win embterm--next-pane)))
                         (cl-incf embterm--next-pane)
                         (setq embterm--panes (append embterm--panes (list new)))
@@ -724,6 +733,16 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
         (if (eq embterm--input-mode 'semi-char)
             (embterm--place-pane pane)
           (embterm--hide-pane pane))))
+    ;; 残りは、ウィンドウが生きていれば（別のバッファを出した・別のフレームを選んだ）消し、
+    ;; 消えたウィンドウのものは隠して取っておく
+    (let ((parked 0))
+      (dolist (p (reverse gone))
+        (if (and (not (window-live-p (embterm--pane-window p)))
+                 (< parked embterm--max-parked-panes))
+            (progn (cl-incf parked)
+                   (embterm--hide-pane p))
+          (embterm-module-remove embterm--term (embterm--pane-id p))
+          (setq embterm--panes (delq p embterm--panes)))))
     (embterm--send-selected-pane)))
 
 (defun embterm--send-selected-pane ()
@@ -1137,6 +1156,16 @@ KEY は基本のキー（文字かファンクションキーの名前）、MODS
 (defun embterm-send-C-d () "端末に C-d を送る。" (interactive) (embterm--send-key "d" "C"))
 (defun embterm-send-C-backslash () "端末に C-\\ を送る。" (interactive) (embterm--send-key "\\" "C"))
 
+(defun embterm-reset-keyboard ()
+  "端末のキーの送り方（Kitty keyboard protocol のフラグ）を今の画面の分だけ戻す（T-090）。
+KKP を求めたアプリが戻さずに終わり、そのアプリの子孫が残っているなどで自動の安全策が効かないと、
+シェルに `[27;5u' のようなゴミ文字が入る。そのときに使う。"
+  (interactive)
+  (embterm--require-term)
+  (message (if (embterm-module-reset-keyboard embterm--term)
+               "embterm: キーの送り方を戻しました"
+             "embterm: 戻すものはありませんでした")))
+
 (defun embterm-yank ()
   "kill-ring の先頭を端末に貼り付ける（ブラケットペーストのモードなら包む）。"
   (interactive)
@@ -1260,6 +1289,12 @@ KEY は基本のキー（文字かファンクションキーの名前）、MODS
     ;; C-<数字・記号>（C-[ は ESC の接頭辞を兼ねるので束縛しない。C-i などの英字は上）
     (dolist (c (string-to-list "0123456789-=]\\;',./`!\"#$%&()*+:<>?@^_{|}~"))
       (funcall bind map (format "C-%c" c)))
+    ;; M-<非 ASCII の文字>（`M-あ'。T-089）。Emacs は M-あ を ESC あ としても引くので、ESC の下の表に文字の範囲で束縛する。
+    ;; アプリには ESC + 文字（レガシー）か Alt 付きのキー（win32-input-mode / KKP）で届く。
+    ;; C-あ は送らない（修飾キー付きの文字は範囲で束縛できず、既定の束縛 [t] では C-x などの接頭キーまで奪うため）
+    (let ((esc (lookup-key map [27])))
+      (when (keymapp esc)
+        (define-key esc (vector (cons #x80 (max-char))) #'embterm--send-event)))
     ;; 選択があれば M-w はコピー（T-036）
     (unless (member "M-w" embterm-keymap-exceptions)
       (define-key map (kbd "M-w") #'embterm-copy-or-send))

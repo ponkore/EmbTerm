@@ -301,15 +301,15 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-084** ドラッグがペインの外へ出たときの自動スクロール（2026-11-12）→ 外にある間 50 ms ごとにペインをスクロールし、端の行までドラッグを伸ばす（外へ出た距離で 1〜5 行）。docs/notes/t078-tests.md
 - ✅ **T-085** 複数行の貼り付けの確認: ブラケットペーストを有効にしていないアプリ（pwsh の PSReadLine など）では毎回確認が出る。確認を止める設定か、PSReadLine を区別する扱いを決める（2026-11-12）→ 今のまま（利用者が選んだ。Windows Terminal の既定と同じ）。止めるなら `embterm-confirm-unsafe-paste` を nil
 - ✅ **T-086** copy モードで折り返しを繋げる（unwrap）。とても大きなスクロールバックを分割して渡す（2026-11-12）→ バッファの行は端末の行のまま、折り返しの改行に `embterm-wrap` を付け、コピー（`filter-buffer-substring`）でつなぐ。テキストは 1 MiB ずつ渡す（1.17 MB で Emacs の止まりは最大 23 ms）。docs/notes/t078-tests.md、`test/copy.el`
-- ⬜ **T-087** ウィンドウを入れ替えたとき（`window-swap-states`、tab-bar のタブの切り替えなど）のスクロール位置の引き継ぎ（T-044 で tab-bar でも失われることを確かめた）
+- ✅ **T-087** ウィンドウを入れ替えたとき（`window-swap-states`、tab-bar のタブの切り替えなど）のスクロール位置の引き継ぎ（T-044 で tab-bar でも失われることを確かめた）（2026-11-12）→ 端末が移ったらペインを付け替え、消えたウィンドウのペインは 4 つまで隠して取っておく（tab-bar は元のウィンドウを生き返らせる）。docs/notes/t078-tests.md
 - ✅ **T-088** Kitty graphics の描画（2026-11-11）→ render state が placeholder・相対配置・層を解決するので自前の走査は不要だった。PNG は WIC でデコード。層の順・切り取り・ビットマップのキャッシュ。split・狭いペイン・遡ったペインでも崩れない。docs/notes/t088-kitty-graphics.md、`test/kitty-graphics.py`、`test/kitty.el`
-- ⬜ **T-089** 非 ASCII の文字 + 修飾キー（`C-あ` `M-あ`）を送るか決める（今は束縛が無く端末に届かない）
-- ⬜ **T-090** KKP の安全策の限界: 求めたアプリの子孫が長生きすると戻せない。`CSI <99u` は今の画面だけに効く
+- ✅ **T-089** 非 ASCII の文字 + 修飾キー（`C-あ` `M-あ`）を送るか決める（今は束縛が無く端末に届かない）（2026-11-12）→ M- だけ送る（利用者が選んだ）。ESC の下の表に文字の範囲で束縛。conhost が Alt を捨てるので ESC を前に送る。KKP は `CSI 12354;3u`。C-あ は束縛できないので送らない。docs/notes/t078-tests.md、`test/meta.el`
+- ✅ **T-090** KKP の安全策の限界: 求めたアプリの子孫が長生きすると戻せない。`CSI <99u` は今の画面だけに効く（2026-11-12）→ 自動では見分けられないので限界として残し、手で戻す `embterm-reset-keyboard` を足した。docs/notes/t078-tests.md
 - ✅ **T-091** 手元での再確認（2026-11-11）→ ユーザーが確認: 日本語の確定、絵文字、claude の `Shift+Enter`、`C-c C-c`、PSReadLine のキー、yazi の png / svg / pdf のプレビュー。個別の報告が無いもの: `Esc`、JP 配列の `C-@`、AltGr、マウスの形
 - ⬜ **T-092** Kitty graphics のアニメーション（`animation_tick` と次の時刻のタイマー。いまは最初のフレームだけ）
 - ⬜ **T-093** 画像の保存量の上限の defcustom 化（いまは 128 MiB）と、`t=t` / `t=s`（`OpenFileMappingW`）への対応（yazi の `t=s` は大きな画像で base64 より速い）
-- ⬜ **T-094** 画像を含む行のコピーに placeholder の文字（`U+10EEEE`）が混じるので除く
-- ⬜ **T-095** 親の端末の環境変数（`WEZTERM_*`、`TERM_PROGRAM_VERSION`）が子に伝わる件。`et_pty` で落とすか決める（yazi の判定は XTVERSION で上書きされるので害は無い）
+- ✅ **T-094** 画像を含む行のコピーに placeholder の文字（`U+10EEEE`）が混じるので除く（2026-11-12）→ `format_plain` で placeholder と後ろの結合文字を除く。docs/notes/t078-tests.md
+- ✅ **T-095** 親の端末の環境変数（`WEZTERM_*`、`TERM_PROGRAM_VERSION`）が子に伝わる件。`et_pty` で落とすか決める（yazi の判定は XTVERSION で上書きされるので害は無い）（2026-11-12）→ 落とす（`WEZTERM_*`・`WT_SESSION`・`VSCODE_*` など。`setenv` したものは残る）。`TERM_PROGRAM_VERSION` は EmbTerm の版。docs/notes/t078-tests.md
 - ✅ **T-096** 大きな画像の PNG のデコードが端末のロックの中で走る時間を測る（T-054）（2026-11-11）→ 4000x4000 でデコード 33〜38 ms・`vt_write` 58〜65 ms がロックの中。Emacs には響かない。ロックの外に出す方法は libghostty-vt の API に無いので記録で終える。重いのは UI スレッドで GPU に載せるところ → T-105
 - ⏸ **T-097** embterm.exe のウィンドウが一瞬画面いっぱい（`319x75`）にリサイズされて戻るログが数回あった。原因を調べる（2026-11-11: 26 回で再現せず。大きさの変化・`showCmd`・`WM_SYSCOMMAND` をログに出すようにしたので、次に起きたらそれで原因を分ける）
 - ✅ **T-098** 他のアプリが前面のとき、端末のペインをクリックしても Emacs にフォーカスが入らない（2026-11-11）→ フレームが前面でなければ `WM_MOUSEACTIVATE` に `MA_ACTIVATE` を返すようにした。本物のクリックでの動作をユーザーが確認した

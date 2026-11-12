@@ -62,3 +62,41 @@
   `(TEXT TOP POINT WRAPS MORE)` を返す。copy モードを抜けたら残りは捨てる
 - 確かめたこと（`test/copy.el`）: 1.17 MB・16,010 行が全部入る、受け取る間の Emacs のタイマーの間隔は最大 23 ms、
   折り返した長い行はバッファでは 2 行・コピーでは 1 行
+
+## 6. T-087 ウィンドウを入れ替えたときのスクロール位置
+
+- ペインは module がスクロール位置を持つので、**ウィンドウが替わっても同じペインを使い続ける**ようにした（`embterm--place`）:
+  - 端末が別のウィンドウへ移った（`window-swap-states`、バッファの入れ替え）: 外れたペイン（ウィンドウは生きている）を新しいウィンドウに付け替える
+  - ウィンドウが消えた（タブの切り替え・`delete-window`）: すぐには消さず、隠して取っておく（`embterm--max-parked-panes` = 4 まで。古いものから消す）。
+    **tab-bar はタブに戻るとき `set-window-configuration` で元のウィンドウのオブジェクトを生き返らせる**（`tab-bar.el` の `tab-bar-select-tab`）ので、
+    そのウィンドウに出したらそのペインをそのまま使う。winner-mode も同じ
+- 確かめたこと（`test/frames.el`）: 20 行遡る → 別のタブ → 戻る で同じペイン・遡ったまま。左右を `window-swap-states` で入れ替えても遡ったまま
+- 試験の直し: `test/split.el` の `split-panes` は module のペインを全部数えていた。出しているウィンドウのペインだけを、フレームの並び順で返すようにした
+  （`get-buffer-window-list` は選んでいるウィンドウから並ぶので使わない）
+
+## 7. T-089 M-<非 ASCII の文字>
+
+- **M- だけ送る**と決めた（利用者が選んだ）
+- Lisp: Emacs は `M-あ` を `ESC あ` としても引くので、端末のキーマップの ESC の下の表に**文字の範囲 `(#x80 . (max-char))`** で束縛した
+- **`C-あ` は送らない**: 修飾キー付きの文字は範囲で束縛できず、既定の束縛（`[t]`）にすると `C-x` などの接頭キーまで奪うため
+- module: キーボードで打てない文字（仮想キー 0）に Alt を付けて win32-input-mode で送ると、**conhost が Alt を捨てて「あ」だけ届いた**。
+  ESC を押して離してから Alt を外した文字を送るようにした。KKP は物理キーが無いので、文字そのものをキーの番号にする（`CSI 12354 ; 3 u`）
+- 確かめたこと（`test/meta.el`）: VT 入力のアプリに `ESC あ`、KKP のアプリに `CSI 12354;3u`
+
+## 8. T-090 KKP の安全策の限界
+
+- 自動の安全策（求めたアプリの子孫が全部終わったらフラグを戻す）が効かない場合（子孫が長生きする、代替画面で落ちた）は見分けられないので、
+  限界として残し、**手で戻すコマンド `embterm-reset-keyboard`** を足した（今の画面のフラグを `CSI < 99 u` で戻す。module の `embterm-module-reset-keyboard`）
+- 確かめたこと（`test/meta.el`）: KKP を求めた子の前で戻すと t、2 回目は nil、戻した後の `M-あ` はレガシーの形
+
+## 9. T-094 コピーに Kitty graphics の placeholder が混じる
+
+- テキストを取り出す `Terminal::format_plain`（選択のコピー・copy モード）で、placeholder（`U+10EEEE`）と、その後ろの画像の行・桁を表す結合文字（幅 0）を除く
+  （`et_vt::strip_kitty_placeholders`）。単体テスト `copy_text_drops_kitty_placeholders`
+
+## 10. T-095 親の端末の環境変数
+
+- 子の環境ブロックから、**親の端末が自分の中のために入れる変数**を除く（`WEZTERM_*`・`KITTY_*`・`ALACRITTY_*`・`GHOSTTY_*`・`VSCODE_*`・`CONEMU*`、
+  `WT_SESSION`・`WT_PROFILE_ID`・`TERM_SESSION_ID`・`LC_TERMINAL` など）。Emacs で `setenv` したもの（差分として渡る）は残る
+- `TERM_PROGRAM_VERSION` は EmbTerm の版にする
+- 確かめたこと: 単体テスト、`test/env.el`（WezTerm から起動した Emacs の子に `WEZTERM_PANE` が渡らない）

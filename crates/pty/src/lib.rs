@@ -205,10 +205,40 @@ pub fn default_conpty_search(preferred: Option<PathBuf>) -> Vec<PathBuf> {
 /// 親を起動したディレクトリで開いたように見える。正しい値を入れても、nyagos のように `cd` で
 /// `PWD` を書き換えないシェルでは古くなるので、入れずに消す（POSIX のシェルは自分で設定する）
 pub fn terminal_env() -> Vec<(OsString, Option<OsString>)> {
-    [("TERM", Some("xterm-256color")), ("COLORTERM", Some("truecolor")), ("TERM_PROGRAM", Some("EmbTerm")), ("PWD", None), ("OLDPWD", None)]
-        .into_iter()
-        .map(|(k, v)| (k.into(), v.map(Into::into)))
-        .collect()
+    [
+        ("TERM", Some("xterm-256color")),
+        ("COLORTERM", Some("truecolor")),
+        ("TERM_PROGRAM", Some("EmbTerm")),
+        ("TERM_PROGRAM_VERSION", Some(env!("CARGO_PKG_VERSION"))),
+        ("PWD", None),
+        ("OLDPWD", None),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.into(), v.map(Into::into)))
+    .collect()
+}
+
+/// 親（Emacs を起動した端末）が自分の中のプロセスのために入れる環境変数か（T-095）。子には渡さない。
+/// EmbTerm の中のアプリが「WezTerm の中にいる」などと取り違えないように（yazi は `WEZTERM_*` を見る。
+/// XTVERSION で上書きされるので害は無かったが、ほかのアプリは環境変数だけで判断する）
+fn foreign_terminal_var(name: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "WT_SESSION",
+        "WT_PROFILE_ID",
+        "TERMINAL_EMULATOR",
+        "TERM_SESSION_ID",
+        "ITERM_SESSION_ID",
+        "ITERM_PROFILE",
+        "LC_TERMINAL",
+        "LC_TERMINAL_VERSION",
+        "KONSOLE_VERSION",
+        "VTE_VERSION",
+        "COLORFGBG",
+        "WINDOWID",
+    ];
+    const PREFIXES: &[&str] = &["WEZTERM_", "KITTY_", "ALACRITTY_", "GHOSTTY_", "VSCODE_", "CONEMU"];
+    let n = name.to_uppercase();
+    NAMES.contains(&n.as_str()) || PREFIXES.iter().any(|p| n.starts_with(p))
 }
 
 /// 子プロセスの終わり方
@@ -500,10 +530,12 @@ pub fn command_line(argv: &[OsString]) -> Vec<u16> {
 }
 
 /// 親の環境変数を `changes` で書き換えた環境ブロック（`名前=値\0 … \0`、名前の大文字小文字を無視して並べる）。
-/// `changes` は前から順に当てる（`Some` は設定、`None` は削除）
+/// 親の端末のための変数（[`foreign_terminal_var`]）は除く。`changes` は前から順に当てる（`Some` は設定、`None` は削除。
+/// Emacs で `setenv` したものは `changes` で来るので、親の端末の変数でも残る）
 fn environment_block(changes: &[(OsString, Option<OsString>)]) -> Vec<u16> {
     let upper = |s: &OsStr| s.to_string_lossy().to_uppercase();
-    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let mut vars: Vec<(OsString, OsString)> =
+        std::env::vars_os().filter(|(k, _)| !foreign_terminal_var(&k.to_string_lossy())).collect();
     for (k, v) in changes {
         let ku = upper(k);
         vars.retain(|(k2, _)| upper(k2) != ku);
@@ -1027,6 +1059,19 @@ mod tests {
         let s = String::from_utf16_lossy(&b);
         assert!(!s.to_uppercase().contains("\0PATH="), "PATH が残っている");
         assert!(s.contains("et_test_a=2\0") && !s.contains("ET_TEST_A=1"));
+    }
+
+    #[test]
+    fn foreign_terminal_vars_are_dropped() {
+        // T-095: 親の端末の変数は落とす。changes で明示したもの（Emacs の setenv）は残す
+        assert!(foreign_terminal_var("WEZTERM_PANE") && foreign_terminal_var("wt_session") && foreign_terminal_var("VSCODE_INJECTION"));
+        assert!(!foreign_terminal_var("PATH") && !foreign_terminal_var("TERM") && !foreign_terminal_var("WEZTERMX"));
+        // SAFETY: テストのプロセスの中だけ。ほかのテストはこの名前を読まない
+        unsafe { std::env::set_var("WEZTERM_ET_TEST", "1") };
+        let s = String::from_utf16_lossy(&environment_block(&[]));
+        assert!(!s.contains("WEZTERM_ET_TEST="));
+        let s = String::from_utf16_lossy(&environment_block(&[("WEZTERM_ET_TEST".into(), Some("2".into()))]));
+        assert!(s.contains("WEZTERM_ET_TEST=2\0"));
     }
 
     /// OS 同梱の ConPTY で cmd を動かし、出力が届いて終了が分かること

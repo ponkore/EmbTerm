@@ -64,15 +64,23 @@
           (frames-panes)))
 
 (defun frames-check-placed (label)
-  "ペインが 1 つで、見えていて、端末のウィンドウの本文の位置にあるか。"
+  "見えているペインが 1 つで、端末のウィンドウの本文の位置にあるか（隠して取っておくペインは数えない。T-087）。"
   (let* ((win (get-buffer-window frames-buf))
          (edges (and win (window-inside-pixel-edges win)))
-         (info (frames-pane-info)))
-    (frames-check (format "%s: ペインは 1 つで、見えていて、ウィンドウの本文の位置" label)
-                  (and edges (= (length info) 1) (car info)
-                       (= (nth 0 (car info)) 1)
-                       (equal (cdr (car info)) edges))
+         (info (frames-pane-info))
+         (visible (seq-filter (lambda (i) (and i (= (nth 0 i) 1))) info)))
+    (frames-check (format "%s: 見えているペインは 1 つで、ウィンドウの本文の位置" label)
+                  (and edges (= (length visible) 1)
+                       (equal (cdr (car visible)) edges))
                   (format "ペイン %S / 本文 %S" info edges))))
+
+(defun frames-shown-pane ()
+  "端末のウィンドウのペイン（module の :panes の項目）。"
+  (let* ((win (get-buffer-window frames-buf))
+         (p (and win (with-current-buffer frames-buf (embterm--pane-of win)))))
+    (and p (assq (embterm--pane-id p) (frames-panes)))))
+
+(defvar frames-scrolled-id nil)
 
 (defun frames-check-hidden (label)
   (let ((info (frames-pane-info)))
@@ -184,6 +192,38 @@
               (frames-check-placed "元のフレームに出し直した")
               (frames-check "消した後の出力がある" (frames-screen-has "^after-delete-frame"))
               (frames-capture "frame-8-after-delete.png")
+              (frames-send "for /l %i in (1,1,80) do @echo n%i\r")))
+    (2.0 "スクロールバックを遡る（T-087）"
+         . ,(lambda ()
+              (let ((p (frames-shown-pane)))
+                (setq frames-scrolled-id (car p))
+                (with-current-buffer frames-buf
+                  (embterm-module-scroll embterm--term (car p) "lines" -20)))))
+    (1.0 "遡った → 別のタブへ"
+         . ,(lambda ()
+              (frames-check "遡った" (nth 4 (frames-shown-pane)) (format "%S" (frames-shown-pane)))
+              (tab-bar-switch-to-next-tab)))
+    (1.0 "別のタブ → 戻る"
+         . ,(lambda ()
+              (frames-check-hidden "別のタブ（2 回目）")
+              (tab-bar-switch-to-prev-tab)))
+    (1.0 "タブを行き来した後"
+         . ,(lambda ()
+              (frames-check-placed "タブを行き来した後")
+              (let ((p (frames-shown-pane)))
+                (frames-check "同じペインで、遡ったまま" (and p (eql (car p) frames-scrolled-id) (nth 4 p))
+                              (format "%S（前のペイン %S）" p frames-scrolled-id)))
+              ;; 右に *scratch* を出して、左右のウィンドウを入れ替える（端末は右のウィンドウへ移る）
+              (delete-other-windows)
+              (set-window-buffer (split-window-right) (get-buffer-create "*scratch*"))
+              (window-swap-states (frame-first-window) (next-window (frame-first-window)))))
+    (1.0 "window-swap-states の後"
+         . ,(lambda ()
+              (frames-check-placed "window-swap-states の後")
+              (let ((p (frames-shown-pane)))
+                (frames-check "端末は右のウィンドウ" (eq (get-buffer-window frames-buf) (next-window (frame-first-window))))
+                (frames-check "入れ替えた後も遡ったまま" (and p (nth 4 p)) (format "%S" p)))
+              (frames-capture "frame-9-swapped.png")
               (frames-log "失敗の数: %d" frames-ng)
               (kill-emacs (if (zerop frames-ng) 0 1))))))
 

@@ -47,7 +47,7 @@
 
 ;; 子が環境を表示して待つコマンド（cmd の %VAR% は未定義ならそのまま残る）
 (defconst env-echo
-  '("cmd.exe" "/d" "/k" "echo" "L=[%LANG%]" "R=[%ET_REMOVE%]" "X=[%ET_X%]" "T=[%TERM%]" "D=[%CD%]" "P=[%PWD%]"))
+  '("cmd.exe" "/d" "/k" "echo" "L=[%LANG%]" "R=[%ET_REMOVE%]" "X=[%ET_X%]" "T=[%TERM%]" "D=[%CD%]" "P=[%PWD%]" "W=[%WEZTERM_PANE%]"))
 
 (defvar env-buf1 nil)
 (defvar env-buf2 nil)
@@ -91,6 +91,9 @@
     (env-check "setenv の LANG が子に届く" (string-search "L=[ja_JP.UTF-8]" t1))
     (env-check "TERM は端末の値" (string-search "T=[xterm-256color]" t1))
     (env-check "PWD は子に渡さない" (string-search "P=[%PWD%]" t1))
+    (if (getenv-internal "WEZTERM_PANE" initial-environment)
+        (env-check "親の端末の変数（WEZTERM_PANE）は子に渡さない（T-095）" (string-search "W=[%WEZTERM_PANE%]" t1))
+      (env-log "WEZTERM_PANE が無い（WezTerm の外で起動した）ので T-095 の確認は飛ばす"))
     (when env-had-remove
       (env-check "embterm-new の子には ET_REMOVE が残る" (string-search (format "R=[%s]" env-had-remove) t1))
       (env-check "embterm-run で ET_REMOVE を消せる" (string-search "R=[%ET_REMOVE%]" t2)))

@@ -71,6 +71,31 @@ pub fn codepoint_width(c: char) -> u8 {
     unsafe { ffi::ghostty_unicode_codepoint_width(c as u32) }
 }
 
+/// Kitty graphics の Unicode placeholder（`U+10EEEE`）。画像の場所を示すだけの文字
+pub const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
+/// テキストから Kitty graphics の Unicode placeholder を除く（T-094）。placeholder の後ろに付く、画像の行・桁・ID の
+/// 上位を表す結合文字（幅 0）も一緒に除く。画像を含む行をコピーしたときに私用領域の文字が混じらないように
+pub fn strip_kitty_placeholders(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(KITTY_PLACEHOLDER) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut after_placeholder = false;
+    for c in text.chars() {
+        if c == KITTY_PLACEHOLDER {
+            after_placeholder = true;
+            continue;
+        }
+        if after_placeholder && !c.is_ascii() && codepoint_width(c) == 0 {
+            continue;
+        }
+        after_placeholder = false;
+        out.push(c);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// 端末からの知らせを受けるもの。メソッドは [`Terminal::vt_write`] の中から**同期的に**呼ばれる
 /// （呼んだスレッドで、端末のロックを持ったまま）。重いことや、ロックを取り直すことはしない。
 /// `write_pty` で受けたバイト列は、PTY に直接書かずにチャネルなどへ積む（T-006）
@@ -771,7 +796,7 @@ impl Terminal {
             let text = if buf.is_null() || len == 0 {
                 String::new()
             } else {
-                String::from_utf8_lossy(std::slice::from_raw_parts(buf, len)).into_owned()
+                strip_kitty_placeholders(&String::from_utf8_lossy(std::slice::from_raw_parts(buf, len))).into_owned()
             };
             ffi::ghostty_free(ptr::null(), buf, len);
             Ok(text)

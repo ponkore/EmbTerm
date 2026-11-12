@@ -526,6 +526,16 @@ impl Session {
         }
     }
 
+    /// KKP のフラグを今の画面の分だけ全部戻す（`CSI < 99 u`。T-090）。安全策（[`Self::reset_stale_kkp`]）が
+    /// 戻せない場合（求めたアプリの子孫が長生きする、代替画面で落ちた）に、利用者が手で戻すためのもの。戻したら true
+    pub fn reset_keyboard(&self) -> bool {
+        let mut term = self.lock();
+        let had = term.kitty_keyboard_flags() != 0;
+        term.vt_write(b"\x1b[<99u");
+        *self.shared.kkp_owners.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        had
+    }
+
     /// PTY に書く（待たない）
     pub fn write(&self, data: &[u8]) {
         self.writer.write(data);

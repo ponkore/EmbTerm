@@ -55,13 +55,17 @@
 (defvar split-buf2 nil)
 
 (defun split-panes ()
-  "ペインの一覧 ((ID HWND COLS ROWS SCROLLED) ...)。ウィンドウの並びの順。"
+  "端末を出しているウィンドウのペインの一覧 ((ID HWND COLS ROWS SCROLLED) ...)。ウィンドウの並びの順。
+ウィンドウが消えたあと隠して取っておくペイン（T-087）は入れない。"
   (with-current-buffer split-buf
     (embterm--poll-1)
     (let ((infos (plist-get embterm--state :panes)))
-      (delq nil (mapcar (lambda (p)
-                          (assq (embterm--pane-id p) infos))
-                        embterm--panes)))))
+      (delq nil (mapcar (lambda (w)
+                          (let ((p (embterm--pane-of w)))
+                            (and p (assq (embterm--pane-id p) infos))))
+                        ;; `embterm--windows' は選んでいるウィンドウから並ぶので、フレームの並び（左上から）にする
+                        (seq-filter (lambda (w) (eq (window-buffer w) split-buf))
+                                    (window-list nil 'nomini (frame-first-window))))))))
 
 (defun split-pane-text (info)
   (with-current-buffer split-buf

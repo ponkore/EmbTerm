@@ -406,7 +406,9 @@ impl KeyEvent {
             mods: self.mods,
             consumed_shift: self.mods.shift && self.text.is_some(),
             text,
-            unshifted: self.unshifted,
+            // キーボードで打てない文字（仮想キー 0）は物理キーが無いので、文字そのものをキーの番号にする
+            // （KKP の決まり。M-あ が `CSI 12354 ; 3 u` になる。T-089）
+            unshifted: if self.vk == 0 { self.text.map_or(0, |c| c as u32) } else { self.unshifted },
         }
     }
 }
@@ -488,6 +490,20 @@ pub fn encode(ev: &KeyEvent, proto: KeyProtocol, phase: KeyPhase, term: &Termina
         }
         KeyProtocol::Win32 => {
             let mut out = Vec::with_capacity(64);
+            // キーボードで打てない文字（仮想キー 0）に Alt を付けても conhost は Alt を捨てる（M-あ が あ になる）。
+            // Meta の慣習どおり ESC を押して離してから、Alt を外した文字を送る（T-089）
+            if ev.is_packet() && ev.mods.alt && phase != KeyPhase::Release {
+                if let Some(esc) = named_key("escape").map(|n| KeyEvent::named(n, Mods::default())) {
+                    out.extend(esc.win32(true));
+                    out.extend(esc.win32(false));
+                }
+                let plain = KeyEvent::from_char(ev.text.unwrap_or('\0'), Mods { alt: false, ..ev.mods });
+                out.extend(plain.win32(true));
+                if phase == KeyPhase::Tap {
+                    out.extend(plain.win32(false));
+                }
+                return out;
+            }
             if phase != KeyPhase::Release {
                 out.extend(ev.win32(true));
             }
@@ -685,6 +701,25 @@ mod tests {
         let s = String::from_utf8_lossy(&ev.win32(true)).into_owned();
         assert_eq!(s, "\x1b[0;0;55357;1;0;1_\x1b[0;0;56832;1;0;1_");
     }
+
+    #[test]
+    fn meta_with_packet_chars() {
+        // T-089: M-あ。win32-input-mode では ESC を押して離してから Alt を外した あ
+        let ev = KeyEvent::from_emacs("あ", m("M")).unwrap();
+        assert!(ev.is_packet());
+        let (mut term, mut enc) = (Terminal::new(80, 24, Box::new(NoEffects)).unwrap(), KeyEncoder::new().unwrap());
+        let s = String::from_utf8_lossy(&encode(&ev, KeyProtocol::Win32, KeyPhase::Tap, &term, &mut enc)).into_owned();
+        assert_eq!(s, "\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_\x1b[0;0;12354;1;0;1_\x1b[0;0;12354;0;0;1_", "{s:?}");
+        // レガシーは ESC + あ
+        assert_eq!(encode(&ev, KeyProtocol::Legacy, KeyPhase::Tap, &term, &mut enc), "\x1bあ".as_bytes());
+        // KKP（CSI >1u）では文字をキーの番号にして Alt を付ける
+        term.vt_write(b"\x1b[>1u");
+        let s = String::from_utf8_lossy(&encode(&ev, KeyProtocol::Kitty, KeyPhase::Press, &term, &mut enc)).into_owned();
+        assert_eq!(s, "\x1b[12354;3u", "{s:?}");
+    }
+
+    struct NoEffects;
+    impl et_vt::Effects for NoEffects {}
 
     #[test]
     fn from_char_handles_control_chars() {

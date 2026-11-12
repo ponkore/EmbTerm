@@ -267,6 +267,13 @@ fn selection(term: &RefCell<Term>) -> Result<Option<String>> {
     Ok(term.borrow().shared().selection_text())
 }
 
+/// KKP（Kitty keyboard protocol）のフラグを今の画面の分だけ戻す（T-090）。アプリが KKP を求めたまま
+/// 戻さずに終わり、キーが `CSI ... u` の形で届いてしまうときに手で戻す。戻すフラグがあれば t
+#[defun]
+fn reset_keyboard(term: &RefCell<Term>) -> Result<bool> {
+    Ok(term.borrow().shared().session().is_some_and(|s| s.reset_keyboard()))
+}
+
 /// 選択を消す
 #[defun]
 fn clear_selection(term: &RefCell<Term>) -> Result<()> {
