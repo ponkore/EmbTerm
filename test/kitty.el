@@ -29,6 +29,7 @@
 
 (defvar kitty-ng 0 "NG の数。")
 (defvar kitty-buf nil)
+(defvar kitty-anim-ticks 0 "アニメーションを進めた回数（T-092）。")
 
 (defun kitty-log (fmt &rest args)
   (let ((line (format "[%s] %s\n" (format-time-string "%H:%M:%S.%3N") (apply #'format fmt args))))
@@ -154,7 +155,30 @@
                 (kitty-check "遡ったペインに画像の直後の行が見える"
                              (string-match-p "line 0" (or (kitty-pane-text (car p)) ""))
                              (format "%S" (seq-take (split-string (or (kitty-pane-text (car p)) "") "\n") 4))))
-              (kitty-frame-png "frame-scrolled.png")))
+              (kitty-frame-png "frame-scrolled.png")
+              ;; T-092: アニメーション（1 つのウィンドウに戻して、赤 → 緑 → 青を 300 ms ごと）
+              (delete-other-windows)
+              (kitty-type "cls" 'return)
+              (kitty-type (format "python -I %s/test/kitty-graphics.py anim --no-wait" kitty-root) 'return)))
+    (3.0 "T-092: アニメーションが進む"
+         . ,(lambda ()
+              (let ((i (with-current-buffer kitty-buf (embterm-module-debug-info embterm--term))))
+                (kitty-log "アニメーション: %S" (list (plist-get i :animation-ticks) (plist-get i :animation-playing)))
+                (kitty-check "再生中" (plist-get i :animation-playing))
+                (setq kitty-anim-ticks (plist-get i :animation-ticks)))
+              ;; 0.3 秒おきに 3 枚（フレームの周期は 0.9 秒なので、3 色が 1 枚ずつ写るはず。画面は目で見る）
+              (dotimes (k 3)
+                (run-at-time (* k 0.3) nil
+                             (lambda ()
+                               (with-current-buffer kitty-buf
+                                 (embterm-screenshot (expand-file-name (format "anim-%d.png" k) kitty-out))))))))
+    (1.2 "アニメーションの次の相"
+          . ,(lambda () nil))
+    (1.0 "アニメーションが進み続ける"
+         . ,(lambda ()
+              (let ((i (with-current-buffer kitty-buf (embterm-module-debug-info embterm--term))))
+                (kitty-check "1.5 秒で 3 フレーム以上進んだ" (>= (- (plist-get i :animation-ticks) kitty-anim-ticks) 3)
+                             (format "%S → %S" kitty-anim-ticks (plist-get i :animation-ticks))))))
     (1.0 "終わり"
          . ,(lambda ()
               (kitty-log "NG の数: %d" kitty-ng)

@@ -199,6 +199,25 @@ def png_big(w, h):
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b"")
 
 
+def solid_rgba(w, h, rgb):
+    return bytes((*rgb, 255)) * (w * h)
+
+
+def scene_anim():
+    """アニメーション（T-092）: 赤 → 緑 → 青を 300 ms ごとに繰り返す 80x60 の画像を 10 桁 x 4 行に置く"""
+    out("anim: red -> green -> blue (300 ms each, loop)\r\n")
+    w, h = 80, 60
+    apc(f"a=t,f=32,s={w},v={h},i=301,q=2", solid_rgba(w, h, (220, 0, 0)))
+    apc(f"a=f,f=32,s={w},v={h},i=301,z=300,q=2", solid_rgba(w, h, (0, 200, 0)))
+    apc(f"a=f,f=32,s={w},v={h},i=301,z=300,q=2", solid_rgba(w, h, (0, 0, 220)))
+    apc("a=a,i=301,r=1,z=300,q=2")
+    goto(3, 1)
+    apc("a=p,i=301,c=10,r=4,q=2")
+    apc("a=a,i=301,s=3,v=1,q=2")
+    goto(8, 1)
+    out("end of anim\r\n")
+
+
 def scene_big():
     """大きな PNG（既定 4000x4000。2 番目の引数で 1 辺の画素数）を 1 枚、40 桁 x 20 行に縮めて置く（T-096 のデコードの時間の測定）"""
     n = next((int(a) for a in sys.argv[2:] if a.isdigit()), 4000)

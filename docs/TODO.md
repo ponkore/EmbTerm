@@ -306,7 +306,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-089** 非 ASCII の文字 + 修飾キー（`C-あ` `M-あ`）を送るか決める（今は束縛が無く端末に届かない）（2026-11-12）→ M- だけ送る（利用者が選んだ）。ESC の下の表に文字の範囲で束縛。conhost が Alt を捨てるので ESC を前に送る。KKP は `CSI 12354;3u`。C-あ は束縛できないので送らない。docs/notes/t078-tests.md、`test/meta.el`
 - ✅ **T-090** KKP の安全策の限界: 求めたアプリの子孫が長生きすると戻せない。`CSI <99u` は今の画面だけに効く（2026-11-12）→ 自動では見分けられないので限界として残し、手で戻す `embterm-reset-keyboard` を足した。docs/notes/t078-tests.md
 - ✅ **T-091** 手元での再確認（2026-11-11）→ ユーザーが確認: 日本語の確定、絵文字、claude の `Shift+Enter`、`C-c C-c`、PSReadLine のキー、yazi の png / svg / pdf のプレビュー。個別の報告が無いもの: `Esc`、JP 配列の `C-@`、AltGr、マウスの形
-- ⬜ **T-092** Kitty graphics のアニメーション（`animation_tick` と次の時刻のタイマー。いまは最初のフレームだけ）
+- ✅ **T-092** Kitty graphics のアニメーション（`animation_tick` と次の時刻のタイマー。いまは最初のフレームだけ）（2026-11-12）→ 描く前に `animation_tick` を呼び、次のフレームの時刻にタイマー。3 色の画像で色が順に変わることを確かめた。docs/notes/t078-tests.md
 - ⬜ **T-093** 画像の保存量の上限の defcustom 化（いまは 128 MiB）と、`t=t` / `t=s`（`OpenFileMappingW`）への対応（yazi の `t=s` は大きな画像で base64 より速い）
 - ✅ **T-094** 画像を含む行のコピーに placeholder の文字（`U+10EEEE`）が混じるので除く（2026-11-12）→ `format_plain` で placeholder と後ろの結合文字を除く。docs/notes/t078-tests.md
 - ✅ **T-095** 親の端末の環境変数（`WEZTERM_*`、`TERM_PROGRAM_VERSION`）が子に伝わる件。`et_pty` で落とすか決める（yazi の判定は XTVERSION で上書きされるので害は無い）（2026-11-12）→ 落とす（`WEZTERM_*`・`WT_SESSION`・`VSCODE_*` など。`setenv` したものは残る）。`TERM_PROGRAM_VERSION` は EmbTerm の版。docs/notes/t078-tests.md

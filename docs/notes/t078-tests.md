@@ -162,3 +162,12 @@
 - embterm.exe（単体デバッグ用）は点滅させない
 - 確かめたこと（`test/integration.el`）: タイマーが動く、1.5 秒の間に見せる・消すの両方が現れる（`blink-on.png` / `blink-off.png`）、
   `cls` で止まって見せる側に戻る
+
+## 16. T-092 Kitty graphics のアニメーション
+
+- 描く前（`refresh` の端末のロックの中）に毎回 `ghostty_kitty_graphics_animation_tick(now_ms)` を呼び、再生中なら返る次のフレームの時刻に
+  1 回きりのタイマー（`TIMER_ANIMATION`）を掛ける。タイマーが来たら、画像を置いているペインを描き直す（進んだ画像は世代が変わり、画素を写し直す）
+- 時計は module の `epoch`（UI スレッドの起動からの ms）
+- 確かめたこと（`test/kitty.el` + `test/kitty-graphics.py anim`）: 赤 → 緑 → 青（300 ms ごと）の画像で、0.3 秒おきの 3 枚の画面の色が
+  (220,0,0) → (0,200,0) → (0,0,220)。1.5 秒で 3 フレーム以上進む
+- embterm.exe（単体デバッグ用）は再生しない（最初のフレーム）

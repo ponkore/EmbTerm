@@ -413,6 +413,18 @@ impl Terminal {
         })
     }
 
+    /// Kitty graphics のアニメーション（`a=f` / `a=a`）を `now_ms` の時点まで進める（T-092）。描く前に毎回 1 回呼ぶ。
+    /// 再生中のものがあれば次のフレームの時刻（同じ時計の ms）を返す。進んだ画像は世代が変わる
+    pub fn kitty_animation_tick(&mut self, now_ms: u64) -> Option<u64> {
+        let mut graphics: ffi::GhosttyKittyGraphics = ptr::null_mut();
+        let r = unsafe { ffi::ghostty_terminal_get(self.raw, ffi::GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &mut graphics as *mut _ as *mut c_void) };
+        if r != ffi::GHOSTTY_SUCCESS || graphics.is_null() {
+            return None;
+        }
+        let mut next = 0u64;
+        (unsafe { ffi::ghostty_kitty_graphics_animation_tick(graphics, now_ms, &mut next) } == ffi::GHOSTTY_SUCCESS).then_some(next)
+    }
+
     /// Kitty graphics の画像を引く。`generation` が [`ImagePlacement::generation`] と同じなら、同じ画素である。
     /// 無ければ（消された、画素がまだ届いていない）`None`。返す値の画素は端末の中を指すので、次に端末が変わるまで有効
     pub fn kitty_image(&self, id: u32) -> Option<KittyImage<'_>> {

@@ -725,6 +725,7 @@ unsafe extern "C" {
 
     // kitty_graphics.h
     pub fn ghostty_kitty_graphics_image(graphics: GhosttyKittyGraphics, image_id: u32) -> GhosttyKittyGraphicsImage;
+    pub fn ghostty_kitty_graphics_animation_tick(graphics: GhosttyKittyGraphics, now_ms: u64, next_ms: *mut u64) -> GhosttyResult;
     pub fn ghostty_kitty_graphics_image_get_multi(
         image: GhosttyKittyGraphicsImage,
         count: usize,

@@ -92,6 +92,8 @@ const TIMER_CURSOR_BLINK: usize = 2;
 const TIMER_AUTOSCROLL: usize = 3;
 /// 文字の点滅（SGR 5。T-112）のタイマー
 const TIMER_TEXT_BLINK: usize = 4;
+/// Kitty graphics のアニメーションの次のフレーム（T-092。1 回ごとに掛け直す）
+const TIMER_ANIMATION: usize = 5;
 /// 文字の点滅の半周期（ms。xterm の既定 600 ms に近い値）
 const TEXT_BLINK_MS: u32 = 600;
 /// マウスがウィンドウから出た（`TrackMouseEvent` の `TME_LEAVE`）。windows クレートでは Controls の feature にあるので値を書く
@@ -227,6 +229,9 @@ pub struct DebugInfo {
     /// 文字の点滅のタイマーが動いているか、今は見せている側か（T-112）
     pub text_blink_timer: bool,
     pub text_blink_on: bool,
+    /// Kitty graphics のアニメーションを進めた回数と、次のフレームの予定があるか（T-092）
+    pub animation_ticks: u64,
+    pub animation_playing: bool,
 }
 
 /// Lisp に渡す知らせ
@@ -839,6 +844,9 @@ struct App {
     /// 文字の点滅（SGR 5）のタイマーが動いている・今は見せている側か（T-112）
     text_blink_timer: bool,
     text_blink_on: bool,
+    /// Kitty graphics のアニメーションの次のフレームの時刻（`epoch` からの ms。T-092）と、進めた回数
+    animation_next: Option<u64>,
+    animation_ticks: u64,
     /// 点滅の回数（自動確認用）
     blink_ticks: u64,
     /// 前に描いたカーソルの位置（動いたら点滅をやり直して点ける）
@@ -951,6 +959,8 @@ impl App {
             blink_on: true,
             text_blink_timer: false,
             text_blink_on: true,
+            animation_next: None,
+            animation_ticks: 0,
             blink_ticks: 0,
             blink_pos: None,
             perf: Perf::new(),
@@ -1156,6 +1166,8 @@ impl App {
                     palette1: self.master.palette[1],
                     text_blink_timer: self.text_blink_timer,
                     text_blink_on: self.text_blink_on,
+                    animation_ticks: self.animation_ticks,
+                    animation_playing: self.animation_next.is_some(),
                     ..Default::default()
                 };
                 for p in &self.panes {
@@ -1567,6 +1579,12 @@ impl App {
                 }
                 term.set_hold_overscan(need_above, 0);
             }
+            // Kitty graphics のアニメーションを今の時刻まで進める（T-092。進んだ画像は世代が変わり、下で画素を写し直す）
+            let now_ms = self.epoch.elapsed().as_millis() as u64;
+            let next = term.kitty_animation_tick(now_ms);
+            if next.is_some() || self.animation_next.is_some() {
+                self.schedule_animation(now_ms, next);
+            }
             if hold.is_some() {
                 // 出力があったことは hold が終わってから反映する
                 self.output_pending |= output;
@@ -1734,6 +1752,47 @@ impl App {
     }
 
     /// 点滅のタイマーを要るときだけ動かす（T-035）。カーソルが動いたら点けてやり直す。描く前に呼ぶ
+    /// アニメーションの次のフレームの時刻にタイマーを掛ける（`None` なら止める。T-092）
+    fn schedule_animation(&mut self, now_ms: u64, next: Option<u64>) {
+        if next == self.animation_next {
+            return;
+        }
+        self.animation_next = next;
+        unsafe {
+            match next {
+                Some(t) => {
+                    SetTimer(Some(self.control), TIMER_ANIMATION, (t.saturating_sub(now_ms)).clamp(10, 60_000) as u32, None);
+                }
+                None => {
+                    let _ = KillTimer(Some(self.control), TIMER_ANIMATION);
+                }
+            }
+        }
+    }
+
+    /// アニメーションのフレームの時刻になった。見えているペインを描き直す（refresh の中で次のフレームへ進め、次のタイマーを掛ける）
+    fn animation_timer(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.control), TIMER_ANIMATION);
+        }
+        self.animation_next = None;
+        self.animation_ticks += 1;
+        // 画像を置いているペインだけ描き直す（画像が画面から消えても再生だけ続いていることがある）
+        let master_images = !self.master.images.is_empty();
+        for p in &mut self.panes {
+            let has = match &p.scrolled {
+                Some(s) if !matches!(p.position, Position::Follow) => !s.frame.images.is_empty(),
+                _ => master_images,
+            };
+            if p.visible() && has {
+                p.needs_draw = true;
+                p.needs_sync = true;
+            }
+        }
+        // 描かなくても refresh は呼ぶ（その中でアニメーションを進め、次のタイマーを掛ける）
+        self.refresh(false);
+    }
+
     /// 文字の点滅（SGR 5。T-112）のタイマーを、見えているペインに点滅の文字があるときだけ動かす
     fn update_text_blink(&mut self) {
         let any_visible = self.panes.iter().any(|p| p.visible());
@@ -2736,6 +2795,7 @@ extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
         WM_TIMER if wparam.0 == TIMER_CURSOR_BLINK => with_app(|a| a.blink_tick()).map(|_| LRESULT(0)),
         WM_TIMER if wparam.0 == TIMER_AUTOSCROLL => with_app(|a| a.autoscroll_tick()).map(|_| LRESULT(0)),
         WM_TIMER if wparam.0 == TIMER_TEXT_BLINK => with_app(|a| a.text_blink_tick()).map(|_| LRESULT(0)),
+        WM_TIMER if wparam.0 == TIMER_ANIMATION => with_app(|a| a.animation_timer()).map(|_| LRESULT(0)),
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             Some(LRESULT(0))
