@@ -124,6 +124,8 @@ pub enum ScrollAmount {
     Bottom,
     /// ホイールのノッチ（負は上。子 HWND が受けたときと同じ扱い。マウスの報告が有効ならアプリへ送る）
     Wheel(i32),
+    /// シェルのプロンプト（OSC 133）を N 個（負は上）。プロンプトの行をペインの一番上にする（T-119）
+    Prompt(i64),
 }
 
 /// Lisp からの頼みごと
@@ -268,6 +270,8 @@ pub enum Event {
     Hover(Option<String>),
     /// シェルから Emacs の関数を呼ぶ（OSC 51;E の中身。T-118）
     ShellCommand(String),
+    /// シェルがコマンドの終わりを知らせた（OSC 133;D の終了コード。T-119）
+    CommandEnd(Option<i32>),
 }
 
 /// Lisp に見せるペインの情報
@@ -1314,6 +1318,11 @@ impl App {
                     s.emit_from_app(Event::ShellCommand(c));
                 }
             }
+            SessionEvent::CommandEnd(code) => {
+                if let Some(s) = weak.upgrade() {
+                    s.emit_from_app(Event::CommandEnd(code));
+                }
+            }
             SessionEvent::Title | SessionEvent::Pwd | SessionEvent::Exited => {
                 post(control, WM_APP_SESSION, 0);
             }
@@ -2224,6 +2233,33 @@ impl App {
             return;
         }
         let Some(session) = self.session.clone() else { return };
+        // プロンプトへ（T-119）: 行に直してから下の「行へ」と同じに扱う。起点はペインの一番上の行（Ghostty の
+        // jump_to_prompt と同じ）。最後の 1 画面の中のプロンプトは一番上にできない（下の端を越える）ので、上へは画面の
+        // 外のプロンプトへ、下へは最後の画面に入ればいちばん下へ戻る
+        let amount = match amount {
+            ScrollAmount::Prompt(n) if n != 0 => {
+                let alt = session.lock().is_alternate_screen();
+                let Some(p) = self.panes.iter().find(|p| p.id == id) else { return };
+                let mut row = p.top_row(&session.lock(), alt);
+                let mut found = None;
+                for _ in 0..n.unsigned_abs() {
+                    match session.find_prompt(row, n < 0) {
+                        Some(r) => {
+                            row = r;
+                            found = Some(r);
+                        }
+                        None => break,
+                    }
+                }
+                match found {
+                    Some(r) => ScrollAmount::Lines(r - p.top_row(&session.lock(), alt)),
+                    // 下にもうプロンプトが無ければいちばん下へ。上に無ければ動かない
+                    None if n > 0 => ScrollAmount::Bottom,
+                    None => return,
+                }
+            }
+            other => other,
+        };
         {
             let term = session.lock();
             let alt = term.is_alternate_screen();
@@ -2240,7 +2276,7 @@ impl App {
                 ScrollAmount::Pages(n) => cur + n * (pr - 1).max(1),
                 ScrollAmount::Top => 0,
                 ScrollAmount::Bottom => max_t,
-                ScrollAmount::Wheel(_) => cur,
+                ScrollAmount::Wheel(_) | ScrollAmount::Prompt(_) => cur,
             }
             .clamp(0, max_t);
             if target >= max_t {

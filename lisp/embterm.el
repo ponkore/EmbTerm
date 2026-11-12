@@ -42,6 +42,8 @@
 ;;   （主フォントに無い文字に Windows のフォールバックより先に使う）。`text-scale-adjust' でバッファごとに拡大・縮小
 ;; - シェルから Emacs の関数を呼ぶ（T-118）: シェルが OSC 51;E を出すと `embterm-shell-commands' の関数を呼ぶ。
 ;;   シェル側の関数は etc/embterm.{ps1,bash,lua}（`embterm_cmd'・`embterm_find_file'・`embterm_dired'）
+;; - プロンプトの境界（T-119。OSC 133）: `C-c C-p' / `C-c C-n' で前後のプロンプトへ、`C-c C-o' で直前の出力をコピー、
+;;   終了コードをモードラインに。シェル側は同じ etc/embterm.* が印を出す
 
 ;;; Code:
 
@@ -62,6 +64,7 @@
 (declare-function embterm-module-reset-keyboard "embterm-module")
 (declare-function embterm-module-set-channel "embterm-module")
 (declare-function embterm-module-set-images "embterm-module")
+(declare-function embterm-module-last-output "embterm-module")
 (declare-function embterm-module-ack-notify "embterm-module")
 (declare-function embterm-module-send-string "embterm-module")
 (declare-function embterm-module-send-key "embterm-module")
@@ -331,6 +334,16 @@ Emacs の通知（`w32-notification-notify'）は消すまで通知領域にア�
 相対パスはそこから解決される。"
   :type '(alist :key-type string :value-type function))
 
+(defcustom embterm-show-exit-code t
+  "non-nil なら、直前のコマンドの終了コードが 0 でないときモードラインに出す（OSC 133;D。T-119）。"
+  :type 'boolean)
+
+(defcustom embterm-command-end-functions nil
+  "シェルがコマンドの終わりを知らせた（OSC 133;D）ときに呼ぶ関数（T-119）。
+引数は CODE（終了コード。シェルが知らせなければ nil）と BUFFER（端末のバッファ）。
+長いコマンドが終わったら知らせる、などに使う。"
+  :type 'hook)
+
 (defcustom embterm-show-link-on-hover t
   "non-nil なら、マウスの下のハイパーリンク（OSC 8）の URI をエコー領域に出す（T-101）。
 リンクには下線が引かれ、Ctrl+クリックで開く。"
@@ -437,6 +450,7 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 (defvar-local embterm--focused 'unknown "最後に module に伝えたフォーカスの状態。")
 (defvar-local embterm--exited nil "プロセスが終わったか。")
 (defvar-local embterm--progress nil "アプリの進捗（OSC 9;4）の (STATE . PERCENT)。無ければ nil（T-100）。")
+(defvar-local embterm--last-exit nil "直前のコマンドの終了コード（OSC 133;D。T-119）。")
 (defvar-local embterm--input-mode 'semi-char
   "入力モード。`semi-char'（キーを端末に送る）か `copy'（キーを Emacs に返し、スクロールバックごと写す）。")
 (defvar-local embterm--copy-window nil "copy モードに入ったときに選んでいたウィンドウ。")
@@ -655,6 +669,9 @@ DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'�
   "C-c C-\\" #'embterm-send-C-backslash
   "C-c C-j" #'embterm-semi-char-mode
   "C-c C-k" #'embterm-copy-mode
+  "C-c C-p" #'embterm-previous-prompt
+  "C-c C-n" #'embterm-next-prompt
+  "C-c C-o" #'embterm-copy-last-output
   "C-c C-y" #'embterm-yank)
 
 (define-derived-mode embterm-mode fundamental-mode "EmbTerm"
@@ -696,6 +713,8 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
 (defun embterm--mode-line ()
   (concat (if (eq embterm--input-mode 'copy) " [copy]" "")
           (when embterm--exited " [終了]")
+          (when (and embterm-show-exit-code (integerp embterm--last-exit) (/= embterm--last-exit 0))
+            (propertize (format " [exit %d]" embterm--last-exit) 'face 'error))
           (when (and embterm-show-progress embterm--progress) (embterm--progress-text))))
 
 (defun embterm--set-progress (state percent)
@@ -1013,6 +1032,7 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
             (`(link . ,uri) (funcall embterm-hyperlink-function uri))
             (`(hover . ,uri) (embterm--show-hover uri))
             (`(command . ,payload) (embterm--shell-command payload))
+            (`(command-end . ,code) (embterm--command-end code))
             (_ nil)))))))
 
 ;;;; バッファ名（T-080）
@@ -1169,6 +1189,14 @@ Emacs のフレームにフォーカスが無ければトースト（`embterm-no
           (condition-case err
               (save-current-buffer (apply fn args))
             (error (message "embterm: %s を呼べませんでした: %s" name (error-message-string err))))))))))
+
+(defun embterm--command-end (code)
+  "シェルがコマンドの終わりを知らせた（OSC 133;D。T-119）。CODE は終了コード（知らせなければ nil）。
+0 でなければモードラインに出し（`embterm-show-exit-code'）、`embterm-command-end-functions' を呼ぶ。"
+  (unless (equal code embterm--last-exit)
+    (setq embterm--last-exit code)
+    (force-mode-line-update))
+  (run-hook-with-args 'embterm-command-end-functions code (current-buffer)))
 
 (defvar embterm--hover-message nil "最後にエコー領域に出したリンクの文面（外れたとき、それが出ていれば消す）。")
 
@@ -1436,6 +1464,28 @@ KKP を求めたアプリが戻さずに終わり、そのアプリの子孫が�
   (let ((pane (embterm--pane-of (selected-window))))
     (when pane
       (embterm-module-scroll embterm--term (embterm--pane-id pane) kind n))))
+
+(defun embterm-previous-prompt (n)
+  "このウィンドウのペインを、N 個前のシェルのプロンプトまで遡る（プロンプトの行をペインの一番上にする。T-119）。
+シェルが OSC 133 でプロンプトの印を出しているとき（etc/embterm.ps1 など）だけ効く。"
+  (interactive "p")
+  (embterm--scroll-selected "prompt" (- n)))
+
+(defun embterm-next-prompt (n)
+  "このウィンドウのペインを、N 個後のシェルのプロンプトまで進める。無ければいちばん下へ戻る（T-119）。"
+  (interactive "p")
+  (embterm--scroll-selected "prompt" n))
+
+(defun embterm-copy-last-output ()
+  "直前のコマンドの出力を kill-ring（とクリップボード）へ入れる（T-119）。
+シェルが OSC 133 でプロンプトの印を出しているとき（etc/embterm.ps1 など）だけ効く。"
+  (interactive)
+  (embterm--require-term)
+  (let ((text (embterm-module-last-output embterm--term)))
+    (cond ((null text) (user-error "embterm: プロンプトの印（OSC 133）がありません。etc/embterm.ps1 などを読み込んでください"))
+          ((string-empty-p text) (message "embterm: 直前のコマンドは何も出力していません"))
+          (t (kill-new text)
+             (message "embterm: 直前の出力（%d 行）をコピーしました" (1+ (cl-count ?\n text)))))))
 
 (defun embterm-scroll-page-up ()
   "このウィンドウのペインを 1 ページ遡る（スクロールバック）。"

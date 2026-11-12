@@ -50,3 +50,36 @@ end
 nyagos.alias.embterm_dired = function(args)
     embterm_cmd("dired-other-window", full_path(args[1]))
 end
+
+-- --- プロンプトの境界（OSC 133。T-119） -----------------------------------------
+-- プロンプトの前に 133;D;終了コード（2 回目から）と 133;A、後に 133;B、コマンドを始めるときに 133;C（preexechook）。
+-- nyagos.prompt を包むので、starship などでプロンプトを決めた後で読み込む。
+if not EMBTERM_OSC133 then
+    EMBTERM_OSC133 = true
+    local original_prompt = nyagos.prompt
+    local count = 0
+    nyagos.prompt = function(...)
+        local pre = ""
+        if count > 0 then
+            pre = "\27]133;D;" .. tostring(nyagos.env.ERRORLEVEL or 0) .. "\7"
+        end
+        count = count + 1
+        io.write(pre .. "\27]133;A\7")
+        io.flush()
+        local r = original_prompt(...)
+        io.write("\27]133;B\7")
+        io.flush()
+        return r
+    end
+    local original_preexec = nyagos.preexechook
+    nyagos.preexechook = function(...)
+        -- フックの中の io には flush が無いことがある（nyagos がフックを別の Lua の状態で動かすため）
+        io.write("\27]133;C\7")
+        if io.flush then
+            io.flush()
+        end
+        if original_preexec then
+            return original_preexec(...)
+        end
+    end
+end

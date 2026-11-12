@@ -239,6 +239,7 @@ fn paste(term: &RefCell<Term>, text: String) -> Result<()> {
 }
 
 /// ペイン PANE をスクロールする。KIND は "lines"（N 行。負は上）、"pages"（N ページ）、"top"、"bottom"、
+/// "prompt"（シェルのプロンプトを N 個。OSC 133。T-119）、
 /// "wheel"（N ノッチ。子 HWND が受けたときと同じ扱い。マウスの報告が有効ならアプリへ）
 #[defun]
 fn scroll(term: &RefCell<Term>, pane: i64, kind: String, n: Option<i64>) -> Result<()> {
@@ -249,6 +250,7 @@ fn scroll(term: &RefCell<Term>, pane: i64, kind: String, n: Option<i64>) -> Resu
         "top" => ScrollAmount::Top,
         "bottom" => ScrollAmount::Bottom,
         "wheel" => ScrollAmount::Wheel(n as i32),
+        "prompt" => ScrollAmount::Prompt(n),
         _ => return Err(lisp_err(format!("知らない KIND: {kind}"))),
     };
     term.borrow().request(Request::Scroll { pane, amount });
@@ -273,6 +275,12 @@ fn selection(term: &RefCell<Term>) -> Result<Option<String>> {
 #[defun]
 fn reset_keyboard(term: &RefCell<Term>) -> Result<bool> {
     Ok(term.borrow().shared().session().is_some_and(|s| s.reset_keyboard()))
+}
+
+/// 直前のコマンドの出力（シェルの OSC 133 のプロンプトの印から求める。T-119）。印が足りなければ nil
+#[defun]
+fn last_output(term: &RefCell<Term>) -> Result<Option<String>> {
+    Ok(term.borrow().shared().session().and_then(|s| s.last_command_output()))
 }
 
 /// 選択を消す
@@ -578,6 +586,7 @@ fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Resu
             Event::Link(uri) => env.cons(env.intern("link")?, uri)?,
             Event::Hover(uri) => env.cons(env.intern("hover")?, uri)?,
             Event::ShellCommand(c) => env.cons(env.intern("command")?, c)?,
+            Event::CommandEnd(code) => env.cons(env.intern("command-end")?, code.map(|c| c as i64))?,
         });
     }
     let b = |v: bool| -> Result<Value<'e>> { v.into_lisp(env) };

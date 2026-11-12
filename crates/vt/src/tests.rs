@@ -454,6 +454,7 @@ struct Log {
     titles: Vec<String>,
     bells: usize,
     unknown: Vec<(String, bool)>,
+    command_ends: Vec<Option<i32>>,
 }
 
 struct Recorder(Arc<Mutex<Log>>);
@@ -467,6 +468,9 @@ impl Effects for Recorder {
     }
     fn title_changed(&mut self, title: &str) {
         self.0.lock().unwrap().titles.push(title.to_string());
+    }
+    fn command_end(&mut self, exit_code: Option<i32>) {
+        self.0.lock().unwrap().command_ends.push(exit_code);
     }
     fn unknown_osc(&mut self, content: &[u8], truncated: bool) {
         self.0.lock().unwrap().unknown.push((String::from_utf8_lossy(content).into_owned(), truncated));
@@ -1107,15 +1111,15 @@ fn default_cursor_style_and_decscusr() {
     t.set_default_cursor(CursorShape::Bar, true).unwrap();
     assert_eq!(cur(&t), (CursorShape::Bar, true));
     // アプリの DECSCUSR
-    t.vt_write(b"[2 q");
+    t.vt_write(b"\x1b[2 q");
     assert_eq!(cur(&t), (CursorShape::Block, false));
     t.set_default_cursor(CursorShape::Underline, false).unwrap();
     assert_eq!(cur(&t), (CursorShape::Block, false), "アプリが決めた形は既定を変えても残る");
-    t.vt_write(b"[3 q");
+    t.vt_write(b"\x1b[3 q");
     assert_eq!(cur(&t), (CursorShape::Underline, true));
-    t.vt_write(b"[0 q");
+    t.vt_write(b"\x1b[0 q");
     assert_eq!(cur(&t), (CursorShape::Underline, false), "CSI 0 q は既定へ戻す");
-    t.vt_write(b"[?12h");
+    t.vt_write(b"\x1b[?12h");
     assert_eq!(cur(&t), (CursorShape::Underline, true));
 }
 
@@ -1179,4 +1183,35 @@ fn unknown_osc_is_reported() {
     assert_eq!(log.unknown.len(), 2, "{:?}", log.unknown.iter().map(|(s, t)| (s.len(), *t)).collect::<Vec<_>>());
     assert_eq!(log.unknown[0], ("51;E\"find-file\" \"C:/あ b\"".to_string(), false));
     assert!(log.unknown[1].1, "長すぎるものは truncated");
+}
+
+#[test]
+fn semantic_prompts() {
+    // T-119: OSC 133 の A（プロンプト）・B（入力）・C（出力）・D（終わり）
+    let t = types();
+    check_struct!(t, "GhosttyTerminalSemanticPrompt", GhosttyTerminalSemanticPrompt, [kind, prompt_kind, has_exit_code, exit_code, command, error]);
+    check_enum(&t, "GhosttyRowSemanticPrompt", &[("NONE", GHOSTTY_ROW_SEMANTIC_NONE), ("PROMPT", GHOSTTY_ROW_SEMANTIC_PROMPT), ("PROMPT_CONTINUATION", GHOSTTY_ROW_SEMANTIC_PROMPT_CONTINUATION)]);
+    check_enum(&t, "GhosttyCellSemanticContent", &[("OUTPUT", GHOSTTY_CELL_SEMANTIC_OUTPUT), ("INPUT", GHOSTTY_CELL_SEMANTIC_INPUT), ("PROMPT", GHOSTTY_CELL_SEMANTIC_PROMPT)]);
+    check_enum(&t, "GhosttySemanticPromptKind", &[("PROMPT_START", GHOSTTY_SEMANTIC_PROMPT_PROMPT_START), ("INPUT_START", GHOSTTY_SEMANTIC_PROMPT_INPUT_START), ("OUTPUT_START", GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START), ("COMMAND_END", GHOSTTY_SEMANTIC_PROMPT_COMMAND_END)]);
+    let (mut t, log) = terminal(40, 10);
+    t.vt_write(b"\x1b]133;A\x07$ \x1b]133;B\x07echo hi\r\n\x1b]133;C\x07hi\r\nthere\r\n\x1b]133;D;3\x07");
+    t.vt_write(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(t.row_prompt(0), RowPrompt::Prompt);
+    assert_eq!(t.row_prompt(1), RowPrompt::None);
+    assert_eq!(t.row_prompt(3), RowPrompt::Prompt);
+    assert_eq!(t.cell_semantic(0, 0), CellSemantic::Prompt);
+    assert_eq!(t.cell_semantic(2, 0), CellSemantic::Input);
+    assert_eq!(t.cell_semantic(0, 1), CellSemantic::Output);
+    assert_eq!(t.text_rows(1, 2, true).as_deref(), Some("hi\nthere"));
+    assert_eq!(log.lock().unwrap().command_ends, vec![Some(3)]);
+}
+
+#[test]
+fn two_line_prompt_marks() {
+    // T-119: 2 行のプロンプト（starship など）。2 行目がプロンプトの「始め」と数えられないこと
+    let (mut t, _log) = terminal(40, 10);
+    t.vt_write(b"\x1b]133;A\x07dir info\r\n> \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07");
+    t.vt_write(b"\x1b]133;A\x07dir info\r\n> \x1b]133;B\x07");
+    let rows: Vec<RowPrompt> = (0..5).map(|y| t.row_prompt(y)).collect();
+    assert_eq!(rows, vec![RowPrompt::Prompt, RowPrompt::Continuation, RowPrompt::None, RowPrompt::Prompt, RowPrompt::Continuation]);
 }

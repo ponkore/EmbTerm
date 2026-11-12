@@ -124,6 +124,26 @@ pub trait Effects: Send {
     fn progress(&mut self, _state: ProgressState, _percent: Option<u8>) {}
     /// libghostty-vt が扱わない OSC（`ESC ]` と終端の間。番号を含む）。長すぎて切れたものは `truncated`（T-118）
     fn unknown_osc(&mut self, _content: &[u8], _truncated: bool) {}
+    /// シェルがコマンドの終わりを知らせた（OSC 133;D）。終了コードを知らせなければ `None`（T-119）
+    fn command_end(&mut self, _exit_code: Option<i32>) {}
+}
+
+/// 行のプロンプトの種別（OSC 133。T-119）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowPrompt {
+    None,
+    /// プロンプトの最初の行
+    Prompt,
+    /// 複数行のプロンプト・入力の続きの行
+    Continuation,
+}
+
+/// セルの種別（OSC 133。T-119）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellSemantic {
+    Output,
+    Input,
+    Prompt,
 }
 
 /// 進捗の状態（OSC 9;4。`GhosttyTerminalProgressState`）
@@ -300,6 +320,7 @@ impl Terminal {
             let progress: ffi::GhosttyTerminalProgressReportFn = cb_progress_report;
             let scheme: ffi::GhosttyTerminalColorSchemeFn = cb_color_scheme;
             let unknown: ffi::GhosttyTerminalUnknownSequenceFn = cb_unknown_sequence;
+            let semantic: ffi::GhosttyTerminalSemanticPromptFn = cb_semantic_prompt;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_BELL, bell as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, title as *const c_void))?;
@@ -313,6 +334,7 @@ impl Terminal {
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_COLOR_SCHEME, scheme as *const c_void))?;
             // 未知の OSC（OSC 51;E などの EmbTerm 独自のもの。T-118）。上限まで中身を取っておく
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE, unknown as *const c_void))?;
+            check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT, semantic as *const c_void))?;
             let max: usize = UNKNOWN_MAX_BYTES;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES, &max as *const usize as *const c_void))?;
         }
@@ -718,6 +740,48 @@ impl Terminal {
         }
     }
 
+    /// 画面の座標の行 `y` のプロンプトの種別（OSC 133。T-119）。行が無ければ [`RowPrompt::None`]
+    pub fn row_prompt(&self, y: u32) -> RowPrompt {
+        let Ok(r) = self.grid_ref(0, y) else { return RowPrompt::None };
+        let mut row: ffi::GhosttyRow = 0;
+        let mut v: c_int = 0;
+        let ok = unsafe {
+            ffi::ghostty_grid_ref_row(&r.0, &mut row) == ffi::GHOSTTY_SUCCESS
+                && ffi::ghostty_row_get(row, ffi::GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &mut v as *mut c_int as *mut c_void) == ffi::GHOSTTY_SUCCESS
+        };
+        match v {
+            ffi::GHOSTTY_ROW_SEMANTIC_PROMPT if ok => RowPrompt::Prompt,
+            ffi::GHOSTTY_ROW_SEMANTIC_PROMPT_CONTINUATION if ok => RowPrompt::Continuation,
+            _ => RowPrompt::None,
+        }
+    }
+
+    /// 画面の座標の (桁, 行) のセルの種別（OSC 133。T-119）。セルが無ければ [`CellSemantic::Output`]
+    pub fn cell_semantic(&self, x: u16, y: u32) -> CellSemantic {
+        let Ok(r) = self.grid_ref(x, y) else { return CellSemantic::Output };
+        let mut cell: ffi::GhosttyCell = 0;
+        let mut v: c_int = 0;
+        let ok = unsafe {
+            ffi::ghostty_grid_ref_cell(&r.0, &mut cell) == ffi::GHOSTTY_SUCCESS
+                && ffi::ghostty_cell_get(cell, ffi::GHOSTTY_CELL_DATA_SEMANTIC_CONTENT, &mut v as *mut c_int as *mut c_void) == ffi::GHOSTTY_SUCCESS
+        };
+        match v {
+            ffi::GHOSTTY_CELL_SEMANTIC_INPUT if ok => CellSemantic::Input,
+            ffi::GHOSTTY_CELL_SEMANTIC_PROMPT if ok => CellSemantic::Prompt,
+            _ => CellSemantic::Output,
+        }
+    }
+
+    /// 画面の座標の行 `first`〜`last`（含む）のテキスト（T-119）。`unwrap` なら端末が折り返した行をつなぐ。
+    /// **端末のロックを持っている間に呼ぶ**
+    pub fn text_rows(&self, first: u32, last: u32, unwrap: bool) -> Option<String> {
+        let (cols, _) = self.size();
+        let start = self.grid_ref(0, first).ok()?;
+        let end = self.grid_ref(cols.saturating_sub(1), last).ok()?;
+        let sel = ffi::GhosttySelection { start: start.0, end: end.0, rectangle: false };
+        self.format_with(Some(sel), unwrap).ok()
+    }
+
     /// 画面の座標の (桁, 行) のセルを、端末が変わっても追いかけて指し続ける（[`TrackedRef`]）。
     /// スクロールバックの上限で行が消えると、その [`TrackedRef`] は値を失う
     pub fn track(&self, x: u16, y: u32) -> Result<TrackedRef> {
@@ -827,6 +891,11 @@ impl Terminal {
             }
             check(r)?;
         }
+        self.format_with(selection.then_some(sel), unwrap).map(Some)
+    }
+
+    /// `selection` の範囲（`None` なら画面全体。スクロールバックを含む）を素のテキストにする
+    fn format_with(&self, selection: Option<ffi::GhosttySelection>, unwrap: bool) -> Result<String> {
         let mut f: ffi::GhosttyFormatter = ptr::null_mut();
         check(unsafe { ffi::ghostty_formatter_terminal_new(ptr::null(), &mut f, self.raw) })?;
         let result = (|| unsafe {
@@ -835,8 +904,8 @@ impl Terminal {
             let trim = true;
             check(ffi::ghostty_formatter_set(f, ffi::GHOSTTY_FORMATTER_OPT_TRIM, &trim as *const _ as *const c_void))?;
             check(ffi::ghostty_formatter_set(f, ffi::GHOSTTY_FORMATTER_OPT_UNWRAP, &unwrap as *const _ as *const c_void))?;
-            if selection {
-                check(ffi::ghostty_formatter_set(f, ffi::GHOSTTY_FORMATTER_OPT_SELECTION, &sel as *const _ as *const c_void))?;
+            if let Some(sel) = &selection {
+                check(ffi::ghostty_formatter_set(f, ffi::GHOSTTY_FORMATTER_OPT_SELECTION, sel as *const _ as *const c_void))?;
             }
             let mut buf: *mut u8 = ptr::null_mut();
             let mut len = 0usize;
@@ -850,7 +919,7 @@ impl Terminal {
             Ok(text)
         })();
         unsafe { ffi::ghostty_formatter_free(f) };
-        result.map(Some)
+        result
     }
 }
 
@@ -1208,6 +1277,16 @@ unsafe extern "C" fn cb_progress_report(_t: ffi::GhosttyTerminal, userdata: *mut
 /// `CSI 14/16/18/19 t` と mode 2048 の答え。桁数・行数は端末から、セルの画素は [`Terminal::resize`] で覚えた値
 /// 未知の OSC として取っておく中身の上限（バイト）。2048 までは追加の確保が無いが、長いパスを渡せるよう大きめにする（T-118）
 pub const UNKNOWN_MAX_BYTES: usize = 8192;
+
+/// シェル統合の知らせ（OSC 133。T-119）。コマンドの終わりだけ渡す
+unsafe extern "C" fn cb_semantic_prompt(_t: ffi::GhosttyTerminal, userdata: *mut c_void, event: *const ffi::GhosttyTerminalSemanticPrompt) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (Some(i), Some(e)) = (inner(userdata), event.as_ref()) else { return };
+        if e.kind == ffi::GHOSTTY_SEMANTIC_PROMPT_COMMAND_END {
+            i.effects.command_end(e.has_exit_code.then_some(e.exit_code));
+        }
+    }));
+}
 
 /// libghostty-vt が扱わないシーケンス（T-118）。OSC だけ渡す
 unsafe extern "C" fn cb_unknown_sequence(_t: ffi::GhosttyTerminal, userdata: *mut c_void, sequence: *const ffi::GhosttyTerminalUnknownSequence) {

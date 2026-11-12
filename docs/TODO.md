@@ -252,10 +252,11 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - シェル側: pwsh の関数 `embterm_cmd`（引数を `"…"` で包み `\` と `"` をエスケープ、パスは `[IO.Path]::GetFullPath($p, $PWD.ProviderPath)` で絶対パスにしてから送る）。リポジトリに `etc/` として置くか、`~/.emacs.d/etc/pwsh-emacs-shell.ps1` に足すかを決める。nyagos（lua）も
   - （2026-11-12）→ 上のとおり実装。シェル側はリポジトリの `etc/embterm.{ps1,bash,lua}`（配布物の `etc/` に入る）。`embterm_cmd`・`embterm_find_file`・`embterm_dired`。pwsh・Git Bash・nyagos で確かめた（日本語と空白のパス、`"` と `\`、許可していない関数・切れたもの・機能を切ったときは呼ばない）。docs/notes/t118-shell-integration.md、`test/shellcmd.el`
   - 試験: `test/osc-child.py` に OSC 51;E を足し、許可したものだけ呼ばれる・許可していないものは呼ばない・切れたものは捨てる・非 ASCII のパス、を確かめる
-- ⬜ **T-119** OSC 133（プロンプトの境界）を使う（ghostel の semantic prompt 相当）: 前後のプロンプトへ飛ぶ、直前のコマンドの出力を kill-ring / copy モードへ写す、終了コードを出す、など
+- ✅ **T-119** OSC 133（プロンプトの境界）を使う（ghostel の semantic prompt 相当）: 前後のプロンプトへ飛ぶ、直前のコマンドの出力を kill-ring / copy モードへ写す、終了コードを出す、など
   - libghostty-vt は OSC 133 を解釈してセルに `semantic_content` を持つ。C ABI でセルの種別・行の印を読めるか、コールバックがあるかを先に確かめる
   - シェル側: pwsh のプロンプトで `133;A`（プロンプトの始め）/ `133;B`（入力の始め）/ `133;C`（出力の始め）/ `133;D;終了コード` を出す（starship と並べる。T-118 と同じ初期化スクリプトに）
   - キー割り当て（例: `C-c C-p` / `C-c C-n`）は Emacs 側のスクロールバックの表示（T-037）とどう組むかを決める
+  - （2026-11-12）→ `C-c C-p` / `C-c C-n`（前後のプロンプトをペインの一番上に）、`C-c C-o`（直前の出力をコピー）、終了コードをモードラインに・`embterm-command-end-functions`。シェル側は `etc/embterm.{ps1,bash,lua}` に足した。pwsh・Git Bash・nyagos と、普段の starship の 2 行のプロンプトで確かめた。docs/notes/t118-shell-integration.md、`test/prompt.el`
 
 ## 7. ドキュメント（ある程度進んでから）
 

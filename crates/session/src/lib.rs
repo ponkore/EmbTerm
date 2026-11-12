@@ -51,6 +51,8 @@ pub enum Event {
     Progress { state: ProgressState, percent: Option<u8> },
     /// シェルから Emacs の関数を呼ぶ（OSC 51;E。T-118）。`51;E` の後ろの中身（`"関数名" "引数" ...`）
     ShellCommand(String),
+    /// シェルがコマンドの終わりを知らせた（OSC 133;D）。終了コード（知らせなければ `None`。T-119）
+    CommandEnd(Option<i32>),
 }
 
 /// 知らせを受ける関数。**PTY の読みのスレッドや閉じるスレッドから呼ばれる**（端末のロックを持ったままのこともある）。
@@ -242,6 +244,9 @@ impl Effects for TermEffects {
     }
     fn progress(&mut self, state: ProgressState, percent: Option<u8>) {
         (self.notify)(Event::Progress { state, percent });
+    }
+    fn command_end(&mut self, exit_code: Option<i32>) {
+        (self.notify)(Event::CommandEnd(exit_code));
     }
     fn unknown_osc(&mut self, content: &[u8], truncated: bool) {
         // OSC 51;E（vterm と同じ形）だけ。長すぎて切れたものは、引数が欠けているので捨てる
@@ -579,6 +584,34 @@ impl Session {
         term.vt_write(b"\x1b[<99u");
         *self.shared.kkp_owners.lock().unwrap_or_else(|e| e.into_inner()) = None;
         had
+    }
+
+    /// 直前のコマンドの出力（OSC 133 のプロンプトの印から求める。T-119）。今のプロンプトの 1 つ前のプロンプトの
+    /// 入力の後ろから、今のプロンプトの前の行まで。端末が折り返した行はつなぐ。プロンプトの印が 2 つ無ければ `None`
+    pub fn last_command_output(&self) -> Option<String> {
+        let term = self.lock();
+        let total = term.total_rows() as u32;
+        let prompts: Vec<u32> = (0..total).rev().filter(|&y| term.row_prompt(y) == et_vt::RowPrompt::Prompt).take(2).collect();
+        let [cur, prev] = prompts[..] else { return None };
+        // 出力の最初の行: 前のプロンプトの後ろで、プロンプトでも入力（折り返した入力・複数行の入力）でもない行
+        let start = (prev + 1..cur).find(|&y| {
+            term.row_prompt(y) == et_vt::RowPrompt::None && term.cell_semantic(0, y) == et_vt::CellSemantic::Output
+        });
+        let Some(start) = start else { return Some(String::new()) };
+        let text = term.text_rows(start, cur - 1, true)?;
+        Some(text.trim_end_matches(['\n', ' ']).to_string())
+    }
+
+    /// プロンプトの行を探す（T-119）。`from` から上（`up`）か下へ、`from` を含まずに最初のプロンプトの行。無ければ `None`
+    pub fn find_prompt(&self, from: i64, up: bool) -> Option<i64> {
+        let term = self.lock();
+        let total = term.total_rows() as i64;
+        let is_prompt = |y: i64| term.row_prompt(y as u32) == et_vt::RowPrompt::Prompt;
+        if up {
+            (0..from.min(total)).rev().find(|&y| is_prompt(y))
+        } else {
+            ((from + 1).max(0)..total).find(|&y| is_prompt(y))
+        }
     }
 
     /// PTY に書く（待たない）

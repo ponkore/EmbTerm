@@ -413,6 +413,32 @@ pub const GHOSTTY_TERMINAL_OPT_MODE: c_int = 35;
 pub const GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK: c_int = 41;
 pub const GHOSTTY_TERMINAL_OPT_RENDER_HOLD: c_int = 42;
 pub const GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE: c_int = 36;
+pub const GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT: c_int = 43;
+
+/// terminal.h のシェル統合（OSC 133。T-119）
+pub const GHOSTTY_SEMANTIC_PROMPT_PROMPT_START: c_int = 1;
+pub const GHOSTTY_SEMANTIC_PROMPT_INPUT_START: c_int = 2;
+pub const GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START: c_int = 3;
+pub const GHOSTTY_SEMANTIC_PROMPT_COMMAND_END: c_int = 4;
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GhosttyTerminalSemanticPrompt {
+    pub kind: c_int,
+    pub prompt_kind: c_int,
+    pub has_exit_code: bool,
+    pub exit_code: i32,
+    pub command: GhosttyString,
+    pub error: GhosttyString,
+}
+/// screen.h の行・セルの種別（OSC 133。T-119）
+pub const GHOSTTY_ROW_DATA_SEMANTIC_PROMPT: c_int = 6;
+pub const GHOSTTY_ROW_SEMANTIC_NONE: c_int = 0;
+pub const GHOSTTY_ROW_SEMANTIC_PROMPT: c_int = 1;
+pub const GHOSTTY_ROW_SEMANTIC_PROMPT_CONTINUATION: c_int = 2;
+pub const GHOSTTY_CELL_DATA_SEMANTIC_CONTENT: c_int = 9;
+pub const GHOSTTY_CELL_SEMANTIC_OUTPUT: c_int = 0;
+pub const GHOSTTY_CELL_SEMANTIC_INPUT: c_int = 1;
+pub const GHOSTTY_CELL_SEMANTIC_PROMPT: c_int = 2;
 pub const GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES: c_int = 37;
 
 /// terminal.h の未知のシーケンス（T-118）
@@ -663,6 +689,9 @@ pub type GhosttyTerminalDesktopNotificationFn = unsafe extern "C" fn(
     notification: *const GhosttyTerminalDesktopNotification,
 );
 /// `CSI ? 996 n`（配色の問い合わせ）に答える。`out` は GhosttyColorScheme（T-102）
+/// シェル統合の知らせ（OSC 133。T-119）
+pub type GhosttyTerminalSemanticPromptFn =
+    unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, event: *const GhosttyTerminalSemanticPrompt);
 /// 未知のシーケンス（APC・OSC）を受ける（T-118）
 pub type GhosttyTerminalUnknownSequenceFn =
     unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, sequence: *const GhosttyTerminalUnknownSequence);
@@ -722,6 +751,7 @@ unsafe extern "C" {
 
     // grid_ref.h、screen.h（行）
     pub fn ghostty_grid_ref_row(grid_ref: *const GhosttyGridRef, out_row: *mut GhosttyRow) -> GhosttyResult;
+    pub fn ghostty_grid_ref_cell(grid_ref: *const GhosttyGridRef, out_cell: *mut GhosttyCell) -> GhosttyResult;
     pub fn ghostty_row_get(row: GhosttyRow, data: c_int, out: *mut c_void) -> GhosttyResult;
     pub fn ghostty_grid_ref_hyperlink_uri(
         grid_ref: *const GhosttyGridRef,

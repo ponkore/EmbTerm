@@ -47,3 +47,59 @@
   読まない**（試験では `LANG=C.UTF-8` で起動。ふだんは設定で入れる）
 - nyagos: `embterm_cmd record nyagos あい`
 - WSL の bash は確かめていない（`wslpath -w` の経路）
+
+## 2. T-119 プロンプトの境界（OSC 133）
+
+### 2.1 何ができるか
+
+| キー / 設定 | 中身 |
+|---|---|
+| `C-c C-p` / `C-c C-n`（`embterm-previous-prompt` / `embterm-next-prompt`） | 前 / 後のシェルのプロンプトの行をペインの一番上にする。前置引数で N 個 |
+| `C-c C-o`（`embterm-copy-last-output`） | 直前のコマンドの出力を kill-ring（とクリップボード）へ。端末が折り返した行はつなぐ |
+| `embterm-show-exit-code`（既定 t） | 直前のコマンドの終了コードが 0 でなければモードラインに ` [exit 3]` |
+| `embterm-command-end-functions` | コマンドが終わったら CODE（終了コード。無ければ nil）と BUFFER で呼ぶ（長いコマンドが終わったら知らせる、など） |
+
+### 2.2 仕組み
+
+- libghostty-vt は OSC 133 を解釈し、**行**（プロンプトの最初の行 / 続きの行）と**セル**（出力 / 入力 / プロンプト）に印を付け、
+  コマンドの終わり（133;D）をコールバック（`GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT`）で知らせる。C ABI で読める
+  （`ghostty_grid_ref_row` + `GHOSTTY_ROW_DATA_SEMANTIC_PROMPT`、`ghostty_grid_ref_cell` + `GHOSTTY_CELL_DATA_SEMANTIC_CONTENT`）
+- **前後のプロンプト**: 起点は**ペインの一番上の行**（Ghostty の `jump_to_prompt` と同じ）。最後の 1 画面の中のプロンプトは一番上にできない
+  （下の端を越える）ので、上へは画面の外のプロンプトへ移り、下へは最後の画面に入ればいちばん下（追いかける状態）へ戻る。
+  最初の版は「下を追っているときは今のプロンプトを起点」にしていたが、目標が最後の画面の中にあると下の端で止まり、押しても動かなかった
+- **直前の出力**: いちばん下から 2 つのプロンプトの行を探し、前のプロンプトの後ろで、プロンプトでも入力（折り返した入力・複数行の入力）でもない
+  最初の行から、今のプロンプトの前の行まで（`Session::last_command_output`）
+- 2 行のプロンプト（starship など）の 2 行目は「続きの行」と印付けされ、プロンプトの始めとは数えない（単体テスト `two_line_prompt_marks`）
+- 再配布版の ConPTY（1.25）は OSC 133 をそのまま流す（PSReadLine の行の描き直しがあっても、印は正しい行に付いた）
+
+### 2.3 シェル側（`etc/` の 3 つに足した）
+
+| シェル | A（プロンプトの前）・B（後） | C（コマンドの始め） | D（終わり・終了コード） |
+|---|---|---|---|
+| pwsh | `prompt` を包む | PSReadLine の Enter のキーハンドラで `AcceptLine` の後 | 次の `prompt` の始め（`$?` / `$LASTEXITCODE`） |
+| bash | `PS1` の前後（`\[ \]`） | `PS0`（bash 4.4〜） | `PROMPT_COMMAND` の先頭（`$?` を保つ） |
+| nyagos | `nyagos.prompt` を包む（`io.write`） | `nyagos.preexechook`（**フックの中の `io` には `flush` が無いことがある**） | 次のプロンプトの始め（`ERRORLEVEL`） |
+
+- どれも**プロンプトを決めた後で読み込む**（starship などの後）。2 回読み込んでも包み直さない
+- pwsh の Enter のキーハンドラは、利用者が自分で Enter を割り当てていれば上書きする（EmbTerm の中だけ）
+
+### 2.4 確かめたこと（`test/prompt.el`）
+
+- pwsh: 出力が 1 画面より長いコマンドを 2 つ（a・b）と短いもの（last-out）を流し、`C-c C-p` で b → a、`C-c C-n` で b → いちばん下。
+  直前の出力は `last-out-1\nlast-out-2`（`C-c C-o` で kill-ring へ）。`cmd /c exit 3` で終了コード 3 とモードラインの `[exit 3]`、
+  次の成功で消える。出力の無いコマンドの直前の出力は空
+- Git Bash: 直前の出力 `b1\nb2`、`false` で終了コード 1
+- nyagos: 直前の出力 `n1`
+- 利用者の普段の pwsh の初期化（`~/.emacs.d/etc/pwsh-emacs-shell.ps1`。starship の 2 行のプロンプトと OSC 7）に重ねても、直前の出力と終了コードが取れた
+  （その場限りの確認）
+
+## 3. 使い始めるには（利用者の作業）
+
+`~/.emacs.d/etc/pwsh-emacs-shell.ps1` の最後（starship の後）に足す:
+
+```powershell
+if ($env:TERM_PROGRAM -eq 'EmbTerm') { . 'C:/Apps/embterm/etc/embterm.ps1' }
+```
+
+nyagos は `~/.config/nyagos/nyagos.lua` のプロンプトの設定の後に
+`if nyagos.env.TERM_PROGRAM == "EmbTerm" then dofile("C:/Apps/embterm/etc/embterm.lua") end`。

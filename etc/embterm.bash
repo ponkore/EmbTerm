@@ -44,3 +44,22 @@ embterm_find_file() {
 embterm_dired() {
     embterm_cmd dired-other-window "$(embterm_path "${1:-.}")"
 }
+
+# --- プロンプトの境界（OSC 133。T-119） -----------------------------------------
+# プロンプトの前に 133;D;終了コード（2 回目から）、PS1 の前後に 133;A / 133;B、コマンドを始めるときに 133;C（PS0。bash 4.4〜）。
+# PS1 を決めた後で読み込む。2 回読み込んでも重ねない。
+if [ -z "$__embterm_osc133" ]; then
+    __embterm_osc133=1
+    __embterm_prompt_count=0
+    __embterm_precmd() {
+        local rc=$?
+        if [ "$__embterm_prompt_count" -gt 0 ]; then
+            printf '\033]133;D;%s\007' "$rc"
+        fi
+        __embterm_prompt_count=$((__embterm_prompt_count + 1))
+        return $rc
+    }
+    PROMPT_COMMAND="__embterm_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+    PS1='\[\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'
+    PS0='\e]133;C\a'"$PS0"
+fi

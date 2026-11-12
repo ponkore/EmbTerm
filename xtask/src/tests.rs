@@ -224,6 +224,7 @@ const EMACS_TESTS: &[EmacsTest] = &[
     EmacsTest { name: "idle", file: "idle.el", log: "target/t104/idle-notify.log", default: true },
     EmacsTest { name: "bigimage", file: "bigimage.el", log: "target/t105/bigimage.log", default: true },
     EmacsTest { name: "shellcmd", file: "shellcmd.el", log: "target/t118/shellcmd.log", default: true },
+    EmacsTest { name: "prompt", file: "prompt.el", log: "target/t119/prompt.log", default: true },
     EmacsTest { name: "kitty", file: "kitty.el", log: "target/t088/emacs/kitty.log", default: true },
     EmacsTest { name: "close", file: "close.el", log: "target/t054/close.log", default: true },
     EmacsTest { name: "cleanup", file: "cleanup.sh", log: "target/t041/cleanup.log", default: true },
