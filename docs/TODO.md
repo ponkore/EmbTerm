@@ -326,7 +326,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-109** 子の環境変数を Emacs の `process-environment` から作る（2026-11-11）→ 起動時の環境からの差分（設定・削除）を module に渡す。`setenv` が子に届く（`make-process` と同じ）。`setenv` のユニバイトの値は `locale-coding-system` で戻す。`test/env.el`
 - ✅ **T-110** コマンド・作業ディレクトリ・環境・バッファ名を指定して開く `embterm-run`（2026-11-11）→ `(embterm-run COMMAND &key DIRECTORY ENVIRONMENT NAME DISPLAY)`。`my:claude-term` の置き換え（T-059）に使う
 - ✅ **T-111** 普段使いの置き場に入れる `cargo xtask install [DIR]`（2026-11-11）→ 既定 `C:\Apps\embterm`。使用中の conpty.dll / OpenConsole.exe / exe は `.old-<時刻>` に退避して入れ替える。`target/dist` を普段の Emacs に読ませると dist と試験が上書きに失敗するため
-- ⬜ **T-112** 文字の点滅（SGR 5）を描く。カーソルの点滅（T-035）と同じタイマーで（T-055 で見つけた。低）
+- ✅ **T-112** 文字の点滅（SGR 5）を描く。カーソルの点滅（T-035）と同じタイマーで（T-055 で見つけた。低）（2026-11-12）→ 点滅の文字が見えているときだけ 600 ms ごとに切り替える（カーソルとは別のタイマー）。docs/notes/t078-tests.md
 - ⬜ **T-113** `CSI 0 S` / `CSI 0 T` を libghostty-vt が 1 行として扱わない（何もしない）件を上流に知らせるか決める（T-055）
 - ✅ **T-114** vttest の自動確認を回帰テストにする（T-078 と合わせる。T-055 の道具はリポジトリに入れていない）（2026-11-12）→ T-055 で合格した 38 画面を `cargo xtask test-screens` のケースにした。期待値は T-055 で見て確かめた画面と一致。docs/notes/t078-tests.md
 - ⬜ **T-115** Windows Terminal と vttest を手で見比べる（DECCOLM・倍幅の行。T-055 では自動の比較を省いた）

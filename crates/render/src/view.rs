@@ -18,11 +18,13 @@ pub struct FrameView {
     pub show_cursor: bool,
     /// マウスの下にあるハイパーリンク（OSC 8）の範囲。ペインの (行, 始めの桁, 終わりの桁（含まない）)。下線を引く（T-101）
     pub hover: Option<(u16, u16, u16)>,
+    /// 点滅（SGR 5）の文字を消している（点滅の「消え」の側。T-112）
+    pub blink_off: bool,
 }
 
 impl FrameView {
     /// フレーム全体を描く（embterm.exe 用）
     pub fn whole(frame: &Frame) -> Self {
-        Self { top: 0, cols: frame.cols, rows: frame.rows, show_cursor: true, hover: None }
+        Self { top: 0, cols: frame.cols, rows: frame.rows, show_cursor: true, hover: None, blink_off: false }
     }
 }

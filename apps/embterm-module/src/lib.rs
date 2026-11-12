@@ -397,7 +397,7 @@ fn link_at(term: &RefCell<Term>, pane: i64, x: i64, y: i64) -> Result<Option<Str
 
 /// 描画とカーソルの状態の plist（UI スレッドに頼んで最大 2 秒待つ。デバッグ・自動確認用）。
 /// `(:blink-timer :blink-on :blink-ticks :full-draws :partial-draws :cursor-shape :cursor-blinking :cursor-visible
-/// :foreground :background :palette1 :cell :padding :hover)`
+/// :foreground :background :palette1 :cell :padding :text-blink-timer :text-blink-on :hover)`
 #[defun]
 fn debug_info<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -431,6 +431,10 @@ fn debug_info<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
         env.cons(i.cell.0 as i64, i.cell.1 as i64)?,
         env.intern(":padding")?,
         (i.padding as i64).into_lisp(env)?,
+        env.intern(":text-blink-timer")?,
+        b(i.text_blink_timer)?,
+        env.intern(":text-blink-on")?,
+        b(i.text_blink_on)?,
         env.intern(":hover")?,
         match i.hover {
             Some((r, s, e)) => env.list((r as i64, s as i64, e as i64))?,

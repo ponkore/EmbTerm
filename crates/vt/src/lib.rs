@@ -1369,6 +1369,8 @@ pub trait StyleExt {
     fn faint(&self) -> bool;
     fn inverse(&self) -> bool;
     fn invisible(&self) -> bool;
+    /// 点滅（SGR 5。T-112）
+    fn blink(&self) -> bool;
     fn strikethrough(&self) -> bool;
     fn overline(&self) -> bool;
     fn underline(&self) -> Underline;
@@ -1388,6 +1390,9 @@ impl StyleExt for Style {
     }
     fn inverse(&self) -> bool {
         self.flags & ffi::GHOSTTY_STYLE_FLAG_INVERSE != 0
+    }
+    fn blink(&self) -> bool {
+        self.flags & ffi::GHOSTTY_STYLE_FLAG_BLINK != 0
     }
     fn invisible(&self) -> bool {
         self.flags & ffi::GHOSTTY_STYLE_FLAG_INVISIBLE != 0

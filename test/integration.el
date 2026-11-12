@@ -85,6 +85,7 @@
 
 (defvar it-notes nil)
 (defvar it-progress nil)
+(defvar it-blink-phase nil "文字の点滅の相（T-112）。")
 (defvar it-hovers nil "`embterm--show-hover' が受けた URI（T-101）。")
 (advice-add 'embterm--show-hover :before (lambda (uri) (push uri it-hovers)))
 (defvar it-bells 0)
@@ -473,7 +474,35 @@
                         (seq-every-p (lambda (b) (<= (string-width (buffer-name b)) 44)) (embterm--live-buffers)))
               (it-frame-png "frame-end.png")
               (kill-buffer it-b)
-              (kill-buffer it-p)))
+              (kill-buffer it-p)
+              (switch-to-buffer it-a)
+              (it-run-child "osc" "\\e[2J\\e[1;1Hplain \\e[5mBLINKING\\e[25m plain")))
+    (2.0 "T-112: 文字の点滅（SGR 5）"
+         . ,(lambda ()
+              (let ((i (with-current-buffer it-a (embterm-module-debug-info embterm--term))))
+                (it-check "点滅の文字があればタイマーが動く" (plist-get i :text-blink-timer) (format "%S" i)))
+              ;; 1.5 秒の間、100 ms ごとに相を記録し、見せる側と消す側の画面を 1 枚ずつ撮る
+              (setq it-blink-phase nil)
+              (let ((n 0) timer)
+                (setq timer
+                      (run-at-time 0 0.1
+                                   (lambda ()
+                                     (let ((on (plist-get (with-current-buffer it-a (embterm-module-debug-info embterm--term))
+                                                          :text-blink-on)))
+                                       (unless (memq (if on 'on 'off) it-blink-phase)
+                                         (push (if on 'on 'off) it-blink-phase)
+                                         (with-current-buffer it-a
+                                           (embterm-screenshot (expand-file-name (format "blink-%s.png" (if on "on" "off")) it-out)))))
+                                     (when (> (cl-incf n) 15) (cancel-timer timer))))))))
+    (2.0 "点滅の相"
+         . ,(lambda ()
+              (it-check "見せる / 消すが切り替わる" (and (memq 'on it-blink-phase) (memq 'off it-blink-phase)) (format "%S" it-blink-phase))
+              (it-type "cls" 'return)))
+    (1.5 "点滅の文字を消した"
+         . ,(lambda ()
+              (let ((i (with-current-buffer it-a (embterm-module-debug-info embterm--term))))
+                (it-check "点滅の文字が無くなればタイマーは止まり、見せる側に戻る"
+                          (and (not (plist-get i :text-blink-timer)) (plist-get i :text-blink-on)) (format "%S" i)))))
     (1.0 "終わり"
          . ,(lambda ()
               (it-log "OK の数: %d / NG の数: %d" it-ok it-ng)

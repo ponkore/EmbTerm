@@ -649,7 +649,12 @@ impl Renderer {
             self.row_colors(frame, row, fy, y, ctx, &mut fgs, &mut bgs);
             for x in 0..cols {
                 let c = &row[x];
-                if matches!(c.wide, Wide::SpacerTail | Wide::SpacerHead) || c.is_blank() || c.style.invisible() || c.ch == PLACEHOLDER {
+                if matches!(c.wide, Wide::SpacerTail | Wide::SpacerHead)
+                    || c.is_blank()
+                    || c.style.invisible()
+                    || (view.blink_off && c.style.blink())
+                    || c.ch == PLACEHOLDER
+                {
                     continue;
                 }
                 let si = style_index(c.bold(), c.italic());

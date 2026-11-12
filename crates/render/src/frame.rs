@@ -114,6 +114,11 @@ impl Frame {
         &self.cells[y as usize * self.cols as usize + x as usize]
     }
 
+    /// 点滅（SGR 5）の文字があるか（T-112。点滅のタイマーを動かすか決める）
+    pub fn has_blink(&self) -> bool {
+        self.cells.iter().any(|c| c.style.blink() && !c.is_blank())
+    }
+
     pub fn row(&self, y: u16) -> &[Cell] {
         let c = self.cols as usize;
         &self.cells[y as usize * c..(y as usize + 1) * c]

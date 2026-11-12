@@ -90,6 +90,10 @@ const TIMER_RENDER_HOLD: usize = 1;
 const TIMER_CURSOR_BLINK: usize = 2;
 /// 選択のドラッグがペインの上下の外に出ている間、ペインをスクロールするタイマー（T-084）
 const TIMER_AUTOSCROLL: usize = 3;
+/// 文字の点滅（SGR 5。T-112）のタイマー
+const TIMER_TEXT_BLINK: usize = 4;
+/// 文字の点滅の半周期（ms。xterm の既定 600 ms に近い値）
+const TEXT_BLINK_MS: u32 = 600;
 /// マウスがウィンドウから出た（`TrackMouseEvent` の `TME_LEAVE`）。windows クレートでは Controls の feature にあるので値を書く
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// 自動スクロールの間隔（ms）。1 回に動かす行数は外へ出た距離で増やす
@@ -220,6 +224,9 @@ pub struct DebugInfo {
     pub padding: u32,
     /// 下線を引いているリンクの範囲（ペインの行, 始めの桁, 終わりの桁。T-101）
     pub hover: Option<(u16, u16, u16)>,
+    /// 文字の点滅のタイマーが動いているか、今は見せている側か（T-112）
+    pub text_blink_timer: bool,
+    pub text_blink_on: bool,
 }
 
 /// Lisp に渡す知らせ
@@ -829,6 +836,9 @@ struct App {
     hover_uri: Option<String>,
     /// 点滅でカーソルが点いているか（タイマーが止まっているときは常に true）
     blink_on: bool,
+    /// 文字の点滅（SGR 5）のタイマーが動いている・今は見せている側か（T-112）
+    text_blink_timer: bool,
+    text_blink_on: bool,
     /// 点滅の回数（自動確認用）
     blink_ticks: u64,
     /// 前に描いたカーソルの位置（動いたら点滅をやり直して点ける）
@@ -939,6 +949,8 @@ impl App {
             autoscroll: None,
             hover_uri: None,
             blink_on: true,
+            text_blink_timer: false,
+            text_blink_on: true,
             blink_ticks: 0,
             blink_pos: None,
             perf: Perf::new(),
@@ -1142,6 +1154,8 @@ impl App {
                     foreground: self.master.foreground,
                     background: self.master.background,
                     palette1: self.master.palette[1],
+                    text_blink_timer: self.text_blink_timer,
+                    text_blink_on: self.text_blink_on,
                     ..Default::default()
                 };
                 for p in &self.panes {
@@ -1642,6 +1656,7 @@ impl App {
         self.perf.frame_update.add(t_unlocked.elapsed());
         self.publish_cursor();
         self.update_blink();
+        self.update_text_blink();
         let mut drew_follow = false;
         for i in 0..self.panes.len() {
             let p = &self.panes[i];
@@ -1719,6 +1734,46 @@ impl App {
     }
 
     /// 点滅のタイマーを要るときだけ動かす（T-035）。カーソルが動いたら点けてやり直す。描く前に呼ぶ
+    /// 文字の点滅（SGR 5。T-112）のタイマーを、見えているペインに点滅の文字があるときだけ動かす
+    fn update_text_blink(&mut self) {
+        let any_visible = self.panes.iter().any(|p| p.visible());
+        let want = any_visible
+            && (self.master.has_blink() || self.panes.iter().any(|p| p.visible() && p.scrolled.as_ref().is_some_and(|s| s.frame.has_blink())));
+        if want && !self.text_blink_timer {
+            self.text_blink_timer = true;
+            unsafe {
+                SetTimer(Some(self.control), TIMER_TEXT_BLINK, TEXT_BLINK_MS, None);
+            }
+        } else if !want && self.text_blink_timer {
+            self.text_blink_timer = false;
+            unsafe {
+                let _ = KillTimer(Some(self.control), TIMER_TEXT_BLINK);
+            }
+            if !self.text_blink_on {
+                self.text_blink_on = true;
+                for p in &mut self.panes {
+                    p.needs_draw = true;
+                }
+            }
+        }
+    }
+
+    /// 文字の点滅のタイマー: 見せる / 消すを切り替えて、点滅の文字があるペインを描き直す
+    fn text_blink_tick(&mut self) {
+        self.text_blink_on = !self.text_blink_on;
+        let master_blink = self.master.has_blink();
+        for p in &mut self.panes {
+            let has = match &p.scrolled {
+                Some(s) if !matches!(p.position, Position::Follow) => s.frame.has_blink(),
+                _ => master_blink,
+            };
+            if p.visible() && has {
+                p.needs_draw = true;
+            }
+        }
+        self.refresh(false);
+    }
+
     fn update_blink(&mut self) {
         let interval = unsafe { GetCaretBlinkTime() };
         // 0xFFFFFFFF（INFINITE）は「Windows の設定で点滅しない」
@@ -1799,12 +1854,13 @@ impl App {
         let focused = self.focused && self.selected == Some(p.id);
         // 点滅で消えているときはカーソルを描かない（フォーカスの無いペインは枠のまま点滅しない）
         let show_cursor = !(focused && self.blink_timer && !self.blink_on);
-        FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor, hover: p.hover }
+        FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor, hover: p.hover, blink_off: !self.text_blink_on }
     }
 
     /// ペインの今の中身を描く
     fn draw_pane(&mut self, i: usize, capture: Option<&std::path::Path>) -> bool {
         let alt = self.alt_screen;
+        let text_blink_on = self.text_blink_on;
         let focused = self.focused && self.selected == Some(self.panes[i].id);
         let mut lost_device = false;
         let result = {
@@ -1825,10 +1881,17 @@ impl App {
             let result = if follows {
                 // 追っているペイン: 端末の下の端をペインの下の端に揃える（上に足りなければ空き）
                 let show_cursor = !(focused && self.blink_timer && !self.blink_on);
-                let view = FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor, hover: pane.hover };
+                let view = FrameView {
+                    top: self.master.rows as i32 - rows as i32,
+                    cols,
+                    rows,
+                    show_cursor,
+                    hover: pane.hover,
+                    blink_off: !text_blink_on,
+                };
                 v.renderer.draw_view(&self.master, &view, focused, capture)
             } else if let Some(s) = &pane.scrolled {
-                let view = FrameView { top: s.top, cols, rows, show_cursor: false, hover: pane.hover };
+                let view = FrameView { top: s.top, cols, rows, show_cursor: false, hover: pane.hover, blink_off: !text_blink_on };
                 v.renderer.draw_view(&s.frame, &view, focused, capture)
             } else {
                 Ok(())
@@ -2672,6 +2735,7 @@ extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
         }
         WM_TIMER if wparam.0 == TIMER_CURSOR_BLINK => with_app(|a| a.blink_tick()).map(|_| LRESULT(0)),
         WM_TIMER if wparam.0 == TIMER_AUTOSCROLL => with_app(|a| a.autoscroll_tick()).map(|_| LRESULT(0)),
+        WM_TIMER if wparam.0 == TIMER_TEXT_BLINK => with_app(|a| a.text_blink_tick()).map(|_| LRESULT(0)),
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             Some(LRESULT(0))
