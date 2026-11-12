@@ -208,8 +208,8 @@
 
 ## 4. 機能
 
-- ⬜ **T-032** リサイズ（ウィンドウの大きさ → 桁数・行数 → ConPTY）と reflow
-- ⬜ **T-033** フォントの設定とフォールバック（日本語、Nerd Font のアイコン）
+- ✅ **T-032** リサイズ（ウィンドウの大きさ → 桁数・行数 → ConPTY）と reflow（2026-11-12）→ 足りていた。pwsh で狭める・広げる・続けざまに 20 回変える・縦に縮めて戻す、のどれでも折り返し直され、中身が欠けず、二重に出ず、アプリから見た大きさも一致。縦に戻すと空きが下に残るのは `resize_pull_scrollback = false` の想定どおり。docs/notes/t032-features.md、`test/resize.el`
+- ✅ **T-033** フォントの設定とフォールバック（日本語、Nerd Font のアイコン）（2026-11-12）→ `embterm-font-fallback-families`（主フォントに無い文字に Windows のフォールバックより先に使う。`IDWriteFontFallbackBuilder`）、`embterm-font-family` に候補のリスト、`text-scale-adjust` でバッファごとに拡大・縮小。合字はしない。docs/notes/t032-features.md、`test/font.el`
 - ✅ **T-034** 色とテーマ（2026-11-11）→ `embterm-follow-theme`（既定 t）で Emacs のテーマ（`default`・`cursor`・`region`・`ansi-color-*`）に追従し、テーマの切り替えで全端末に反映。アプリが OSC で変えた色は尊重。docs/notes/t034-integration.md
 - ✅ **T-035** カーソル（2026-11-11）→ `embterm-cursor-style`・`embterm-cursor-blink`。アプリの DECSCUSR を優先。点滅は選択中で見えていてフォーカスのあるペインだけ、カーソルのセルだけ描き直す
 - ✅ **T-036** 選択・コピー（kill-ring にも入れる）・貼り付け（ブラケットペースト）（2026-11-11）→ ドラッグ・ダブル / トリプルクリック・Shift+ドラッグ（マウスの報告が有効なとき）、`embterm-copy-on-select`、`M-w`、`C-y`。実際のクリップボードへの到達は `gui-select-text` まで確認
@@ -217,10 +217,10 @@
 - ✅ **T-038** マウスの報告（vim / yazi）と、Emacs 側の選択との切り替え（2026-11-11）→ クリック・ドラッグの報告（vim の `:set mouse=a` で位置を確認）、代替画面のホイールを矢印に変える（DEC 1007）、マウスの形。**マウスの形は目視していない**、yazi での確認は T-052
 - ✅ **T-039** OSC（2026-11-11）→ OSC 52 の書き込みは kill-ring へ、**読み取りは既定で拒否**（`embterm-allow-clipboard-read`）。OSC 9 / 777 の通知は `embterm-notification-functions`、OSC 9;4 は `embterm-progress-functions`。OSC 8 は `Ctrl+クリック`で開く（`file:` は `find-file-other-window`、http / https / ftp / mailto / file 以外は開かない）。リンク上の手の形のマウスは手で確認が要る
 - ✅ **T-040** ベル（2026-11-11）→ `embterm-bell-function`（既定 `ding`）。間引く（1 秒に 100 回で 5 回）
-- ⬜ **T-041** 後始末（プロセスの終了、バッファの削除、Emacs の終了。子プロセスまで止める）
+- ✅ **T-041** 後始末（プロセスの終了、バッファの削除、Emacs の終了。子プロセスまで止める）（2026-11-12）→ 足りていた（T-073 / T-076）。`exit` で OpenConsole.exe まで終わる、`embterm-kill-buffer-on-exit` nil でバッファが残る、**Emacs の異常終了でも子孫と OpenConsole.exe が残らない**を確かめた。docs/notes/t032-features.md、`test/cleanup.sh`
 - ✅ **T-042** 複数の端末（2026-11-11）→ `embterm`（既存があれば切り替える）、`embterm-new`、`embterm-project`、`embterm-list-buffers`、`embterm-sync-colors`
 - ✅ **T-043** DPI（2026-11-11）→ 150% のモニタで見え方に問題が無いことをユーザーが確認した。モニタをまたいだ移動は個別に確かめていない
-- ⬜ **T-044** Emacs 側の操作との組み合わせ（タブ、子フレーム（corfu）との重なり、最小化、フレームの削除）
+- ✅ **T-044** Emacs 側の操作との組み合わせ（タブ、子フレーム（corfu）との重なり、最小化、フレームの削除）（2026-11-12）→ 足りていた。tab-bar（バーの分ずれる・別のタブで消える）、子フレームが端末の上に出る、最小化の間の出力、フレームの削除を確かめた。タブを移るとスクロール位置が失われる件は T-087。docs/notes/t032-features.md、`test/frames.el`
 
 ## 5. 目標のアプリで確かめる
 
@@ -301,7 +301,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ⬜ **T-084** ドラッグがペインの外へ出たときの自動スクロール
 - ⬜ **T-085** 複数行の貼り付けの確認: ブラケットペーストを有効にしていないアプリ（pwsh の PSReadLine など）では毎回確認が出る。確認を止める設定か、PSReadLine を区別する扱いを決める
 - ⬜ **T-086** copy モードで折り返しを繋げる（unwrap）。とても大きなスクロールバックを分割して渡す
-- ⬜ **T-087** ウィンドウを入れ替えたとき（`window-swap-states` など）のスクロール位置の引き継ぎ
+- ⬜ **T-087** ウィンドウを入れ替えたとき（`window-swap-states`、tab-bar のタブの切り替えなど）のスクロール位置の引き継ぎ（T-044 で tab-bar でも失われることを確かめた）
 - ✅ **T-088** Kitty graphics の描画（2026-11-11）→ render state が placeholder・相対配置・層を解決するので自前の走査は不要だった。PNG は WIC でデコード。層の順・切り取り・ビットマップのキャッシュ。split・狭いペイン・遡ったペインでも崩れない。docs/notes/t088-kitty-graphics.md、`test/kitty-graphics.py`、`test/kitty.el`
 - ⬜ **T-089** 非 ASCII の文字 + 修飾キー（`C-あ` `M-あ`）を送るか決める（今は束縛が無く端末に届かない）
 - ⬜ **T-090** KKP の安全策の限界: 求めたアプリの子孫が長生きすると戻せない。`CSI <99u` は今の画面だけに効く

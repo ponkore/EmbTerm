@@ -3,15 +3,16 @@
 //! - セルの幅と高さは、主フォント（指定のファミリの通常の太さ）の `M` の送り幅と ascent + descent + lineGap から決める
 //! - 主フォントが持つ 1 コードポイントの文字は、グリフの番号と寸法を引いて `DrawGlyphRun` で描く（速い道）
 //! - 主フォントに無い文字・書記素クラスタ（結合文字、ZWJ の絵文字）は `IDWriteTextLayout` に任せる（遅い道）。
-//!   DirectWrite のシステムのフォールバック（日本語・記号）と色付きの絵文字はこちらで効く。レイアウトは文字列と
-//!   スタイルで覚えておき、色はブラシで描くときに決める
+//!   フォールバック（[`FontSpec::fallback`] のフォント → DirectWrite のシステムのフォールバック）と色付きの絵文字は
+//!   こちらで効く。レイアウトは文字列とスタイルで覚えておき、色はブラシで描くときに決める
+//! - 合字は作らない（セルごとに描くので、隣のセルの文字とつながらない。T-033）
 //!
 //! 座標はすべて物理ピクセル（デバイスコンテキストの DPI は 96 にしてある）。
 
 use std::collections::HashMap;
 
 use windows::Win32::Graphics::DirectWrite::*;
-use windows::core::{HSTRING, Result, w};
+use windows::core::{HSTRING, Interface, PCWSTR, Result, w};
 
 /// フォントの指定
 #[derive(Clone, Debug)]
@@ -20,6 +21,9 @@ pub struct FontSpec {
     pub families: Vec<String>,
     /// 大きさ（ポイント）
     pub size_pt: f32,
+    /// 主フォントに無い文字に、システムのフォールバックより先に使うファミリ（前から順に。T-033）。
+    /// 無いファミリは飛ばす
+    pub fallback: Vec<String>,
 }
 
 impl Default for FontSpec {
@@ -27,6 +31,7 @@ impl Default for FontSpec {
         Self {
             families: vec!["HackGen Console NF".into(), "Cascadia Mono".into(), "Consolas".into()],
             size_pt: 12.0,
+            fallback: Vec::new(),
         }
     }
 }
@@ -93,6 +98,25 @@ fn find_family(collection: &IDWriteFontCollection, name: &str) -> Option<IDWrite
     }
 }
 
+/// 指定のファミリ（ある物だけ）を先に、システムのフォールバックを後に引くフォールバック。指定が無ければ `None`
+/// （書式の既定 = システムのフォールバックのまま）
+fn make_fallback(dwrite: &IDWriteFactory, collection: &IDWriteFontCollection, families: &[String]) -> Option<IDWriteFontFallback> {
+    let names: Vec<HSTRING> = families.iter().filter(|n| find_family(collection, n).is_some()).map(|n| HSTRING::from(n.as_str())).collect();
+    if names.is_empty() {
+        return None;
+    }
+    unsafe {
+        let f2 = dwrite.cast::<IDWriteFactory2>().ok()?;
+        let builder = f2.CreateFontFallbackBuilder().ok()?;
+        let ptrs: Vec<*const u16> = names.iter().map(|n| n.as_ptr()).collect();
+        let all = [DWRITE_UNICODE_RANGE { first: 0, last: 0x10FFFF }];
+        builder.AddMapping(&all, &ptrs, collection, PCWSTR::null(), PCWSTR::null(), 1.0).ok()?;
+        // 指定のファミリに無い文字はシステムのフォールバックへ
+        builder.AddMappings(&f2.GetSystemFontFallback().ok()?).ok()?;
+        builder.CreateFontFallback().ok()
+    }
+}
+
 impl FontSet {
     pub fn new(dwrite: &IDWriteFactory, spec: &FontSpec, dpi: u32) -> Result<Self> {
         unsafe {
@@ -107,6 +131,7 @@ impl FontSet {
                 .find_map(|n| find_family(&collection, n).map(|f| (n.to_string(), f)))
                 .ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
 
+            let fallback = make_fallback(dwrite, &collection, &spec.fallback);
             let em_px = spec.size_pt * dpi as f32 / 72.0;
             let mut faces = Vec::with_capacity(4);
             let mut formats = Vec::with_capacity(4);
@@ -132,6 +157,9 @@ impl FontSet {
                     w!("ja-jp"),
                 )?;
                 format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                if let Some(fb) = &fallback {
+                    format.cast::<IDWriteTextFormat1>()?.SetFontFallback(fb)?;
+                }
                 formats.push(format);
             }
             let (Ok(faces), Ok(formats)) = (<[IDWriteFontFace; 4]>::try_from(faces), <[IDWriteTextFormat; 4]>::try_from(formats))

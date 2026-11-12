@@ -58,6 +58,18 @@ fn opt_num(v: Value) -> Result<Option<f64>> {
     if v.is_not_nil() { num(v).map(Some) } else { Ok(None) }
 }
 
+/// 文字列のベクタ（nil は空）
+fn strings(v: Option<Vector<'_>>) -> Result<Vec<String>> {
+    let Some(v) = v else { return Ok(Vec::new()) };
+    (0..v.len()).map(|i| v.get::<String>(i)).collect()
+}
+
+/// FAMILIES（ファミリ名のベクタ。前から順に候補）・SIZE（ポイント）・FALLBACK（ファミリ名のベクタ）からフォントの指定を作る。
+/// nil は既定
+fn font_spec(families: Option<Vector<'_>>, size: Value<'_>, fallback: Option<Vector<'_>>) -> Result<et_render::FontSpec> {
+    Ok(term::font_spec(strings(families)?, opt_num(size)?.map(|f| f as f32), strings(fallback)?))
+}
+
 fn window_id(s: &str) -> Result<isize> {
     s.trim().parse::<isize>().map_err(|_| lisp_err(format!("window-id ではありません: {s}")))
 }
@@ -104,7 +116,8 @@ fn set_log(file: Option<String>) -> Result<()> {
 
 /// 端末を作る。ARGV はコマンドと引数の文字列のベクタ、CWD は作業ディレクトリ（nil なら Emacs と同じ）、
 /// CONPTY-DIR は conpty.dll（と x64/OpenConsole.exe）のあるディレクトリ（nil か無ければ OS 同梱の ConPTY）。
-/// FONT-FAMILY・FONT-SIZE（ポイント）・NARROW-WIDE（"overlap" か "shrink"）は nil なら既定、
+/// FONT-FAMILIES（ファミリ名のベクタ。前から順に候補）・FONT-SIZE（ポイント）・FONT-FALLBACK（主フォントに無い文字に
+/// システムより先に使うファミリ名のベクタ。T-033）・NARROW-WIDE（"overlap" か "shrink"）は nil なら既定、
 /// SCROLLBACK はスクロールバックの行数の上限（nil なら 10000）。
 /// ENV は Emacs の環境変数への変更の文字列のベクタ（nil なら変えない。T-109）: "NAME=VALUE" は設定、"NAME" は削除。
 /// 前から順に当てる。`TERM` `COLORTERM` `TERM_PROGRAM` は端末が最後に決める。
@@ -115,8 +128,9 @@ fn create(
     argv: Vector<'_>,
     cwd: Option<String>,
     conpty_dir: Option<String>,
-    font_family: Option<String>,
+    font_families: Option<Vector<'_>>,
     font_size: Value<'_>,
+    font_fallback: Option<Vector<'_>>,
     narrow_wide_: Option<String>,
     scrollback: Option<i64>,
     env: Option<Vector<'_>>,
@@ -137,8 +151,7 @@ fn create(
         cwd: cwd.map(PathBuf::from),
         env: changes,
         conpty_dir: conpty_dir.map(PathBuf::from),
-        font_family,
-        font_size: opt_num(font_size)?.map(|f| f as f32),
+        font: font_spec(font_families, font_size, font_fallback)?,
         narrow_wide: narrow_wide(narrow_wide_)?,
         scrollback_lines: scrollback.map(|n| n.max(0) as usize),
     };
@@ -282,11 +295,11 @@ fn paste_safe_p(term: &RefCell<Term>, text: String) -> Result<bool> {
         })
 }
 
-/// フォントを替える（FAMILY・SIZE が nil なら既定）
+/// フォントを替える。FAMILIES（ファミリ名のベクタ。前から順に候補）・SIZE（ポイント）・FALLBACK（主フォントに無い文字に
+/// システムより先に使うファミリ名のベクタ）が nil なら既定
 #[defun]
-fn set_font(term: &RefCell<Term>, family: Option<String>, size: Value<'_>) -> Result<()> {
-    let size = opt_num(size)?.map(|f| f as f32);
-    term.borrow().request(Request::SetFont { family, size });
+fn set_font(term: &RefCell<Term>, families: Option<Vector<'_>>, size: Value<'_>, fallback: Option<Vector<'_>>) -> Result<()> {
+    term.borrow().request(Request::SetFont(font_spec(families, size, fallback)?));
     Ok(())
 }
 

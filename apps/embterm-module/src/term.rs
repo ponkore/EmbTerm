@@ -132,7 +132,7 @@ pub enum Request {
     ClearSelection,
     /// スクロールバックの行数の上限
     SetScrollback(usize),
-    SetFont { family: Option<String>, size: Option<f32> },
+    SetFont(FontSpec),
     SetNarrowWide(NarrowWide),
     /// フォーカスの出入り（端末へ `CSI I` / `CSI O` を送り、カーソルの描き方を変える）
     Focus(bool),
@@ -280,10 +280,21 @@ pub struct SpawnOptions {
     /// Emacs の環境変数への変更（`Some` は設定、`None` は削除。T-109）
     pub env: Vec<(OsString, Option<OsString>)>,
     pub conpty_dir: Option<PathBuf>,
-    pub font_family: Option<String>,
-    pub font_size: Option<f32>,
+    pub font: FontSpec,
     pub narrow_wide: NarrowWide,
     pub scrollback_lines: Option<usize>,
+}
+
+/// フォントの指定を作る。FAMILIES は前から順に候補で、その後ろに既定の候補が続く。SIZE（ポイント）が `None` なら既定。
+/// FALLBACK は主フォントに無い文字に、システムのフォールバックより先に使うファミリ（T-033）
+pub fn font_spec(families: Vec<String>, size: Option<f32>, fallback: Vec<String>) -> FontSpec {
+    let mut spec = FontSpec::default();
+    spec.families.splice(0..0, families);
+    if let Some(s) = size {
+        spec.size_pt = s;
+    }
+    spec.fallback = fallback;
+    spec
 }
 
 /// copy モード用のテキスト（`Event::CopyReady` のあと Lisp が受け取る）
@@ -829,13 +840,7 @@ fn point_of(lparam: LPARAM) -> (i32, i32) {
 
 impl App {
     fn new(control: HWND, shared: Arc<Shared>, opts: SpawnOptions) -> Result<Self, String> {
-        let mut font = FontSpec::default();
-        if let Some(f) = &opts.font_family {
-            font.families.insert(0, f.clone());
-        }
-        if let Some(s) = opts.font_size {
-            font.size_pt = s;
-        }
+        let font = opts.font.clone();
         Ok(Self {
             control,
             shared,
@@ -976,14 +981,7 @@ impl App {
                     log(&format!("スクロールバックの行数を変えられません: {e}"));
                 }
             }
-            Request::SetFont { family, size } => {
-                let mut spec = FontSpec::default();
-                if let Some(f) = family {
-                    spec.families.insert(0, f);
-                }
-                if let Some(s) = size {
-                    spec.size_pt = s;
-                }
+            Request::SetFont(spec) => {
                 self.font = spec.clone();
                 let mut family = None;
                 for p in &mut self.panes {

@@ -1,7 +1,7 @@
 //! コマンドライン引数。
 //!
 //! ```text
-//! embterm.exe [--conpty-dir DIR | --system-conpty] [--font NAME] [--font-size PT] [--narrow-wide shrink|overlap] [--cols N --rows N] [--cwd DIR]
+//! embterm.exe [--conpty-dir DIR | --system-conpty] [--font NAME] [--font-size PT] [--font-fallback NAME]... [--narrow-wide shrink|overlap] [--cols N --rows N] [--cwd DIR]
 //!             [--input STR]... [--input-delay MS] [--input-interval MS]
 //!             [--select C1,R1,C2,R2] [--resize C,R] [--resize-after MS] [--scroll-up N] [--screenshot PNG] [--screenshot-after MS] [--exit-after MS]
 //!             [--log FILE] [--perf] [--exit-on-exit] [-- コマンド 引数...]
@@ -19,6 +19,8 @@ pub struct Args {
     pub system_conpty: bool,
     pub font: Option<String>,
     pub font_size: Option<f32>,
+    /// 主フォントに無い文字に、システムのフォールバックより先に使うファミリ（T-033）
+    pub font_fallback: Vec<String>,
     /// 幅 1 と数えたのにグリフが広い文字の描き方（T-013）。None なら既定（overlap）
     pub narrow_wide: Option<et_render::NarrowWide>,
     pub cols: Option<u16>,
@@ -47,7 +49,7 @@ pub struct Args {
     pub command: Vec<OsString>,
 }
 
-pub const USAGE: &str = "使い方: embterm.exe [--conpty-dir DIR | --system-conpty] [--font NAME] [--font-size PT] [--narrow-wide shrink|overlap] [--cols N --rows N] [--cwd DIR]
+pub const USAGE: &str = "使い方: embterm.exe [--conpty-dir DIR | --system-conpty] [--font NAME] [--font-size PT] [--font-fallback NAME]... [--narrow-wide shrink|overlap] [--cols N --rows N] [--cwd DIR]
                    [--input STR]... [--input-delay MS] [--input-interval MS]
                    [--select C1,R1,C2,R2] [--resize C,R] [--resize-after MS] [--scroll-up N] [--screenshot PNG] [--screenshot-after MS] [--exit-after MS]
                    [--log FILE] [--perf] [--exit-on-exit] [-- コマンド 引数...]
@@ -113,6 +115,7 @@ pub fn parse(mut it: impl Iterator<Item = OsString>) -> Result<Args, String> {
             "--system-conpty" => a.system_conpty = true,
             "--font" => a.font = Some(val().ok_or("--font に値が要る")?),
             "--font-size" => a.font_size = Some(num("--font-size", val())?),
+            "--font-fallback" => a.font_fallback.push(val().ok_or("--font-fallback に値が要る")?),
             "--narrow-wide" => a.narrow_wide = Some(val().ok_or("--narrow-wide に値が要る")?.parse()?),
             "--cols" => a.cols = Some(num("--cols", val())?),
             "--rows" => a.rows = Some(num("--rows", val())?),

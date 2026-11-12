@@ -36,6 +36,8 @@
 ;; - OSC（T-039）: 52 の書き込みは kill-ring へ（読み取りは既定で拒む）、9 / 777 は `embterm-notification-functions'、
 ;;   9;4 は `embterm-progress-functions'、8 のハイパーリンクは Ctrl+クリックで開く。ベル（T-040）は間引く
 ;; - tr-ime の再変換・前後参照は、端末のバッファでは空の文字列を渡す（T-083）
+;; - フォント（T-033）: `embterm-font-family'（候補のリストも可）・`embterm-font-size'・`embterm-font-fallback-families'
+;;   （主フォントに無い文字に Windows のフォールバックより先に使う）。`text-scale-adjust' でバッファごとに拡大・縮小
 
 ;;; Code:
 
@@ -75,6 +77,8 @@
 (declare-function embterm-module-set-cursor "embterm-module")
 (declare-function embterm-module-set-clipboard-policy "embterm-module")
 (declare-function project-root "project" (project))
+(defvar text-scale-mode-amount)
+(defvar text-scale-mode-step)
 (declare-function tr-ime-modadv--notify-reconvert-string "tr-ime-modadv" (arg1 arg2 arg3))
 
 ;;;; 設定
@@ -110,14 +114,27 @@ nil なら `embterm-module-directory'。見つからなければ OS 同梱の Co
     (embterm--apply-settings)))
 
 (defcustom embterm-font-family nil
-  "端末のフォント。nil なら module の既定（HackGen Console NF → Cascadia Mono → Consolas）。"
-  :type '(choice (const :tag "既定" nil) string)
+  "端末のフォント。ファミリ名か、ファミリ名のリスト（前から順に、見つかったものを使う）。
+どれも無ければ module の既定（HackGen Console NF → Cascadia Mono → Consolas）。nil なら既定だけ。
+セルの大きさはこのフォントの `M' の幅と行の高さで決まるので、等幅のフォントを指定する。"
+  :type '(choice (const :tag "既定" nil) string (repeat string))
   :set #'embterm--set-and-apply)
 
 (defcustom embterm-font-size nil
-  "端末のフォントの大きさ（ポイント）。nil なら module の既定（12）。"
+  "端末のフォントの大きさ（ポイント）。nil なら module の既定（`embterm--default-font-size'）。
+端末のバッファで `text-scale-adjust'（\\[text-scale-adjust]）すると、そのバッファだけ拡大・縮小する。"
   :type '(choice (const :tag "既定" nil) number)
   :set #'embterm--set-and-apply)
+
+(defcustom embterm-font-fallback-families nil
+  "主フォントに無い文字に使うファミリ名のリスト（前から順に。T-033）。
+どれにも無い文字は Windows のフォールバック（日本語・記号・色付きの絵文字）に任せる。
+例: \\='(\"Symbols Nerd Font Mono\" \"BIZ UDGothic\")。無いファミリは飛ばす。"
+  :type '(repeat string)
+  :set #'embterm--set-and-apply)
+
+(defconst embterm--default-font-size 12
+  "module の既定のフォントの大きさ（ポイント）。`text-scale-mode' の倍率を掛ける元に使う。")
 
 (defcustom embterm-narrow-wide 'overlap
   "幅 1 と数えたのにグリフが広い文字（`①' `★' `※' など）の描き方（T-013）。
@@ -433,11 +450,11 @@ DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'�
             embterm--fixed-name (and name t))
       (condition-case err
           (setq embterm--term
-                (embterm-module-create (vconcat argv) (embterm--cwd) (embterm--conpty-dir)
-                                       embterm-font-family embterm-font-size
-                                       (symbol-name embterm-narrow-wide)
-                                       embterm-scrollback-lines
-                                       env))
+                (apply #'embterm-module-create (vconcat argv) (embterm--cwd) (embterm--conpty-dir)
+                       (append (embterm--font-args)
+                               (list (symbol-name embterm-narrow-wide)
+                                     embterm-scrollback-lines
+                                     env))))
         (error (kill-buffer buf)
                (signal (car err) (cdr err))))
       ;; 子プロセスは最初の place で起動する。その前に色・カーソル・クリップボードの許可を積む（頼みごとは順に片付く）
@@ -559,6 +576,7 @@ DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'�
   (embterm--placeholder)
   (embterm--emulation-first)
   (embterm--tr-ime-setup)
+  (add-hook 'text-scale-mode-hook #'embterm--apply-font nil t)
   (add-hook 'kill-buffer-hook #'embterm--close nil t))
 
 ;;;; tr-ime の再変換・前後参照（T-083。docs/research/emacs-ime.md §3.5）
@@ -956,12 +974,28 @@ Emacs で別のウィンドウに開く（実行ファイルを起動しない�
 
 ;;;; 設定の反映
 
+(defun embterm--font-args ()
+  "module に渡すフォントの指定（ファミリのベクタ・大きさ・フォールバックのベクタ）。
+大きさには、このバッファの `text-scale-mode' の倍率を掛ける。"
+  (let ((families (if (stringp embterm-font-family) (list embterm-font-family) embterm-font-family))
+        (amount (if (bound-and-true-p text-scale-mode) (bound-and-true-p text-scale-mode-amount) 0)))
+    (list (and families (vconcat families))
+          (if (and (numberp amount) (/= amount 0))
+              (* (or embterm-font-size embterm--default-font-size) (expt text-scale-mode-step amount))
+            embterm-font-size)
+          (and embterm-font-fallback-families (vconcat embterm-font-fallback-families)))))
+
+(defun embterm--apply-font ()
+  "このバッファの端末にフォントを反映する（`text-scale-mode-hook' からも呼ぶ）。"
+  (when embterm--term
+    (apply #'embterm-module-set-font embterm--term (embterm--font-args))))
+
 (defun embterm--apply-settings ()
   "フォント・広いグリフの描き方・スクロールバックの行数を、開いている端末に反映する。"
   (dolist (buf (embterm--live-buffers))
     (with-current-buffer buf
       (ignore-errors
-        (embterm-module-set-font embterm--term embterm-font-family embterm-font-size)
+        (embterm--apply-font)
         (embterm-module-set-narrow-wide embterm--term (symbol-name embterm-narrow-wide))
         (embterm-module-set-scrollback embterm--term embterm-scrollback-lines)))))
 
