@@ -20,10 +20,20 @@
 //!     中身が同じファイルは写さない。使用中（Emacs が読み込んだ conpty.dll、動いている OpenConsole.exe）で
 //!     上書きできないものは `<名前>.old-<時刻>` に名前を変えてから写す（使用中のファイルも名前は変えられる）。
 //!     新しい版が使われるのは、module なら Emacs の再起動後、ConPTY なら次に開く端末から
+//!
+//! cargo xtask test-screens [--bless] [--no-dist] [名前の一部...]
+//!     画面の回帰テスト（T-078 / T-114）。test/screens/cases.txt のケースを embterm.exe で動かし、画面のテキストを
+//!     test/screens/<名前>.txt と比べる。--bless で期待値を書き直す。vttest のケースは WSL に vttest が要る
+//!
+//! cargo xtask test-emacs [--no-dist] [名前...]
+//!     Emacs の自動確認（T-081）。別に起こした `emacs -Q` で test/*.el を順に動かし、終了コードとログの NG を見る。
+//!     名前を省くと合否を自分で決めるものすべて。Emacs は環境変数 EMACS（既定 C:/Apps/emacs/emacs-31.1/bin/emacs.exe）
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+
+mod tests;
 
 /// libghostty-vt の版。上げるときは下の SHA256 も
 /// https://release.files.ghostty.org/libghostty-vt/<版>/SHA256SUMS から写す
@@ -48,9 +58,11 @@ fn main() -> ExitCode {
         "fetch-conpty" => fetch_conpty(force),
         "dist" => dist(),
         "install" => install(args.get(1).map_or_else(|| PathBuf::from(DEFAULT_INSTALL_DIR), PathBuf::from)),
+        "test-screens" => tests::test_screens(&args[1..]),
+        "test-emacs" => tests::test_emacs(&args[1..]),
         _ => {
             eprintln!(
-                "使い方: cargo xtask <fetch-ghostty-vt | fetch-conpty> [--force] | cargo xtask dist | cargo xtask install [DIR]"
+                "使い方: cargo xtask <fetch-ghostty-vt | fetch-conpty> [--force] | dist | install [DIR] | test-screens [--bless] [--no-dist] [名前...] | test-emacs [--no-dist] [名前...]"
             );
             return ExitCode::from(2);
         }

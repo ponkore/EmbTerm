@@ -291,16 +291,16 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-076**（2026-11-11: 前半は済み。閉じる待ちは別スレッドで行い、終わったら `Closed` を知らせる。`kill-buffer` は 1 ms 程度で返る。後半 → 閉じ方を「CTRL_CLOSE_EVENT → 5 秒まで待つ → Job ごと止める」にした。**`.swp` が残るのは vim の仕様**（MSYS の vim は SIGHUP で常に残す、Windows 版は書き換えたときだけ残す）で強制終了ではなかった。`kill-emacs` では `embterm-kill-emacs-timeout`（既定 0.5 秒。利用者が了承）だけ待つ。t054 §3.8）閉じる処理を UI スレッドから外す（`Pty::close` は最大数秒待つ。module では Emacs を止めてしまう）。
   あわせて、閉じたときに vim の `.swp` が残る（実質の強制終了）ので、子に先に終了を促す手順を考える
 - ✅ **T-077** 変わった行だけ描き直すか（今は毎回全体を描き、`Present(1)` で垂直同期を待つ）→ T-068 の測定で決める（2026-11-11）→ **毎回全体を描くで確定**（ふつうの画面 0.2〜1 ms、最悪 8 ms。フリップモデルの差分を追う複雑さに見合わない）
-- ⬜ **T-078** 自動確認の道具をリポジトリに入れる（キーを送るスクリプト、画面の `.txt` を期待値と比べる回帰テストを `cargo xtask` から）
+- ✅ **T-078** 自動確認の道具をリポジトリに入れる（キーを送るスクリプト、画面の `.txt` を期待値と比べる回帰テストを `cargo xtask` から）（2026-11-12）→ `cargo xtask test-screens [--bless]`。`test/screens/cases.txt` のケースを embterm.exe で動かし、画面のテキストを期待値と比べる（cmd 3 + vttest 38）。docs/notes/t078-tests.md
 - ✅ **T-079** 150% の DPI で確かめる（2026-11-11）→ Emacs の中で確認した（T-043）。embterm.exe 単体では確かめていない
 - ✅ **T-080** バッファ名の付け方（2026-11-11）→ `embterm-buffer-name-function`。長いパスはファイル名だけ（`*embterm: cmd*`）、タイトルが無ければコマンド名、`embterm-buffer-name-max-length`（40）で切る
-- ⬜ **T-081** Emacs での自動確認を `cargo xtask` から呼ぶ（`cargo xtask dist` → `emacs -Q -l test/smoke.el` → ログの確認。T-078 と合わせる）。
+- ✅ **T-081** Emacs での自動確認を `cargo xtask` から呼ぶ（2026-11-12 → `cargo xtask test-emacs [名前...]`。11 個を順に動かし、終了コードとログの NG で合否。7 分ほど。マウスは各試験が PostMessage で送っている。docs/notes/t078-tests.md）（`cargo xtask dist` → `emacs -Q -l test/smoke.el` → ログの確認。T-078 と合わせる）。
   子 HWND のホイール・ドラッグでの選択・Emacs 側に来たホイールの転送も `PostMessage` で送って確かめる
-- ⬜ **T-082** 子プロセスは最初にウィンドウに出したときに起動する（大きさが決まってから起こすため）。表示しないまま起動する用途（バックグラウンドでコマンドを走らせる）が要るかを決める
+- ✅ **T-082** 子プロセスは最初にウィンドウに出したときに起動する（大きさが決まってから起こすため）。表示しないまま起動する用途（バックグラウンドでコマンドを走らせる）が要るかを決める（2026-11-12）→ 要る。`embterm-run` の DISPLAY がどのウィンドウにも出さなければ（`ignore` など）`embterm-background-size`（80x24）で起動し、出したらウィンドウに合わせる。docs/notes/t078-tests.md
 - ✅ **T-083** tr-ime の再変換（2026-11-11）→ 端末のバッファでは再変換と前後参照のフックをバッファローカルに差し替え、空文字列を通知する（`delete-char` を走らせない）。tr-ime が無ければ何もしない。**手元の Emacs での確認は未**（単体の確認のみ）
-- ⬜ **T-084** ドラッグがペインの外へ出たときの自動スクロール
-- ⬜ **T-085** 複数行の貼り付けの確認: ブラケットペーストを有効にしていないアプリ（pwsh の PSReadLine など）では毎回確認が出る。確認を止める設定か、PSReadLine を区別する扱いを決める
-- ⬜ **T-086** copy モードで折り返しを繋げる（unwrap）。とても大きなスクロールバックを分割して渡す
+- ✅ **T-084** ドラッグがペインの外へ出たときの自動スクロール（2026-11-12）→ 外にある間 50 ms ごとにペインをスクロールし、端の行までドラッグを伸ばす（外へ出た距離で 1〜5 行）。docs/notes/t078-tests.md
+- ✅ **T-085** 複数行の貼り付けの確認: ブラケットペーストを有効にしていないアプリ（pwsh の PSReadLine など）では毎回確認が出る。確認を止める設定か、PSReadLine を区別する扱いを決める（2026-11-12）→ 今のまま（利用者が選んだ。Windows Terminal の既定と同じ）。止めるなら `embterm-confirm-unsafe-paste` を nil
+- ✅ **T-086** copy モードで折り返しを繋げる（unwrap）。とても大きなスクロールバックを分割して渡す（2026-11-12）→ バッファの行は端末の行のまま、折り返しの改行に `embterm-wrap` を付け、コピー（`filter-buffer-substring`）でつなぐ。テキストは 1 MiB ずつ渡す（1.17 MB で Emacs の止まりは最大 23 ms）。docs/notes/t078-tests.md、`test/copy.el`
 - ⬜ **T-087** ウィンドウを入れ替えたとき（`window-swap-states`、tab-bar のタブの切り替えなど）のスクロール位置の引き継ぎ（T-044 で tab-bar でも失われることを確かめた）
 - ✅ **T-088** Kitty graphics の描画（2026-11-11）→ render state が placeholder・相対配置・層を解決するので自前の走査は不要だった。PNG は WIC でデコード。層の順・切り取り・ビットマップのキャッシュ。split・狭いペイン・遡ったペインでも崩れない。docs/notes/t088-kitty-graphics.md、`test/kitty-graphics.py`、`test/kitty.el`
 - ⬜ **T-089** 非 ASCII の文字 + 修飾キー（`C-あ` `M-あ`）を送るか決める（今は束縛が無く端末に届かない）
@@ -328,7 +328,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-111** 普段使いの置き場に入れる `cargo xtask install [DIR]`（2026-11-11）→ 既定 `C:\Apps\embterm`。使用中の conpty.dll / OpenConsole.exe / exe は `.old-<時刻>` に退避して入れ替える。`target/dist` を普段の Emacs に読ませると dist と試験が上書きに失敗するため
 - ⬜ **T-112** 文字の点滅（SGR 5）を描く。カーソルの点滅（T-035）と同じタイマーで（T-055 で見つけた。低）
 - ⬜ **T-113** `CSI 0 S` / `CSI 0 T` を libghostty-vt が 1 行として扱わない（何もしない）件を上流に知らせるか決める（T-055）
-- ⬜ **T-114** vttest の自動確認を回帰テストにする（T-078 と合わせる。T-055 の道具はリポジトリに入れていない）
+- ✅ **T-114** vttest の自動確認を回帰テストにする（T-078 と合わせる。T-055 の道具はリポジトリに入れていない）（2026-11-12）→ T-055 で合格した 38 画面を `cargo xtask test-screens` のケースにした。期待値は T-055 で見て確かめた画面と一致。docs/notes/t078-tests.md
 - ⬜ **T-115** Windows Terminal と vttest を手で見比べる（DECCOLM・倍幅の行。T-055 では自動の比較を省いた）
 - ✅ **T-116** 子の作業ディレクトリのドライブレターを大文字にする（2026-11-11）→ Emacs は `~` の展開や `directory-file-name` で小文字に落とす。claude は cwd を `.claude.json` のプロジェクトのキーに使うので、Emacs から開いたものと端末から開いたものでプロジェクトが割れる。プロンプトもほかの端末と同じ `C:\` になる
 - ✅ **T-117** 子に `PWD` / `OLDPWD` を渡さない（2026-11-11）→ Git Bash などから起動した Emacs の `PWD` が残り、starship（nyagos・pwsh のプロンプト）と yazi が実際の作業ディレクトリより `PWD` を信じて、Emacs を起動したディレクトリで開いたように見えた。`~/.emacs.d` の `M-x nyagos` / `yazi` を作っていて見つけた

@@ -1,0 +1,57 @@
+# 画面の回帰テスト（T-078 / T-114）。`cargo xtask test-screens [--bless] [--no-dist] [名前の一部...]`
+#
+# embterm.exe（target/dist）を 1 ケースごとに起動し、入力を PTY に送り、画面のテキストを
+# test/screens/<名前>.txt（期待値）と比べる。--bless で期待値を書き直す。撮った画面は target/screens/。
+#
+# 書き方:
+#   @グループ 桁 行 最初の入力までの ms 入力の間隔 ms 最後の入力から撮るまでの ms -- コマンド 引数...
+#   名前 <TAB> 入力 <TAB> 入力 ...        入力は embterm.exe の --input と同じエスケープ（\r \e \xHH \u{HHHH}）
+#   名前 の後に `settle=MS` を置くと、そのケースだけ撮るまでの時間を変える
+# 比べるときは行末の空白と、末尾の空の行を除く。
+
+@cmd 60 8 1500 300 1200 -- cmd.exe /d /q /k prompt $g
+cmd-echo	echo hello 日本語 ①★※ ─│┌┐\r
+cmd-wrap	echo 0123456789012345678901234567890123456789012345678901234567890123456789END\r
+cmd-cls	echo before\r	cls\r	echo after\r
+
+# vttest 2.7（WSL の Ubuntu。`sudo apt install vttest`）。項目と結果は docs/notes/t055-vttest.md。
+# 落ちる項目（libghostty-vt が持たない機能）は入れていない
+@vttest 80 24 2500 350 2500 -- wsl.exe -e vttest
+vttest-1-1	1\r
+vttest-1-5	1\r	\r	\r	\r	\r
+vttest-1-6	1\r	\r	\r	\r	\r	\r
+vttest-2-1	2\r
+vttest-2-2	2\r	\r
+vttest-2-4	2\r	\r	\r	\r
+vttest-2-6	2\r	\r	\r	\r	\r	\r
+vttest-2-7	2\r	\r	\r	\r	\r	\r	\r
+vttest-2-8	2\r	\r	\r	\r	\r	\r	\r	\r
+vttest-2-9	2\r	\r	\r	\r	\r	\r	\r	\r	\r
+vttest-2-10	2\r	\r	\r	\r	\r	\r	\r	\r	\r	\r
+vttest-2-11	2\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r
+vttest-2-12	2\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r
+vttest-2-13	2\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r
+vttest-2-15	2\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r	\r
+vttest-3-8	3\r	8\r
+vttest-3-9	3\r	9\r
+vttest-3-11	3\r	11\r
+vttest-6-3	6\r	3\r
+vttest-8-1	8\r
+vttest-8-2	8\r	\r
+vttest-8-3	8\r	\r	\r
+vttest-8-4	8\r	\r	\r	\r
+vttest-8-5	8\r	\r	\r	\r	\r
+vttest-8-6	8\r	\r	\r	\r	\r	\r
+vttest-8-7	8\r	\r	\r	\r	\r	\r	\r
+vttest-9-1	9\r	1\r
+vttest-9-3	9\r	3\r
+vttest-9-4	9\r	4\r
+vttest-10-1b settle=9000	10\r	1\r	\r
+vttest-10-3b	10\r	3\r	\r
+vttest-11-1-2-2	11\r	1\r	2\r	2\r
+vttest-11-1-2-3	11\r	1\r	2\r	3\r
+vttest-11-1-2-4	11\r	1\r	2\r	4\r
+vttest-11-3-2-7	11\r	3\r	2\r	7\r
+vttest-11-3-2-8	11\r	3\r	2\r	8\r
+vttest-11-3-2-9	11\r	3\r	2\r	9\r
+vttest-11-3-2-10	11\r	3\r	2\r	10\r

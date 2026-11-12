@@ -1,0 +1,13 @@
+
+
+
+
+
+
+
+
+
+This is a test of the VT100 'Scroll while toggle softscroll'
+bug.  The cursor may disappear, or move UP the screen, or
+multiple copies of some lines may appear.
+Push <RETURN>

@@ -632,6 +632,19 @@ impl Terminal {
         Ok(GridRef(r))
     }
 
+    /// 画面の座標（スクロールバックの先頭からの行）の行 `y` が、次の行へ折り返している（soft wrap）か（T-086）。
+    /// 行が無ければ false
+    pub fn row_wraps(&self, y: u32) -> bool {
+        let Ok(r) = self.grid_ref(0, y) else { return false };
+        let mut row: ffi::GhosttyRow = 0;
+        let mut wrap = false;
+        unsafe {
+            ffi::ghostty_grid_ref_row(&r.0, &mut row) == ffi::GHOSTTY_SUCCESS
+                && ffi::ghostty_row_get(row, ffi::GHOSTTY_ROW_DATA_WRAP, &mut wrap as *mut bool as *mut c_void) == ffi::GHOSTTY_SUCCESS
+                && wrap
+        }
+    }
+
     /// 画面の座標の (桁, 行) のセルを、端末が変わっても追いかけて指し続ける（[`TrackedRef`]）。
     /// スクロールバックの上限で行が消えると、その [`TrackedRef`] は値を失う
     pub fn track(&self, x: u16, y: u32) -> Result<TrackedRef> {

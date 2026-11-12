@@ -1,0 +1,24 @@
+uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+Test cursor movement within margins                                            r
+A box of *'s was written on screen border, overwritten using margins (u/d/l/r) r
+Push <RETURN>                                                                  r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+l                                                                              r
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd

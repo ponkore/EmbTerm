@@ -382,6 +382,21 @@
               (with-current-buffer split-buf
                 (embterm-module-send-string embterm--term "\r"))
               (split-frame-png "frame-final.png")))
+    (1.0 "ドラッグをペインの上へ出したまま止める（自動スクロール。T-084）"
+         . ,(lambda ()
+              (let* ((p (split-panes)) (top (nth 0 p)))
+                (split-check "自動スクロールの前は下を追っている" (not (split-pane-scrolled top)))
+                (split-post (split-pane-hwnd top) "down:30:60,move:30:-40,sleep:800,move:30:-40,up:30:-40"))))
+    (1.0 "自動スクロールで遡った"
+         . ,(lambda ()
+              (let* ((p (split-panes)) (top (nth 0 p))
+                     (sel (with-current-buffer split-buf (embterm-module-selection embterm--term))))
+                (split-check "ペインが遡った" (split-pane-scrolled top) (format "%S" top))
+                (split-check "選択が画面の上の外まで伸びた（10 行より多い）"
+                             (and sel (> (length (split-string sel "\n")) 10))
+                             (format "%S 行" (and sel (length (split-string sel "\n"))))))
+              (with-current-buffer split-buf
+                (embterm-module-clear-selection embterm--term))))
     (1.5 "終わり"
          . ,(lambda ()
               (split-log "NG の数: %d" split-ng)

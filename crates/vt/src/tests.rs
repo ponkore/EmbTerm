@@ -1114,3 +1114,16 @@ fn default_cursor_style_and_decscusr() {
     t.vt_write(b"[?12h");
     assert_eq!(cur(&t), (CursorShape::Underline, true));
 }
+
+#[test]
+fn row_wrap_flags() {
+    // T-086: 端末が折り返した行（soft wrap）と、改行で終わった行を見分ける
+    let t = types();
+    check_enum(&t, "GhosttyRowData", &[("WRAP", GHOSTTY_ROW_DATA_WRAP), ("WRAP_CONTINUATION", GHOSTTY_ROW_DATA_WRAP_CONTINUATION)]);
+    let (mut t, _) = terminal(10, 5);
+    t.vt_write(b"0123456789abc\r\nxyz");
+    assert!(t.row_wraps(0), "10 桁を超えて折り返した行");
+    assert!(!t.row_wraps(1), "改行で終わった行");
+    assert!(!t.row_wraps(2));
+    assert!(!t.row_wraps(99), "無い行");
+}

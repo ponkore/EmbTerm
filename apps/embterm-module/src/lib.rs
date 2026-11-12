@@ -206,6 +206,14 @@ fn select(term: &RefCell<Term>, pane: Option<i64>) -> Result<()> {
     Ok(())
 }
 
+/// ペインを置く前に子プロセスを起動する（T-082。表示しないまま動かすとき）。まだ大きさが決まっていなければ
+/// COLS x ROWS で起動し、後でペインを置けばその大きさに合わせる。起動済みなら何もしない
+#[defun]
+fn start(term: &RefCell<Term>, cols: i64, rows: i64) -> Result<()> {
+    term.borrow().request(Request::Start { cols: cols.clamp(1, 1000) as u16, rows: rows.clamp(1, 1000) as u16 });
+    Ok(())
+}
+
 /// 文字列をそのまま端末に送る（貼り付けと同じく VT の素の文字列。キーとして送るときは `embterm-module-send-key'）
 #[defun]
 fn send_string(term: &RefCell<Term>, text: String) -> Result<()> {
@@ -274,12 +282,20 @@ fn request_copy(term: &RefCell<Term>, pane: Option<i64>) -> Result<()> {
     Ok(())
 }
 
-/// copy モードのテキストを受け取る。`(TEXT TOP POINT)`（TOP は見ていたペインの先頭の行、POINT はポイントを置く行。どちらも 0 から）。
-/// まだできていなければ nil
+/// copy モードのテキストの次の一部を受け取る（1 MiB まで。行の区切りで切る。T-086）。
+/// `(TEXT TOP POINT WRAPS MORE)`: TOP は見ていたペインの先頭の行、POINT はポイントを置く行（どちらも全体の 0 からの行）、
+/// WRAPS は端末が折り返した行の番号のベクタ（最初の一部だけ。以後は空）、MORE は残りがあれば t。
+/// まだできていない・渡し終えたら nil
 #[defun]
 fn take_copy<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
     match term.borrow().shared().take_copy() {
-        Some(c) => env.list((c.text, c.top, c.point)),
+        Some(c) => {
+            let wraps = env.make_vector(c.wraps.len(), ())?;
+            for (i, w) in c.wraps.iter().enumerate() {
+                wraps.set(i, *w)?;
+            }
+            env.list((c.text, c.top, c.point, wraps, c.more))
+        }
         None => ().into_lisp(env),
     }
 }

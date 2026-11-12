@@ -134,6 +134,11 @@ pub const GHOSTTY_POINT_TAG_ACTIVE: c_int = 0;
 pub const GHOSTTY_POINT_TAG_VIEWPORT: c_int = 1;
 pub const GHOSTTY_POINT_TAG_SCREEN: c_int = 2;
 
+/// screen.h の行（`ghostty_row_get` で読む）
+pub type GhosttyRow = u64;
+pub const GHOSTTY_ROW_DATA_WRAP: c_int = 1;
+pub const GHOSTTY_ROW_DATA_WRAP_CONTINUATION: c_int = 2;
+
 /// grid_ref.h
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -675,7 +680,9 @@ unsafe extern "C" {
         out_ref: *mut GhosttyTrackedGridRef,
     ) -> GhosttyResult;
 
-    // grid_ref.h
+    // grid_ref.h、screen.h（行）
+    pub fn ghostty_grid_ref_row(grid_ref: *const GhosttyGridRef, out_row: *mut GhosttyRow) -> GhosttyResult;
+    pub fn ghostty_row_get(row: GhosttyRow, data: c_int, out: *mut c_void) -> GhosttyResult;
     pub fn ghostty_grid_ref_hyperlink_uri(
         grid_ref: *const GhosttyGridRef,
         buf: *mut u8,

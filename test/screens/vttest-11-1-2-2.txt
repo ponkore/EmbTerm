@@ -1,0 +1,2 @@
+The cursor should be invisible
+Push <RETURN>

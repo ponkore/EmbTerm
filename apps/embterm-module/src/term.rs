@@ -86,6 +86,10 @@ const RENDER_HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 const TIMER_RENDER_HOLD: usize = 1;
 /// カーソルの点滅のタイマー（T-035）
 const TIMER_CURSOR_BLINK: usize = 2;
+/// 選択のドラッグがペインの上下の外に出ている間、ペインをスクロールするタイマー（T-084）
+const TIMER_AUTOSCROLL: usize = 3;
+/// 自動スクロールの間隔（ms）。1 回に動かす行数は外へ出た距離で増やす
+const AUTOSCROLL_MS: u32 = 50;
 /// Lisp がまだ読んでいない知らせの上限（アプリが OSC を大量に出したときに溜め込みすぎない）
 const MAX_PENDING_EVENTS: usize = 1000;
 // マウスのメッセージの wParam の修飾キー（Win32_System_SystemServices の MK_* と同じ値）
@@ -120,6 +124,9 @@ pub enum Request {
     Remove(i64),
     /// 選んでいるペイン（`None` は端末のウィンドウを選んでいない）。端末の大きさはこのペインに合わせる
     Select(Option<i64>),
+    /// ペインを置く前に子プロセスを起動する（T-082）。まだ大きさが決まっていなければ COLS x ROWS で。
+    /// 後でペインを置けばその大きさに合わせる
+    Start { cols: u16, rows: u16 },
     /// 文字列をそのまま送る（IME で確定した文字も）
     SendString(String),
     /// キーを 1 つ送る。`key` は 1 文字か Emacs のファンクションキーの名前、`mods` は `C` `M` `S` の組
@@ -297,14 +304,32 @@ pub fn font_spec(families: Vec<String>, size: Option<f32>, fallback: Vec<String>
     spec
 }
 
-/// copy モード用のテキスト（`Event::CopyReady` のあと Lisp が受け取る）
+/// copy モード用のテキスト（`Event::CopyReady` のあと Lisp が分けて受け取る。T-086）
 pub struct CopyText {
     pub text: String,
+    /// Lisp に渡し終えたバイト数
+    pub sent: usize,
     /// 見ているペインの先頭の行（テキストの行番号。0 から）
     pub top: i64,
     /// ポイントを置く行（スクロールしていなければカーソルの行、遡っていればペインの先頭の行）
     pub point: i64,
+    /// 端末が折り返した行（行末の改行が本当の改行ではない行）の番号
+    pub wraps: Vec<i64>,
 }
+
+/// copy モードのテキストの一部（[`Shared::take_copy`]）
+pub struct CopyChunk {
+    pub text: String,
+    pub top: i64,
+    pub point: i64,
+    /// 最初の一部だけに入れる（以後は空）
+    pub wraps: Vec<i64>,
+    /// まだ残りがある
+    pub more: bool,
+}
+
+/// copy モードのテキストを一度に渡す量の上限（行の区切りで切る）。大きなスクロールバックでも Emacs を長く止めない
+const COPY_CHUNK: usize = 1 << 20;
 
 /// UI スレッドと Lisp のスレッドで分け合うもの
 pub struct Shared {
@@ -390,8 +415,30 @@ impl Shared {
         *self.selection.lock().unwrap_or_else(|e| e.into_inner()) = text;
     }
 
-    pub fn take_copy(&self) -> Option<CopyText> {
-        self.copy.lock().unwrap_or_else(|e| e.into_inner()).take()
+    /// copy モードのテキストの次の一部（[`COPY_CHUNK`] まで。行の区切りで切る）。渡し終えたら捨てる
+    pub fn take_copy(&self) -> Option<CopyChunk> {
+        let mut slot = self.copy.lock().unwrap_or_else(|e| e.into_inner());
+        let c = slot.as_mut()?;
+        let rest = &c.text[c.sent..];
+        let mut end = rest.len();
+        if end > COPY_CHUNK {
+            end = rest[..COPY_CHUNK].rfind('\n').map_or_else(
+                || (COPY_CHUNK..rest.len()).find(|&i| rest.is_char_boundary(i)).unwrap_or(rest.len()),
+                |i| i + 1,
+            );
+        }
+        let chunk = CopyChunk {
+            text: rest[..end].to_string(),
+            top: c.top,
+            point: c.point,
+            wraps: if c.sent == 0 { std::mem::take(&mut c.wraps) } else { Vec::new() },
+            more: c.sent + end < c.text.len(),
+        };
+        c.sent += end;
+        if !chunk.more {
+            *slot = None;
+        }
+        Some(chunk)
     }
 }
 
@@ -758,6 +805,8 @@ struct App {
     clipboard: (bool, bool),
     /// 点滅のタイマーが動いているか
     blink_timer: bool,
+    /// 選択のドラッグがペインの上下の外に出ている（ペインの番号と最後のクライアント座標。T-084）
+    autoscroll: Option<(i64, (i32, i32))>,
     /// 点滅でカーソルが点いているか（タイマーが止まっているときは常に true）
     blink_on: bool,
     /// 点滅の回数（自動確認用）
@@ -867,6 +916,7 @@ impl App {
             cursor_default: CursorDefault::default(),
             clipboard: (false, false),
             blink_timer: false,
+            autoscroll: None,
             blink_on: true,
             blink_ticks: 0,
             blink_pos: None,
@@ -974,6 +1024,12 @@ impl App {
             }
             Request::Scroll { pane, amount } => self.scroll_pane(pane, amount),
             Request::ClearSelection => self.clear_selection(),
+            Request::Start { cols, rows } => {
+                if self.grid.0 == 0 {
+                    self.grid = (cols.max(1), rows.max(1));
+                }
+                self.ensure_session();
+            }
             Request::SetScrollback(lines) => {
                 if let Some(s) = &self.session
                     && let Err(e) = s.lock().set_scrollback_max_lines(lines)
@@ -2117,15 +2173,25 @@ impl App {
     /// copy モードのテキストをスクロールバックごと作り、Lisp に知らせる（テキストは [`Shared`] に置く）
     fn prepare_copy(&mut self, pane: Option<i64>) {
         let Some(s) = self.session.clone() else {
-            *self.shared.copy.lock().unwrap_or_else(|e| e.into_inner()) = Some(CopyText { text: String::new(), top: 0, point: 0 });
+            *self.shared.copy.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(CopyText { text: String::new(), sent: 0, top: 0, point: 0, wraps: Vec::new() });
             self.shared.emit(Event::CopyReady);
             return;
         };
         let t0 = Instant::now();
-        let (text, top, point) = {
+        let (text, top, point, wraps) = {
             let term = s.lock();
             let alt = term.is_alternate_screen();
             let text = term.format_plain(false, false).ok().flatten().unwrap_or_default();
+            // 折り返した行（T-086）。折り返す行はほぼ端まで埋まっているので、短い行は端末に尋ねない
+            let (cols, _) = term.size();
+            let wraps: Vec<i64> = text
+                .split('\n')
+                .enumerate()
+                .filter(|(_, l)| l.chars().count() * 2 + 2 >= cols as usize)
+                .filter(|(i, _)| term.row_wraps(*i as u32))
+                .map(|(i, _)| i as i64)
+                .collect();
             let total = term.total_rows() as i64;
             let (_, rows) = term.size();
             let cursor_row = total - rows as i64 + term.cursor().1 as i64;
@@ -2133,14 +2199,14 @@ impl App {
             match id.and_then(|id| self.panes.iter().find(|p| p.id == id)) {
                 Some(p) if !p.follows(alt) => {
                     let t = p.top_row(&term, alt).max(0);
-                    (text, t, t)
+                    (text, t, t, wraps)
                 }
-                Some(p) => (text, (total - p.grid.1 as i64).max(0), cursor_row),
-                None => (text, (total - rows as i64).max(0), cursor_row),
+                Some(p) => (text, (total - p.grid.1 as i64).max(0), cursor_row, wraps),
+                None => (text, (total - rows as i64).max(0), cursor_row, wraps),
             }
         };
-        log(&format!("copy モードのテキスト: {} バイト、{} ms", text.len(), t0.elapsed().as_millis()));
-        *self.shared.copy.lock().unwrap_or_else(|e| e.into_inner()) = Some(CopyText { text, top, point });
+        log(&format!("copy モードのテキスト: {} バイト、折り返し {} 行、{} ms", text.len(), wraps.len(), t0.elapsed().as_millis()));
+        *self.shared.copy.lock().unwrap_or_else(|e| e.into_inner()) = Some(CopyText { text, sent: 0, top, point, wraps });
         self.shared.emit(Event::CopyReady);
     }
 
@@ -2259,30 +2325,7 @@ impl App {
         let mods = mods_of(wparam);
         let any_pressed = wparam.0 as u32 & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON) != 0;
         match self.drag {
-            Some(Drag::Selecting(p)) if p == id => {
-                let Some(cell) = self.pane_cell(id, client) else { return };
-                let Some(session) = self.session.clone() else { return };
-                let Some((cols, cw, pad, h)) = self.panes.iter().find(|p| p.id == id).and_then(|p| {
-                    let v = p.view.as_ref()?;
-                    let (cw, _) = v.renderer.cell_size();
-                    let (_, h) = client_size(v.hwnd);
-                    Some((p.grid.0, cw, v.renderer.padding(), h))
-                }) else {
-                    return;
-                };
-                let geometry = Geometry { columns: cols as u32, cell_width: cw, padding_left: pad, screen_height: h };
-                {
-                    let mut term = session.lock();
-                    let alt = term.is_alternate_screen();
-                    let Some(p) = self.panes.iter().find(|p| p.id == id) else { return };
-                    let Some(at) = Self::pane_ref(p, &term, cell, alt) else { return };
-                    if let Ok(Some(sel)) = term.gesture_drag(at, (client.0 as f64, client.1 as f64), geometry) {
-                        let _ = term.apply_selection(Some(sel));
-                    }
-                }
-                self.mark_selection_changed();
-                self.refresh(false);
-            }
+            Some(Drag::Selecting(p)) if p == id => self.drag_select(id, client),
             Some(Drag::Reporting(p, b)) if p == id => {
                 self.send_mouse(id, MouseAction::Motion, Some(b), true, client, mods);
             }
@@ -2294,11 +2337,78 @@ impl App {
         }
     }
 
+    /// 選択のドラッグを `client` まで伸ばす。ペインの上下の外なら自動スクロールを始める（T-084）
+    fn drag_select(&mut self, id: i64, client: (i32, i32)) {
+        let Some(cell) = self.pane_cell(id, client) else { return };
+        let Some(session) = self.session.clone() else { return };
+        let Some((cols, cw, pad, h)) = self.panes.iter().find(|p| p.id == id).and_then(|p| {
+            let v = p.view.as_ref()?;
+            let (cw, _) = v.renderer.cell_size();
+            let (_, h) = client_size(v.hwnd);
+            Some((p.grid.0, cw, v.renderer.padding(), h))
+        }) else {
+            return;
+        };
+        let geometry = Geometry { columns: cols as u32, cell_width: cw, padding_left: pad, screen_height: h };
+        {
+            let mut term = session.lock();
+            let alt = term.is_alternate_screen();
+            let Some(p) = self.panes.iter().find(|p| p.id == id) else { return };
+            let Some(at) = Self::pane_ref(p, &term, cell, alt) else { return };
+            if let Ok(Some(sel)) = term.gesture_drag(at, (client.0 as f64, client.1 as f64), geometry) {
+                let _ = term.apply_selection(Some(sel));
+            }
+        }
+        if client.1 < 0 || client.1 >= h as i32 {
+            if self.autoscroll.is_none() {
+                unsafe { SetTimer(Some(self.control), TIMER_AUTOSCROLL, AUTOSCROLL_MS, None) };
+            }
+            self.autoscroll = Some((id, client));
+        } else {
+            self.stop_autoscroll();
+        }
+        self.mark_selection_changed();
+        self.refresh(false);
+    }
+
+    fn stop_autoscroll(&mut self) {
+        if self.autoscroll.take().is_some() {
+            unsafe {
+                let _ = KillTimer(Some(self.control), TIMER_AUTOSCROLL);
+            }
+        }
+    }
+
+    /// 自動スクロールのタイマー: ペインを外へ出た向きにスクロールし、端の行までドラッグを伸ばし直す。
+    /// 1 回に動かす行数は、外へ出た距離（セルの高さ 2 つごとに 1 行増やす。最大 5 行）
+    fn autoscroll_tick(&mut self) {
+        let Some((id, client)) = self.autoscroll else {
+            self.stop_autoscroll();
+            return;
+        };
+        if !matches!(self.drag, Some(Drag::Selecting(p)) if p == id) {
+            self.stop_autoscroll();
+            return;
+        }
+        let Some((ch, h)) = self.panes.iter().find(|p| p.id == id).and_then(|p| {
+            let v = p.view.as_ref()?;
+            Some((v.renderer.cell_size().1.max(1) as i32, client_size(v.hwnd).1 as i32))
+        }) else {
+            self.stop_autoscroll();
+            return;
+        };
+        let (dir, dist) = if client.1 < 0 { (-1, -client.1) } else { (1, client.1 - h + 1) };
+        let lines = (1 + dist / (ch * 2)).clamp(1, 5) as i64;
+        self.scroll_pane(id, ScrollAmount::Lines(dir * lines));
+        self.drag_select(id, client);
+    }
+
     fn lbutton_up(&mut self, id: i64, wparam: WPARAM, lparam: LPARAM) {
         let client = point_of(lparam);
         let mods = mods_of(wparam);
         match self.drag.take() {
             Some(Drag::Selecting(p)) if p == id => unsafe {
+                self.stop_autoscroll();
                 let _ = ReleaseCapture();
                 self.finish_selection(id, client);
             },
@@ -2415,6 +2525,7 @@ impl App {
                 {
                     // ボタンを離さないまま取り上げられた（フォーカスの変化など）。選択を確定して終える
                     self.drag = None;
+                    self.stop_autoscroll();
                     self.finish_selection(id, point_of(lparam));
                 }
             }
@@ -2468,6 +2579,7 @@ extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
             with_app(|a| a.refresh(false)).map(|_| LRESULT(0))
         }
         WM_TIMER if wparam.0 == TIMER_CURSOR_BLINK => with_app(|a| a.blink_tick()).map(|_| LRESULT(0)),
+        WM_TIMER if wparam.0 == TIMER_AUTOSCROLL => with_app(|a| a.autoscroll_tick()).map(|_| LRESULT(0)),
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             Some(LRESULT(0))

@@ -51,6 +51,7 @@
 
 (defvar env-buf1 nil)
 (defvar env-buf2 nil)
+(defvar env-buf3 nil)
 (defvar env-had-remove (getenv-internal "ET_REMOVE" initial-environment))
 
 (defun env-step1 ()
@@ -74,6 +75,9 @@
                                 :display (lambda (b) (setq shown t) (pop-to-buffer b))))
     (env-check "DISPLAY の関数で出した" shown)
     (env-check "embterm-run がバッファを返す" (buffer-live-p env-buf2) env-buf2))
+  ;; 3. 出さずに起動する（DISPLAY が ignore。T-082）
+  (setq env-buf3 (embterm-run '("cmd.exe" "/d" "/k" "echo" "BG=[started]") :name "*env-bg*" :display #'ignore))
+  (env-check "出さずに開いたバッファはどのウィンドウにも無い" (null (get-buffer-window env-buf3 t)))
   ;; 呼び出しの外の process-environment は変わっていない
   (env-check "呼び出しの外では ET_X が無い" (null (getenv "ET_X"))))
 
@@ -97,12 +101,25 @@
     (env-check "作業ディレクトリのドライブレターは大文字" (string-match-p "D=\\[[A-Z]:" t1))
     (env-check "NAME のバッファ名のまま" (equal (buffer-name env-buf2) "*env-test*") (buffer-name env-buf2))
     (env-check "embterm-new はタイトルで名前が付く" (not (equal (buffer-name env-buf1) "*embterm*"))
-               (buffer-name env-buf1))))
+               (buffer-name env-buf1))
+    ;; 出さずに起動したもの: 表示を待たずに動き、80x24 で起動している
+    (let ((st (buffer-local-value 'embterm--state env-buf3)))
+      (env-check "出さずに起動した（:started）" (plist-get st :started) (format "%S" (plist-get st :pid)))
+      (env-check "出さずに起動した大きさは 80x24" (and (eql (plist-get st :cols) 80) (eql (plist-get st :rows) 24))
+                 (format "%Sx%S" (plist-get st :cols) (plist-get st :rows)))
+      (env-check "出さずに起動したものの出力" (string-search "BG=[started]" (env-text env-buf3))))
+    ;; 後で出すとウィンドウの大きさに合わせる（次の手順で見る）
+    (switch-to-buffer env-buf3)))
+
+(defun env-step3 ()
+  (let ((st (buffer-local-value 'embterm--state env-buf3)))
+    (env-check "出したらウィンドウの大きさに合わせた" (not (eql (plist-get st :cols) 80))
+               (format "%Sx%S" (plist-get st :cols) (plist-get st :rows)))))
 
 (defun env-finish ()
   (env-log "NG の数: %d" env-ng)
   (let ((kill-buffer-query-functions nil))
-    (dolist (b (list env-buf1 env-buf2))
+    (dolist (b (list env-buf1 env-buf2 env-buf3))
       (when (buffer-live-p b) (kill-buffer b))))
   (kill-emacs (if (zerop env-ng) 0 1)))
 
@@ -115,5 +132,6 @@
 
 (run-at-time 0.5 nil (env-guard #'env-step1))
 (run-at-time 5 nil (env-guard #'env-step2))
-(run-at-time 6 nil (env-guard #'env-finish))
+(run-at-time 6.5 nil (env-guard #'env-step3))
+(run-at-time 7 nil (env-guard #'env-finish))
 (run-at-time 40 nil (lambda () (env-log "時間切れ") (kill-emacs 2)))

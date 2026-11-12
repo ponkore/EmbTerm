@@ -1,0 +1,24 @@
+        You should see blinking text at the bottom line.
+
+        Enter 0 to exit, 1 to try to invoke the bug again.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        If you can see this then the bug did not appear.

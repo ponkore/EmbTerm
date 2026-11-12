@@ -54,6 +54,7 @@
 (declare-function embterm-module-hide "embterm-module")
 (declare-function embterm-module-remove "embterm-module")
 (declare-function embterm-module-select "embterm-module")
+(declare-function embterm-module-start "embterm-module")
 (declare-function embterm-module-send-string "embterm-module")
 (declare-function embterm-module-send-key "embterm-module")
 (declare-function embterm-module-paste "embterm-module")
@@ -160,6 +161,11 @@ tr-ime advanced（`tr-ime-modadv--set-composition-window'）があるときだ�
 (defcustom embterm-confirm-unsafe-paste t
   "non-nil なら、改行を含む文字列を、ブラケットペーストでないときに貼り付ける前に確かめる。"
   :type 'boolean)
+
+(defcustom embterm-background-size '(80 . 24)
+  "どのウィンドウにも出さずに開いた端末（`embterm-run' の DISPLAY が `ignore' など）の桁数と行数。
+バッファを出すと、そのウィンドウの大きさに合わせ直す（T-082）。"
+  :type '(cons integer integer))
 
 (defcustom embterm-kill-buffer-on-exit t
   "non-nil なら、プロセスが終わったら端末のバッファを消す。"
@@ -358,6 +364,8 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 (defvar-local embterm--input-mode 'semi-char
   "入力モード。`semi-char'（キーを端末に送る）か `copy'（キーを Emacs に返し、スクロールバックごと写す）。")
 (defvar-local embterm--copy-window nil "copy モードに入ったときに選んでいたウィンドウ。")
+(defvar-local embterm--copy-filling nil
+  "copy モードのテキストを受け取っている途中なら (TOP POINT WRAPS)。最初の一部で erase してから足していく（T-086）。")
 (defvar-local embterm--semi-char nil
   "non-nil なら `embterm-semi-char-map' が効く（`emulation-mode-map-alists' の条件）。")
 (defvar-local embterm--command nil "起動したコマンド（argv の先頭）。タイトルが無いときのバッファ名に使う。")
@@ -464,7 +472,10 @@ DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'�
     (funcall (or display #'pop-to-buffer-same-window) buf)
     (with-current-buffer buf
       (embterm--activate)
-      (embterm--sync))
+      (embterm--sync)
+      ;; どのウィンドウにも出さなかった（`ignore' など）なら、表示を待たずに起動する（T-082）
+      (unless (get-buffer-window buf 'visible)
+        (embterm-module-start embterm--term (car embterm-background-size) (cdr embterm-background-size))))
     buf))
 
 ;;;###autoload
@@ -476,6 +487,8 @@ ENVIRONMENT は子の環境で、`process-environment' と同じ形（nil なら
 X を消して起動する。
 NAME はバッファ名（同じ名前があれば `<2>' などを付ける）。指定するとタイトルで付け替えない。
 DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'。たとえば `pop-to-buffer'）。
+`ignore' のようにどのウィンドウにも出さなければ、`embterm-background-size' の大きさで裏で起動し、
+後でバッファを出したときにウィンドウの大きさに合わせる（T-082）。
 ヘッダ行などは、返ったバッファで設定すればよい（端末の大きさはウィンドウに合わせ直す）。"
   (unless (and (consp command) (seq-every-p #'stringp command))
     (signal 'wrong-type-argument (list 'list-of-strings command)))
@@ -573,6 +586,7 @@ DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'�
         embterm--input-mode 'semi-char
         embterm--semi-char t)
   (setq-local mode-line-process '(:eval (embterm--mode-line)))
+  (setq-local filter-buffer-substring-function #'embterm--filter-buffer-substring)
   (embterm--placeholder)
   (embterm--emulation-first)
   (embterm--tr-ime-setup)
@@ -1296,6 +1310,7 @@ KEY は基本のキー（文字かファンクションキーの名前）、MODS
         (inhibit-read-only t))
     (setq embterm--input-mode 'copy
           embterm--semi-char nil
+          embterm--copy-filling nil
           embterm--copy-window (selected-window)
           cursor-type t)
     (erase-buffer)
@@ -1308,26 +1323,70 @@ KEY は基本のキー（文字かファンクションキーの名前）、MODS
            (substitute-command-keys "\\<embterm-mode-map>\\[embterm-semi-char-mode]")))
 
 (defun embterm--fill-copy ()
-  "module が作った copy モードのテキストをバッファに入れる。
-ポイントは見ていた位置（ペインのスクロール位置 / カーソルの行）にする。copy モードを抜けていたら捨てる。"
+  "module が作った copy モードのテキストの次の一部をバッファに足す（T-086）。
+テキストは 1 MiB ずつ届くので、残りがあれば次の一部をタイマーで受け取る（大きなスクロールバックでも Emacs を長く止めない）。
+最後まで受け取ったら、端末が折り返した行の改行に印（`embterm-wrap'）を付け、ポイントを見ていた位置
+（ペインのスクロール位置 / カーソルの行）にする。copy モードを抜けていたら残りを捨てる。"
   (pcase (embterm-module-take-copy embterm--term)
-    (`(,text ,top ,point)
-     (when (eq embterm--input-mode 'copy)
+    (`(,text ,top ,point ,wraps ,more)
+     (if (not (eq embterm--input-mode 'copy))
+         (progn
+           (setq embterm--copy-filling nil)
+           (while (and more (setq more (car (last (embterm-module-take-copy embterm--term)))))))
        (let ((inhibit-read-only t))
-         (erase-buffer)
-         (insert text)
-         (goto-char (point-min)))
-       (let* ((window embterm--copy-window)
-              (goto (lambda (line)
-                      (goto-char (point-min))
-                      (forward-line line)
-                      (point)))
-              (top-pos (funcall goto top))
-              (point-pos (funcall goto point)))
-         (goto-char point-pos)
-         (when (and (window-live-p window) (eq (window-buffer window) (current-buffer)))
-           (set-window-start window top-pos t)
-           (set-window-point window point-pos)))))))
+         (unless embterm--copy-filling
+           (erase-buffer)
+           (setq embterm--copy-filling (list top point wraps)))
+         (save-excursion
+           (goto-char (point-max))
+           (insert text)))
+       (if more
+           (let ((buf (current-buffer)))
+             (run-at-time 0 nil (lambda ()
+                                  (when (buffer-live-p buf)
+                                    (with-current-buffer buf
+                                      (when embterm--term (embterm--fill-copy)))))))
+         (pcase-let ((`(,top ,point ,wraps) embterm--copy-filling))
+           (setq embterm--copy-filling nil)
+           (embterm--mark-wraps wraps)
+           (let* ((window embterm--copy-window)
+                  (goto (lambda (line)
+                          (goto-char (point-min))
+                          (forward-line line)
+                          (point)))
+                  (top-pos (funcall goto top))
+                  (point-pos (funcall goto point)))
+             (goto-char point-pos)
+             (when (and (window-live-p window) (eq (window-buffer window) (current-buffer)))
+               (set-window-start window top-pos t)
+               (set-window-point window point-pos)))))))))
+
+(defun embterm--mark-wraps (wraps)
+  "WRAPS（端末が折り返した行の番号のベクタ。昇順）の行末の改行に `embterm-wrap' を付ける。
+バッファの行は端末の行のまま（行番号とスクロール位置が対応する）にし、コピーのときだけつなぐ
+（`embterm--filter-buffer-substring'）。"
+  (let ((inhibit-read-only t)
+        (line 0))
+    (save-excursion
+      (goto-char (point-min))
+      (seq-doseq (w wraps)
+        (forward-line (- w line))
+        (setq line w)
+        (end-of-line)
+        (when (eq (char-after) ?\n)
+          (put-text-property (point) (1+ (point)) 'embterm-wrap t))))))
+
+(defun embterm--filter-buffer-substring (beg end &optional delete)
+  "`filter-buffer-substring-function' の端末のバッファ版。端末が折り返した行の改行（`embterm-wrap'）を除く
+（copy モードで `M-w' などしたとき、折り返しをつないだ形でコピーする。T-086）。"
+  (let ((s (buffer-substring--filter beg end delete))
+        (pos 0) parts next)
+    (while (setq next (text-property-any pos (length s) 'embterm-wrap t s))
+      (push (substring s pos next) parts)
+      (setq pos (1+ next)))
+    (if parts
+        (apply #'concat (nreverse (cons (substring s pos) parts)))
+      s)))
 
 (provide 'embterm)
 
