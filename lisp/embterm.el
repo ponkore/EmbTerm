@@ -288,6 +288,11 @@ Emacs の通知（`w32-notification-notify'）は消すまで通知領域にア�
   "Ctrl+クリックで開くハイパーリンク（OSC 8）の URI のスキーム。ほかのものは開かない。"
   :type '(repeat string))
 
+(defcustom embterm-show-link-on-hover t
+  "non-nil なら、マウスの下のハイパーリンク（OSC 8）の URI をエコー領域に出す（T-101）。
+リンクには下線が引かれ、Ctrl+クリックで開く。"
+  :type 'boolean)
+
 (defcustom embterm-hyperlink-function #'embterm-open-hyperlink
   "Ctrl+クリックしたハイパーリンク（OSC 8）の URI を引数に呼ぶ関数（T-039）。"
   :type 'function)
@@ -898,6 +903,7 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
              (embterm--set-progress state percent)
              (run-hook-with-args 'embterm-progress-functions state percent buf))
             (`(link . ,uri) (funcall embterm-hyperlink-function uri))
+            (`(hover . ,uri) (embterm--show-hover uri))
             (_ nil)))))))
 
 ;;;; バッファ名（T-080）
@@ -1037,6 +1043,20 @@ Emacs のフレームにフォーカスが無ければトースト（`embterm-no
 フォーカスはあるが端末のウィンドウを選んでいなければ `message'、端末を見ていれば何もしない。"
   (cond ((null (frame-focus-state (selected-frame))) (embterm-notification-toast title body buffer))
         ((embterm--unattended-p buffer) (embterm-notification-message title body buffer))))
+
+(defvar embterm--hover-message nil "最後にエコー領域に出したリンクの文面（外れたとき、それが出ていれば消す）。")
+
+(defun embterm--show-hover (uri)
+  "マウスの下のハイパーリンクの URI をエコー領域に出す。URI が nil（外れた）なら、出していた文面を消す（T-101）。
+`*Messages*' には残さない。"
+  (when embterm-show-link-on-hover
+    (let ((message-log-max nil))
+      (if uri
+          (setq embterm--hover-message
+                (message "%s" (substitute-command-keys (format "%s  （Ctrl+クリックで開く）" uri))))
+        (when (and embterm--hover-message (equal (current-message) embterm--hover-message))
+          (message nil))
+        (setq embterm--hover-message nil)))))
 
 (defun embterm-open-hyperlink (uri)
   "Ctrl+クリックしたハイパーリンク（OSC 8）の URI を開く（`embterm-hyperlink-function' の既定）。

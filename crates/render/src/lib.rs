@@ -738,11 +738,13 @@ impl Renderer {
             self.flush_run(dc, r)?;
         }
 
-        // 下線・取り消し線・上線（placeholder の下線の色は配置の ID で、線としては描かない）
+        // 下線・取り消し線・上線（placeholder の下線の色は配置の ID で、線としては描かない）。
+        // マウスの下のハイパーリンク（`view.hover`）にも下線を引く（T-101）
         for y in rows {
             let Some(fy) = Self::frame_row(frame, view, y) else { continue };
             let row = &frame.row(fy)[..cols];
-            if !row.iter().any(|c| c.underline() != Underline::None || c.style.strikethrough() || c.style.overline()) {
+            let hover = view.hover.filter(|h| h.0 == y).map(|h| (h.1 as usize, (h.2 as usize).min(cols)));
+            if hover.is_none() && !row.iter().any(|c| c.underline() != Underline::None || c.style.strikethrough() || c.style.overline()) {
                 continue;
             }
             let top = pad + y as f32 * ch;
@@ -750,7 +752,8 @@ impl Renderer {
             self.row_colors(frame, row, fy, y, ctx, &mut fgs, &mut bgs);
             for x in 0..cols {
                 let c = &row[x];
-                let ul = c.underline();
+                let hovered = hover.is_some_and(|(s, e)| (s..e).contains(&x));
+                let ul = if hovered && c.underline() == Underline::None { Underline::Single } else { c.underline() };
                 if (ul == Underline::None && !c.style.strikethrough() && !c.style.overline()) || c.ch == PLACEHOLDER {
                     continue;
                 }

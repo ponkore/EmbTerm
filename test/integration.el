@@ -85,6 +85,8 @@
 
 (defvar it-notes nil)
 (defvar it-progress nil)
+(defvar it-hovers nil "`embterm--show-hover' が受けた URI（T-101）。")
+(advice-add 'embterm--show-hover :before (lambda (uri) (push uri it-hovers)))
 (defvar it-bells 0)
 (defvar it-browsed nil)
 
@@ -402,9 +404,30 @@
                 ;; Ctrl なしのクリック → 開かない。Ctrl+クリック → 開く
                 (it-post hwnd (format "down:%d:%d,up:%d:%d" (car link) (cdr link) (car link) (cdr link)))
                 (it-post hwnd (format "cdown:%d:%d,cup:%d:%d" (car link) (cdr link) (car link) (cdr link)))
-                (it-post hwnd (format "cdown:%d:%d,cup:%d:%d" (car plain) (cdr plain) (car plain) (cdr plain))))))
+                (it-post hwnd (format "cdown:%d:%d,cup:%d:%d" (car plain) (cdr plain) (car plain) (cdr plain)))
+                ;; T-101: マウスをリンクの上に置く（本物の経路。本物のカーソルは外なので、すぐ WM_MOUSELEAVE で外れる）
+                (setq it-hovers nil)
+                (it-post hwnd (format "hmove:%d:%d" (car link) (cdr link))))))
     (1.5 "Ctrl+クリックの後"
          . ,(lambda ()
+              ;; T-101: WM_MOUSEMOVE でリンクの URI が届き、WM_MOUSELEAVE で外れる
+              (it-check "マウスを乗せると URI が届き、出ると外れる"
+                        (equal (reverse it-hovers) '("https://example.com/embterm-osc8?x=1" nil)) (format "%S" (reverse it-hovers)))
+              ;; 下線の範囲と描画は、カーソルが乗っているものとして調べ直させて見る（画面は frame-link-hover.png）
+              (with-current-buffer it-a
+                (let ((link (it-link-point 4 6)))
+                  (embterm-module-debug-hover embterm--term (embterm--pane-id (car embterm--panes)) (car link) (cdr link))))
+              (it-check "リンクの上で URI をエコー領域に出す"
+                        (progn (with-current-buffer it-a (embterm--poll-1))
+                               (string-match-p (regexp-quote "https://example.com/embterm-osc8?x=1") (or (current-message) "")))
+                        (current-message))
+              (it-check "下線を引く範囲（行 4、リンクの桁）"
+                        (with-current-buffer it-a
+                          (equal (plist-get (embterm-module-debug-info embterm--term) :hover) '(4 4 19)))
+                        (format "%S" (with-current-buffer it-a (plist-get (embterm-module-debug-info embterm--term) :hover))))
+              (it-frame-png "frame-link-hover.png")
+              (let ((plain (it-link-point 4 (+ 4 15 4))))
+                (it-post (it-hwnd) (format "hmove:%d:%d" (car plain) (cdr plain))))
               (it-check "Ctrl+クリックで browse-url（1 回だけ）" (equal it-browsed '("https://example.com/embterm-osc8?x=1"))
                         (format "%S" it-browsed))
               (setq it-browsed nil)
@@ -443,6 +466,8 @@
               (it-check "embterm-list-buffers で選んだ端末へ" (eq (window-buffer) it-a))))
     (3.0 "バッファ名"
          . ,(lambda ()
+              (it-check "リンクから外れたらエコー領域から消す（T-101）"
+                        (not (string-match-p "embterm-osc8" (or (current-message) ""))) (current-message))
               (it-log "バッファ: %S" (mapcar #'buffer-name (embterm--live-buffers)))
               (it-check "どの端末もコマンド名か短いタイトル（40 以下）"
                         (seq-every-p (lambda (b) (<= (string-width (buffer-name b)) 44)) (embterm--live-buffers)))

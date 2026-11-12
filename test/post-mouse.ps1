@@ -4,6 +4,7 @@
 #
 # 動作は次のどれか。X Y はクライアント座標、D はホイールの量（120 が 1 ノッチ、正は上）
 #   down:X:Y  up:X:Y  move:X:Y  rdown:X:Y  rup:X:Y  wheel:D:X:Y
+#   hmove:X:Y（ボタンを押していない動き。リンクの上の下線。T-101）
 #   sdown:X:Y sup:X:Y smove:X:Y（Shift を押した扱い）
 #   cdown:X:Y cup:X:Y cmove:X:Y（Ctrl を押した扱い。ハイパーリンクの Ctrl+クリック。T-039）
 #   sleep:MS
@@ -30,6 +31,7 @@ foreach ($a in $Actions.Split(',')) {
         'down'  { [void][EmbTermPost]::PostMessageW($h, 0x0201, [IntPtr]1, (Pt $p[1] $p[2])) }
         'up'    { [void][EmbTermPost]::PostMessageW($h, 0x0202, [IntPtr]0, (Pt $p[1] $p[2])) }
         'move'  { [void][EmbTermPost]::PostMessageW($h, 0x0200, [IntPtr]1, (Pt $p[1] $p[2])) }
+        'hmove' { [void][EmbTermPost]::PostMessageW($h, 0x0200, [IntPtr]0, (Pt $p[1] $p[2])) }
         'rdown' { [void][EmbTermPost]::PostMessageW($h, 0x0204, [IntPtr]2, (Pt $p[1] $p[2])) }
         'rup'   { [void][EmbTermPost]::PostMessageW($h, 0x0205, [IntPtr]0, (Pt $p[1] $p[2])) }
         'sdown' { [void][EmbTermPost]::PostMessageW($h, 0x0201, [IntPtr]5, (Pt $p[1] $p[2])) }

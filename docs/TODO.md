@@ -315,7 +315,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-098** 他のアプリが前面のとき、端末のペインをクリックしても Emacs にフォーカスが入らない（2026-11-11）→ フレームが前面でなければ `WM_MOUSEACTIVATE` に `MA_ACTIVATE` を返すようにした。本物のクリックでの動作をユーザーが確認した
 - ✅ **T-099** 通知を Windows のトースト通知にする（いまは `message`）（2026-11-12）→ 既定 `embterm-notification-default`: Emacs が裏ならトースト（10 秒で消す）、前なら `message`。本物のトーストの見え方は手で確かめる。docs/notes/t078-tests.md
 - ✅ **T-100** 進捗（OSC 9;4）をモードラインに出す（2026-11-12）→ ` [42%]` などを出す（`embterm-show-progress`）。docs/notes/t078-tests.md
-- ⬜ **T-101** リンクの上にマウスがあるときに下線や URI を出す
+- ✅ **T-101** リンクの上にマウスがあるときに下線や URI を出す（2026-11-12）→ 同じ URI の桁に下線、URI をエコー領域に（`embterm-show-link-on-hover`）。ペインから出たら消す。docs/notes/t078-tests.md
 - ⬜ **T-102** テーマを切り替えたらアプリにダーク / ライトを知らせる（`CSI ?996n`、mode 2031）
 - ✅ **T-103** `embterm-project` のバッファ名にプロジェクト名を入れる（2026-11-12）→ `*embterm: EmbTerm: pwsh*`。docs/notes/t078-tests.md
 - ⬜ **T-104** 何もしていないときの Lisp のポーリングの CPU（端末 15 個で 4〜5%）。隠れている端末の巡回を軽くする、何も変わらない間は間隔を延ばす（t054 §7-1）

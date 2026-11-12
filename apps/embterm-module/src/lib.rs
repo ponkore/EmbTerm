@@ -396,7 +396,7 @@ fn link_at(term: &RefCell<Term>, pane: i64, x: i64, y: i64) -> Result<Option<Str
 
 /// 描画とカーソルの状態の plist（UI スレッドに頼んで最大 2 秒待つ。デバッグ・自動確認用）。
 /// `(:blink-timer :blink-on :blink-ticks :full-draws :partial-draws :cursor-shape :cursor-blinking :cursor-visible
-/// :foreground :background :palette1 :cell :padding)`
+/// :foreground :background :palette1 :cell :padding :hover)`
 #[defun]
 fn debug_info<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -430,6 +430,11 @@ fn debug_info<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
         env.cons(i.cell.0 as i64, i.cell.1 as i64)?,
         env.intern(":padding")?,
         (i.padding as i64).into_lisp(env)?,
+        env.intern(":hover")?,
+        match i.hover {
+            Some((r, s, e)) => env.list((r as i64, s as i64, e as i64))?,
+            None => ().into_lisp(env)?,
+        },
     ];
     env.list(&items)
 }
@@ -463,6 +468,13 @@ fn shutdown<'e>(env: &'e Env, grace_ms: i64) -> Result<Value<'e>> {
 #[defun]
 fn process_report(term: &RefCell<Term>) -> Result<Option<String>> {
     Ok(term.borrow().shared().session().map(|s| s.process_report()))
+}
+
+/// マウスがペイン PANE のクライアント座標 X Y にあるものとして、リンクの下線と URI の知らせを調べ直す（自動確認用。T-101）
+#[defun]
+fn debug_hover(term: &RefCell<Term>, pane: i64, x: i64, y: i64) -> Result<()> {
+    term.borrow().request(Request::DebugHover { pane, x: x as i32, y: y as i32 });
+    Ok(())
 }
 
 /// GPU デバイスを失ったことにする（デバッグ・自動確認用。T-067）。分け合うデバイスを捨て、開いている全部の端末に
@@ -524,6 +536,7 @@ fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Resu
                 env.cons(env.intern("progress")?, env.cons(env.intern(state)?, percent.map(|p| p as i64))?)?
             }
             Event::Link(uri) => env.cons(env.intern("link")?, uri)?,
+            Event::Hover(uri) => env.cons(env.intern("hover")?, uri)?,
         });
     }
     let b = |v: bool| -> Result<Value<'e>> { v.into_lisp(env) };

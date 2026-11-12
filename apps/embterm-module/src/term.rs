@@ -53,7 +53,9 @@ use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToC
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::INFINITE;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU, VK_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_MENU, VK_SHIFT,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
@@ -88,6 +90,8 @@ const TIMER_RENDER_HOLD: usize = 1;
 const TIMER_CURSOR_BLINK: usize = 2;
 /// 選択のドラッグがペインの上下の外に出ている間、ペインをスクロールするタイマー（T-084）
 const TIMER_AUTOSCROLL: usize = 3;
+/// マウスがウィンドウから出た（`TrackMouseEvent` の `TME_LEAVE`）。windows クレートでは Controls の feature にあるので値を書く
+const WM_MOUSELEAVE: u32 = 0x02A3;
 /// 自動スクロールの間隔（ms）。1 回に動かす行数は外へ出た距離で増やす
 const AUTOSCROLL_MS: u32 = 50;
 /// Lisp がまだ読んでいない知らせの上限（アプリが OSC を大量に出したときに溜め込みすぎない）
@@ -157,6 +161,9 @@ pub enum Request {
     SetClipboardPolicy { write: bool, read: bool },
     /// ペインの画素の位置のハイパーリンク（デバッグ・自動確認用）
     LinkAt { pane: i64, x: i32, y: i32, reply: mpsc::Sender<Option<String>> },
+    /// マウスがペインのクライアント座標 (x, y) にあるものとしてリンクの下線を調べ直す（自動確認用。T-101。
+    /// PostMessage の WM_MOUSEMOVE では、本物のカーソルが外にあるので WM_MOUSELEAVE がすぐ来て消えてしまう）
+    DebugHover { pane: i64, x: i32, y: i32 },
     /// 描画とカーソルの状態（デバッグ・自動確認用）
     DebugInfo(mpsc::Sender<DebugInfo>),
     /// 性能の測定の報告（T-054。`reset` なら報告のあと消す）
@@ -211,6 +218,8 @@ pub struct DebugInfo {
     /// 選んでいる（無ければ最後に選んだ）ペインのセルの大きさと余白（画素）
     pub cell: (u32, u32),
     pub padding: u32,
+    /// 下線を引いているリンクの範囲（ペインの行, 始めの桁, 終わりの桁。T-101）
+    pub hover: Option<(u16, u16, u16)>,
 }
 
 /// Lisp に渡す知らせ
@@ -236,6 +245,8 @@ pub enum Event {
     Progress { state: &'static str, percent: Option<u8> },
     /// ハイパーリンク（OSC 8）が Ctrl+クリックされた（URI）
     Link(String),
+    /// マウスの下のハイパーリンクが変わった（URI。外れたら `None`。T-101）
+    Hover(Option<String>),
 }
 
 /// Lisp に見せるペインの情報
@@ -731,6 +742,10 @@ struct Pane {
     needs_draw: bool,
     /// 描こうとしたが、スワップチェーンが次のフレームをまだ受け付けない（知らせを待っている。T-068）
     waiting_frame: bool,
+    /// マウスの下にあるハイパーリンクの範囲（行, 始めの桁, 終わりの桁（含まない））。下線を引く（T-101）
+    hover: Option<(u16, u16, u16)>,
+    /// WM_MOUSELEAVE を頼んだ（TrackMouseEvent。ペインから出たら下線を消す）
+    tracking_leave: bool,
 }
 
 impl Pane {
@@ -807,6 +822,8 @@ struct App {
     blink_timer: bool,
     /// 選択のドラッグがペインの上下の外に出ている（ペインの番号と最後のクライアント座標。T-084）
     autoscroll: Option<(i64, (i32, i32))>,
+    /// マウスの下のハイパーリンクの URI（T-101。変わったら Lisp に知らせる）
+    hover_uri: Option<String>,
     /// 点滅でカーソルが点いているか（タイマーが止まっているときは常に true）
     blink_on: bool,
     /// 点滅の回数（自動確認用）
@@ -917,6 +934,7 @@ impl App {
             clipboard: (false, false),
             blink_timer: false,
             autoscroll: None,
+            hover_uri: None,
             blink_on: true,
             blink_ticks: 0,
             blink_pos: None,
@@ -1104,6 +1122,7 @@ impl App {
             Request::LinkAt { pane, x, y, reply } => {
                 let _ = reply.send(self.link_at(pane, (x, y)));
             }
+            Request::DebugHover { pane, x, y } => self.update_hover(pane, Some((x, y))),
             Request::DebugInfo(reply) => {
                 let mut info = DebugInfo {
                     blink_timer: self.blink_timer,
@@ -1130,6 +1149,7 @@ impl App {
                             info.cell = v.renderer.cell_size();
                             info.padding = v.renderer.padding();
                         }
+                        info.hover = info.hover.or(p.hover);
                     }
                 }
                 let _ = reply.send(info);
@@ -1373,6 +1393,8 @@ impl App {
                 needs_sync: false,
                 needs_draw: true,
                 waiting_frame: false,
+                hover: None,
+                tracking_leave: false,
             });
             if self.active.is_none() {
                 self.active = Some(id);
@@ -1774,7 +1796,7 @@ impl App {
         let focused = self.focused && self.selected == Some(p.id);
         // 点滅で消えているときはカーソルを描かない（フォーカスの無いペインは枠のまま点滅しない）
         let show_cursor = !(focused && self.blink_timer && !self.blink_on);
-        FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor }
+        FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor, hover: p.hover }
     }
 
     /// ペインの今の中身を描く
@@ -1800,10 +1822,10 @@ impl App {
             let result = if follows {
                 // 追っているペイン: 端末の下の端をペインの下の端に揃える（上に足りなければ空き）
                 let show_cursor = !(focused && self.blink_timer && !self.blink_on);
-                let view = FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor };
+                let view = FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor, hover: pane.hover };
                 v.renderer.draw_view(&self.master, &view, focused, capture)
             } else if let Some(s) = &pane.scrolled {
-                let view = FrameView { top: s.top, cols, rows, show_cursor: false };
+                let view = FrameView { top: s.top, cols, rows, show_cursor: false, hover: pane.hover };
                 v.renderer.draw_view(&s.frame, &view, focused, capture)
             } else {
                 Ok(())
@@ -2258,6 +2280,47 @@ impl App {
         term.grid_ref(x, y as u32).ok()
     }
 
+    /// マウスの下のハイパーリンクを調べ直す（T-101）。`client` が `None` ならペインから出た。
+    /// リンクの上なら、同じ URI が続く桁の範囲（同じ行の中）に下線を引き、URI が変わったら Lisp に知らせる
+    fn update_hover(&mut self, id: i64, client: Option<(i32, i32)>) {
+        let found = client.and_then(|c| {
+            let cell = self.pane_cell(id, c)?;
+            let s = self.session.as_ref()?;
+            let term = s.lock();
+            let alt = term.is_alternate_screen();
+            let p = self.panes.iter().find(|p| p.id == id)?;
+            let uri_at = |x: u16| Self::pane_ref(p, &term, (x, cell.1), alt).and_then(|r| term.hyperlink_uri(r));
+            let uri = uri_at(cell.0)?;
+            let mut start = cell.0;
+            while start > 0 && uri_at(start - 1).as_deref() == Some(uri.as_str()) {
+                start -= 1;
+            }
+            let mut end = cell.0 + 1;
+            while end < p.grid.0 && uri_at(end).as_deref() == Some(uri.as_str()) {
+                end += 1;
+            }
+            Some((uri, (cell.1, start, end)))
+        });
+        let span = found.as_ref().map(|f| f.1);
+        let mut changed = false;
+        for p in &mut self.panes {
+            let want = if p.id == id { span } else { None };
+            if p.hover != want {
+                p.hover = want;
+                p.needs_draw = true;
+                changed = true;
+            }
+        }
+        let uri = found.map(|f| f.0);
+        if uri != self.hover_uri {
+            self.hover_uri = uri.clone();
+            self.shared.emit(Event::Hover(uri));
+        }
+        if changed {
+            self.refresh(false);
+        }
+    }
+
     /// ペインのクライアント座標のセルのハイパーリンク（OSC 8）の URI（T-039）
     fn link_at(&self, id: i64, client: (i32, i32)) -> Option<String> {
         let cell = self.pane_cell(id, client)?;
@@ -2324,6 +2387,21 @@ impl App {
         let client = point_of(lparam);
         let mods = mods_of(wparam);
         let any_pressed = wparam.0 as u32 & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON) != 0;
+        // マウスの下のリンク（T-101）。ペインから出たら WM_MOUSELEAVE で消す。アプリへ報告している間は Ctrl を押したときだけ
+        if let Some(p) = self.panes.iter_mut().find(|p| p.id == id)
+            && !p.tracking_leave
+            && let Some(v) = &p.view
+        {
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: v.hwnd,
+                dwHoverTime: 0,
+            };
+            p.tracking_leave = unsafe { TrackMouseEvent(&mut tme) }.is_ok();
+        }
+        let hover_ok = self.drag.is_none() && (mods.ctrl || !self.should_report(id, mods.shift));
+        self.update_hover(id, hover_ok.then_some(client));
         match self.drag {
             Some(Drag::Selecting(p)) if p == id => self.drag_select(id, client),
             Some(Drag::Reporting(p, b)) if p == id => {
@@ -2518,6 +2596,12 @@ impl App {
                 return None;
             }
             WM_MOUSEMOVE => self.mouse_move(id, wparam, lparam),
+            WM_MOUSELEAVE => {
+                if let Some(p) = self.pane_mut(id) {
+                    p.tracking_leave = false;
+                }
+                self.update_hover(id, None);
+            }
             WM_LBUTTONUP => self.lbutton_up(id, wparam, lparam),
             WM_CAPTURECHANGED => {
                 if let Some(Drag::Selecting(p)) = self.drag

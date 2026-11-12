@@ -111,3 +111,14 @@
 - **T-100 進捗**: OSC 9;4 をモードラインに出す（` [42%]`・` […]`・` [エラー 70%]`・` [一時停止 …]`。`remove` で消える）。`embterm-show-progress`（既定 t）
 - **T-103**: `embterm-project` で開いた端末のバッファ名はプロジェクト名を前に付ける（`*embterm: EmbTerm: pwsh*`）
 - 確かめたこと（`test/integration.el`、64 件）
+
+## 12. T-101 リンクの上の下線と URI
+
+- マウスがハイパーリンク（OSC 8）の上にあると、**同じ URI が続く桁（同じ行の中）に下線を引き**、URI を**エコー領域に出す**
+  （`*Messages*` には残さない。外れたら、出していた文面のときだけ消す。`embterm-show-link-on-hover`）。
+  アプリへマウスを報告している間は Ctrl を押しているときだけ（Ctrl+クリックで開くのと同じ）
+- module: `WM_MOUSEMOVE` で調べ直し（`update_hover`）、`TrackMouseEvent(TME_LEAVE)` の `WM_MOUSELEAVE` で消す。URI が変わったら
+  `(hover . URI)` を知らせる。描画は `FrameView::hover`（ペインの行と桁の範囲）に下線を足す
+- **試験**: PostMessage の `WM_MOUSEMOVE` では本物のカーソルが外にあるので `WM_MOUSELEAVE` がすぐ来る。本物の経路では
+  「URI が届いて、すぐ外れる」を確かめ、下線の範囲と描画はデバッグ用の `embterm-module-debug-hover` で直接置いて確かめた
+  （`test/integration.el`。本物のマウスは動かさない）。画面は `target/t034/frame-link-hover.png`
