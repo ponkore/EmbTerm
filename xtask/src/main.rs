@@ -12,7 +12,7 @@
 //!
 //! cargo xtask dist
 //!     release でビルドし、target/dist/ に配布物を集める（T-028 / T-030）:
-//!     embterm_module.dll、embterm.el、embterm.exe、conpty.dll、x64/OpenConsole.exe
+//!     embterm_module.dll、embterm.el、embterm.exe、conpty.dll、x64/OpenConsole.exe、etc/embterm.{ps1,bash,lua}（シェル統合）
 //!     （ConPTY は vendor/conpty から。無ければ先に `cargo xtask fetch-conpty`）
 //!
 //! cargo xtask install [DIR]
@@ -254,6 +254,10 @@ fn build_release() -> Result<Vec<(PathBuf, &'static str)>, String> {
         (root.join("lisp/embterm.el"), "embterm.el"),
         (conpty.join("conpty.dll"), "conpty.dll"),
         (conpty.join("x64/OpenConsole.exe"), "x64/OpenConsole.exe"),
+        // シェル統合（T-118 / T-119）
+        (root.join("etc/embterm.ps1"), "etc/embterm.ps1"),
+        (root.join("etc/embterm.bash"), "etc/embterm.bash"),
+        (root.join("etc/embterm.lua"), "etc/embterm.lua"),
     ];
     for (src, _) in &files {
         if !src.exists() {
@@ -270,6 +274,9 @@ fn dist() -> Result<(), String> {
     std::fs::create_dir_all(dist.join("x64")).map_err(|e| e.to_string())?;
     for (src, name) in &files {
         let dst = dist.join(name);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
         std::fs::copy(src, &dst).map_err(|e| format!("{} → {}: {e}", src.display(), dst.display()))?;
         eprintln!("{}", dst.display());
     }
@@ -297,6 +304,9 @@ fn install(dir: PathBuf) -> Result<(), String> {
     }
     for (src, name) in &files {
         let dst = dir.join(name);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
         let new = std::fs::read(src).map_err(|e| format!("{}: {e}", src.display()))?;
         if std::fs::read(&dst).is_ok_and(|old| old == new) {
             eprintln!("同じ: {}", dst.display());

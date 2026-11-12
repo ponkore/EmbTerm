@@ -122,6 +122,8 @@ pub trait Effects: Send {
     fn desktop_notification(&mut self, _title: &str, _body: &str) {}
     /// 進捗（OSC 9;4）。`percent` は省かれていれば `None`
     fn progress(&mut self, _state: ProgressState, _percent: Option<u8>) {}
+    /// libghostty-vt が扱わない OSC（`ESC ]` と終端の間。番号を含む）。長すぎて切れたものは `truncated`（T-118）
+    fn unknown_osc(&mut self, _content: &[u8], _truncated: bool) {}
 }
 
 /// 進捗の状態（OSC 9;4。`GhosttyTerminalProgressState`）
@@ -297,6 +299,7 @@ impl Terminal {
             let notify: ffi::GhosttyTerminalDesktopNotificationFn = cb_desktop_notification;
             let progress: ffi::GhosttyTerminalProgressReportFn = cb_progress_report;
             let scheme: ffi::GhosttyTerminalColorSchemeFn = cb_color_scheme;
+            let unknown: ffi::GhosttyTerminalUnknownSequenceFn = cb_unknown_sequence;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_BELL, bell as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, title as *const c_void))?;
@@ -308,6 +311,10 @@ impl Terminal {
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, notify as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT, progress as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_COLOR_SCHEME, scheme as *const c_void))?;
+            // 未知の OSC（OSC 51;E などの EmbTerm 独自のもの。T-118）。上限まで中身を取っておく
+            check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE, unknown as *const c_void))?;
+            let max: usize = UNKNOWN_MAX_BYTES;
+            check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES, &max as *const usize as *const c_void))?;
         }
         Ok(t)
     }
@@ -1199,6 +1206,21 @@ unsafe extern "C" fn cb_progress_report(_t: ffi::GhosttyTerminal, userdata: *mut
 }
 
 /// `CSI 14/16/18/19 t` と mode 2048 の答え。桁数・行数は端末から、セルの画素は [`Terminal::resize`] で覚えた値
+/// 未知の OSC として取っておく中身の上限（バイト）。2048 までは追加の確保が無いが、長いパスを渡せるよう大きめにする（T-118）
+pub const UNKNOWN_MAX_BYTES: usize = 8192;
+
+/// libghostty-vt が扱わないシーケンス（T-118）。OSC だけ渡す
+unsafe extern "C" fn cb_unknown_sequence(_t: ffi::GhosttyTerminal, userdata: *mut c_void, sequence: *const ffi::GhosttyTerminalUnknownSequence) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (Some(i), Some(seq)) = (inner(userdata), sequence.as_ref()) else { return };
+        if seq.tag != ffi::GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_OSC {
+            return;
+        }
+        let osc = seq.value.osc;
+        i.effects.unknown_osc(ghostty_str(&osc.content), osc.truncated);
+    }));
+}
+
 /// `CSI ? 996 n`（配色の問い合わせ。T-102）
 unsafe extern "C" fn cb_color_scheme(_t: ffi::GhosttyTerminal, userdata: *mut c_void, out: *mut c_int) -> bool {
     catch_unwind(AssertUnwindSafe(|| unsafe {

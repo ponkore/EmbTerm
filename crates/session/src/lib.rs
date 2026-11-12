@@ -49,6 +49,8 @@ pub enum Event {
     Notification { title: String, body: String },
     /// 進捗（OSC 9;4）
     Progress { state: ProgressState, percent: Option<u8> },
+    /// シェルから Emacs の関数を呼ぶ（OSC 51;E。T-118）。`51;E` の後ろの中身（`"関数名" "引数" ...`）
+    ShellCommand(String),
 }
 
 /// 知らせを受ける関数。**PTY の読みのスレッドや閉じるスレッドから呼ばれる**（端末のロックを持ったままのこともある）。
@@ -240,6 +242,14 @@ impl Effects for TermEffects {
     }
     fn progress(&mut self, state: ProgressState, percent: Option<u8>) {
         (self.notify)(Event::Progress { state, percent });
+    }
+    fn unknown_osc(&mut self, content: &[u8], truncated: bool) {
+        // OSC 51;E（vterm と同じ形）だけ。長すぎて切れたものは、引数が欠けているので捨てる
+        if let Some(rest) = content.strip_prefix(b"51;E")
+            && !truncated
+        {
+            (self.notify)(Event::ShellCommand(String::from_utf8_lossy(rest).into_owned()));
+        }
     }
 }
 

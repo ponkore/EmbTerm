@@ -412,6 +412,38 @@ pub const GHOSTTY_TERMINAL_OPT_MODE_DEFAULT: c_int = 34;
 pub const GHOSTTY_TERMINAL_OPT_MODE: c_int = 35;
 pub const GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK: c_int = 41;
 pub const GHOSTTY_TERMINAL_OPT_RENDER_HOLD: c_int = 42;
+pub const GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE: c_int = 36;
+pub const GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES: c_int = 37;
+
+/// terminal.h の未知のシーケンス（T-118）
+pub const GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_APC: c_int = 0;
+pub const GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_OSC: c_int = 1;
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GhosttyTerminalUnknownStringSequence {
+    pub truncated: bool,
+    pub content: GhosttyString,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GhosttyTerminalUnknownOscSequence {
+    pub truncated: bool,
+    pub content: GhosttyString,
+    pub terminator: c_int,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union GhosttyTerminalUnknownSequenceValue {
+    pub apc: GhosttyTerminalUnknownStringSequence,
+    pub osc: GhosttyTerminalUnknownOscSequence,
+    pub _padding: [u64; 16],
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GhosttyTerminalUnknownSequence {
+    pub tag: c_int,
+    pub value: GhosttyTerminalUnknownSequenceValue,
+}
 
 // GhosttyTerminalData
 pub const GHOSTTY_TERMINAL_DATA_COLS: c_int = 1;
@@ -631,6 +663,9 @@ pub type GhosttyTerminalDesktopNotificationFn = unsafe extern "C" fn(
     notification: *const GhosttyTerminalDesktopNotification,
 );
 /// `CSI ? 996 n`（配色の問い合わせ）に答える。`out` は GhosttyColorScheme（T-102）
+/// 未知のシーケンス（APC・OSC）を受ける（T-118）
+pub type GhosttyTerminalUnknownSequenceFn =
+    unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, sequence: *const GhosttyTerminalUnknownSequence);
 pub type GhosttyTerminalColorSchemeFn = unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, out: *mut c_int) -> bool;
 pub const GHOSTTY_COLOR_SCHEME_LIGHT: c_int = 0;
 pub const GHOSTTY_COLOR_SCHEME_DARK: c_int = 1;

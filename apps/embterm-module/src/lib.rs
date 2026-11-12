@@ -551,7 +551,7 @@ fn close(term: &RefCell<Term>) -> Result<()> {
 /// :panes は `(ID HWND COLS ROWS SCROLLED)` のリスト。
 /// :events は前回から溜まった知らせ `(clicked . PANE)` `(bell)` `(exited . CODE)` `(screenshot . PATH)`
 /// `(selected . TEXT)` `(copy-ready)` `(error . MESSAGE)` `(clipboard . TEXT)` `(notification TITLE . BODY)`
-/// `(progress STATE . PERCENT)` `(link . URI)` のリスト（STATE は `set' `remove' `error' `indeterminate' `pause'、
+/// `(progress STATE . PERCENT)` `(link . URI)` `(hover . URI)` `(command . STRING)` のリスト（STATE は `set' `remove' `error' `indeterminate' `pause'、
 /// PERCENT は省かれていれば nil）
 #[defun]
 fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Result<Value<'e>> {
@@ -577,6 +577,7 @@ fn poll<'e>(env: &'e Env, term: &RefCell<Term>, generation: Option<i64>) -> Resu
             }
             Event::Link(uri) => env.cons(env.intern("link")?, uri)?,
             Event::Hover(uri) => env.cons(env.intern("hover")?, uri)?,
+            Event::ShellCommand(c) => env.cons(env.intern("command")?, c)?,
         });
     }
     let b = |v: bool| -> Result<Value<'e>> { v.into_lisp(env) };

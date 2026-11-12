@@ -40,6 +40,8 @@
 ;; - tr-ime の再変換・前後参照は、端末のバッファでは空の文字列を渡す（T-083）
 ;; - フォント（T-033）: `embterm-font-family'（候補のリストも可）・`embterm-font-size'・`embterm-font-fallback-families'
 ;;   （主フォントに無い文字に Windows のフォールバックより先に使う）。`text-scale-adjust' でバッファごとに拡大・縮小
+;; - シェルから Emacs の関数を呼ぶ（T-118）: シェルが OSC 51;E を出すと `embterm-shell-commands' の関数を呼ぶ。
+;;   シェル側の関数は etc/embterm.{ps1,bash,lua}（`embterm_cmd'・`embterm_find_file'・`embterm_dired'）
 
 ;;; Code:
 
@@ -307,6 +309,25 @@ Emacs の通知（`w32-notification-notify'）は消すまで通知領域にア�
 (defcustom embterm-hyperlink-schemes '("http" "https" "ftp" "mailto" "file")
   "Ctrl+クリックで開くハイパーリンク（OSC 8）の URI のスキーム。ほかのものは開かない。"
   :type '(repeat string))
+
+(defcustom embterm-allow-shell-commands t
+  "non-nil なら、端末の中のシェルから Emacs の関数を呼べる（OSC 51;E。T-118）。
+呼べるのは `embterm-shell-commands' に載っているものだけ。端末に流れた文字（`cat' したファイルなど）でも
+呼ばれうるので、載せるのは害の無い関数にとどめる。"
+  :type 'boolean)
+
+(defcustom embterm-shell-commands
+  '(("find-file" . find-file)
+    ("find-file-other-window" . find-file-other-window)
+    ("view-file" . view-file-other-window)
+    ("dired" . dired)
+    ("dired-other-window" . dired-other-window)
+    ("message" . message))
+  "シェルから呼べる Emacs の関数（T-118）。(名前 . 関数) のリスト。
+シェルは `ESC ] 51 ; E \"名前\" \"引数\" ... ESC \\' を出す（vterm と同じ形。etc/embterm.ps1 の `embterm_cmd'）。
+関数は端末のバッファで、引数をすべて文字列にして呼ばれる。`default-directory' はシェルのカレントディレクトリ
+（OSC 7 で追っていれば）なので、相対パスはそこから解決される。"
+  :type '(alist :key-type string :value-type function))
 
 (defcustom embterm-show-link-on-hover t
   "non-nil なら、マウスの下のハイパーリンク（OSC 8）の URI をエコー領域に出す（T-101）。
@@ -989,6 +1010,7 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
              (run-hook-with-args 'embterm-progress-functions state percent buf))
             (`(link . ,uri) (funcall embterm-hyperlink-function uri))
             (`(hover . ,uri) (embterm--show-hover uri))
+            (`(command . ,payload) (embterm--shell-command payload))
             (_ nil)))))))
 
 ;;;; バッファ名（T-080）
@@ -1128,6 +1150,22 @@ Emacs のフレームにフォーカスが無ければトースト（`embterm-no
 フォーカスはあるが端末のウィンドウを選んでいなければ `message'、端末を見ていれば何もしない。"
   (cond ((null (frame-focus-state (selected-frame))) (embterm-notification-toast title body buffer))
         ((embterm--unattended-p buffer) (embterm-notification-message title body buffer))))
+
+(defun embterm--shell-command (payload)
+  "シェルから来た OSC 51;E の中身 PAYLOAD（`\"名前\" \"引数\" ...'）を、`embterm-shell-commands' の関数で呼ぶ（T-118）。
+載っていない名前は呼ばずに知らせる。関数のエラーは `message' で出す（ポーリングを止めない）。"
+  (when embterm-allow-shell-commands
+    (pcase-let ((`(,name . ,args) (ignore-errors (split-string-and-unquote payload))))
+      (let ((fn (and name (cdr (assoc name embterm-shell-commands)))))
+        (cond
+         ((null name) nil)
+         ((not (functionp fn))
+          (message "embterm: シェルから呼べない関数です: %S（`embterm-shell-commands' に足すと呼べます）" name))
+         (t
+          ;; `find-file' などはカレントバッファを変える。続く知らせは端末のバッファで扱うので戻す（ウィンドウはそのまま）
+          (condition-case err
+              (save-current-buffer (apply fn args))
+            (error (message "embterm: %s を呼べませんでした: %s" name (error-message-string err))))))))))
 
 (defvar embterm--hover-message nil "最後にエコー領域に出したリンクの文面（外れたとき、それが出ていれば消す）。")
 

@@ -453,6 +453,7 @@ struct Log {
     pty: Vec<u8>,
     titles: Vec<String>,
     bells: usize,
+    unknown: Vec<(String, bool)>,
 }
 
 struct Recorder(Arc<Mutex<Log>>);
@@ -466,6 +467,9 @@ impl Effects for Recorder {
     }
     fn title_changed(&mut self, title: &str) {
         self.0.lock().unwrap().titles.push(title.to_string());
+    }
+    fn unknown_osc(&mut self, content: &[u8], truncated: bool) {
+        self.0.lock().unwrap().unknown.push((String::from_utf8_lossy(content).into_owned(), truncated));
     }
 }
 
@@ -1159,4 +1163,20 @@ fn color_scheme_query_and_report() {
     assert_eq!(take(&log), "\x1b[?997;2n", "変わったら知らせる");
     t.set_dark(false);
     assert_eq!(take(&log), "", "変わらなければ知らせない");
+}
+
+#[test]
+fn unknown_osc_is_reported() {
+    // T-118: libghostty-vt が扱わない OSC（51;E）は中身ごと届く。扱う OSC（2: タイトル）は届かない
+    let t = types();
+    assert_eq!(t.get("GhosttyTerminalUnknownSequence").get("size").num(), size_of::<GhosttyTerminalUnknownSequence>());
+    assert_eq!(t.get("GhosttyTerminalUnknownOscSequence").get("size").num(), size_of::<GhosttyTerminalUnknownOscSequence>());
+    check_enum(&t, "GhosttyTerminalUnknownSequenceTag", &[("APC", GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_APC), ("OSC", GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_OSC)]);
+    let (mut t, log) = terminal(80, 24);
+    t.vt_write("\x1b]51;E\"find-file\" \"C:/あ b\"\x1b\\\x1b]2;title\x07".as_bytes());
+    t.vt_write(format!("\x1b]51;E{}\x07", "x".repeat(UNKNOWN_MAX_BYTES + 10)).as_bytes());
+    let log = log.lock().unwrap();
+    assert_eq!(log.unknown.len(), 2, "{:?}", log.unknown.iter().map(|(s, t)| (s.len(), *t)).collect::<Vec<_>>());
+    assert_eq!(log.unknown[0], ("51;E\"find-file\" \"C:/あ b\"".to_string(), false));
+    assert!(log.unknown[1].1, "長すぎるものは truncated");
 }

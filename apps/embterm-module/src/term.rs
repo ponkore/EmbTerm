@@ -266,6 +266,8 @@ pub enum Event {
     Link(String),
     /// マウスの下のハイパーリンクが変わった（URI。外れたら `None`。T-101）
     Hover(Option<String>),
+    /// シェルから Emacs の関数を呼ぶ（OSC 51;E の中身。T-118）
+    ShellCommand(String),
 }
 
 /// Lisp に見せるペインの情報
@@ -1305,6 +1307,11 @@ impl App {
             SessionEvent::Progress { state, percent } => {
                 if let Some(s) = weak.upgrade() {
                     s.emit_from_app(Event::Progress { state: state.name(), percent });
+                }
+            }
+            SessionEvent::ShellCommand(c) => {
+                if let Some(s) = weak.upgrade() {
+                    s.emit_from_app(Event::ShellCommand(c));
                 }
             }
             SessionEvent::Title | SessionEvent::Pwd | SessionEvent::Exited => {
