@@ -244,6 +244,17 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - 🔄 **T-057** `~/.emacs.d` に `my-embterm.el` を作り、ghostel と並べて使ってみる（2026-11-11: `my-embterm.el` と関連の変更をパッチにした（`~/.emacs.d` への書き込みは権限の判定で止まった）。`emacs -Q` で動作を確認済み。利用者がパッチを当て、~/.emacs.d の e2abb3e としてコミット・プッシュした。普段の Emacs で ghostel（C-c S）と並べて使う段階）
 - ⏸ **T-058** ghostel をやめる判断と撤去（`my-ghostel.el`、`~/.emacs.d/ghostel/`、ドキュメント）（2026-11-11: 利用者は EmbTerm を常用すると決めた。ghostel の機能に EmbTerm へ移せて有用なものが無いかを利用者が調べる間、`C-c S` に残す）
 - ✅ **T-059** `my-pty`（ptyd + eat）も一緒にやめられるか判断する（2026-11-11）→ やめた。依存していたのは init.el だけで、eat も my-pty だけが使っていた。`my-pty.el`・`ptyd/` を消し、ドキュメントは経緯として残した（~/.emacs.d の 5175707）。`M-x my:claude-term` も無くなった（`embterm-run` で作り直せる）
+- ⬜ **T-118** シェルから Emacs の関数を呼ぶ（ghostel の `ghostel_cmd` / `ghostel-eval-cmds` 相当。例: シェルで `ef foo.txt` → Emacs で `find-file-other-window`、`ed .` → `dired-other-window`）
+  - 形式は **OSC 51;E**（vterm と同じ。`ESC ] 51;E "関数名" "引数" … ESC \`）。ghostel の OSC 52;e は libghostty-vt がクリップボードとして消費するので横取りできない
+  - 受け口: libghostty-vt の `GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE` + `OPT_UNKNOWN_MAX_BYTES`（2048 までは追加の確保なし）で未知の OSC を受ける。再配布版 ConPTY（1.25）は未知の OSC もそのまま流す（後に conhost が `CSI 6n` で位置を取り直すのは対応済み）
+  - 経路: `crates/vt` の `Effects` に `unknown_osc` → `crates/session` で `51;E` の、切れていない（`truncated` でない）ものだけ `Event` にする → module の `:events` に `(command . "…")` → `embterm.el` の `:events` の分岐で `split-string-and-unquote` して許可リストの関数を `condition-case` 付きで `apply`（`eval` はしない）
+  - 許可リストの defcustom（既定は `find-file` / `find-file-other-window` / `dired` / `dired-other-window` / `message` 程度）と、機能全体を切る defcustom。端末に流れた文字（`cat` したファイルなど）でも発火するため。端末の窓が入れ替わらないよう `-other-window` 版を勧める
+  - シェル側: pwsh の関数 `embterm_cmd`（引数を `"…"` で包み `\` と `"` をエスケープ、パスは `[IO.Path]::GetFullPath($p, $PWD.ProviderPath)` で絶対パスにしてから送る）。リポジトリに `etc/` として置くか、`~/.emacs.d/etc/pwsh-emacs-shell.ps1` に足すかを決める。nyagos（lua）も
+  - 試験: `test/osc-child.py` に OSC 51;E を足し、許可したものだけ呼ばれる・許可していないものは呼ばない・切れたものは捨てる・非 ASCII のパス、を確かめる
+- ⬜ **T-119** OSC 133（プロンプトの境界）を使う（ghostel の semantic prompt 相当）: 前後のプロンプトへ飛ぶ、直前のコマンドの出力を kill-ring / copy モードへ写す、終了コードを出す、など
+  - libghostty-vt は OSC 133 を解釈してセルに `semantic_content` を持つ。C ABI でセルの種別・行の印を読めるか、コールバックがあるかを先に確かめる
+  - シェル側: pwsh のプロンプトで `133;A`（プロンプトの始め）/ `133;B`（入力の始め）/ `133;C`（出力の始め）/ `133;D;終了コード` を出す（starship と並べる。T-118 と同じ初期化スクリプトに）
+  - キー割り当て（例: `C-c C-p` / `C-c C-n`）は Emacs 側のスクロールバックの表示（T-037）とどう組むかを決める
 
 ## 7. ドキュメント（ある程度進んでから）
 
