@@ -171,6 +171,8 @@ struct Inner {
     hold_overscan: (u16, u16),
     /// libghostty-vt の組み込みの 256 色（最初に既定のパレットを変える前に読んで覚える。T-034）
     builtin_palette: Option<[Rgb; 256]>,
+    /// 配色がダークか（`CSI ? 996 n` の答えと mode 2031 の知らせ。T-102）
+    dark: bool,
 }
 
 /// ビューポートのスクロールのしかた
@@ -206,6 +208,8 @@ impl Mode {
     pub const MOUSE_ALTERNATE_SCROLL: Mode = Mode { value: 1007, ansi: false };
     pub const BRACKETED_PASTE: Mode = Mode { value: 2004, ansi: false };
     pub const SYNCHRONIZED_OUTPUT: Mode = Mode { value: 2026, ansi: false };
+    /// 配色が変わったら知らせる（T-102）
+    pub const REPORT_COLOR_SCHEME: Mode = Mode { value: 2031, ansi: false };
     pub const GRAPHEME_CLUSTER: Mode = Mode { value: 2027, ansi: false };
 
     fn raw(self) -> u16 {
@@ -278,6 +282,7 @@ impl Terminal {
             hold_capture: None,
             hold_overscan: (0, 0),
             builtin_palette: None,
+            dark: false,
         }));
         let t = Self { raw, inner, gesture: None };
         unsafe {
@@ -291,6 +296,7 @@ impl Terminal {
             let clip: ffi::GhosttyTerminalClipboardWriteFn = cb_clipboard_write;
             let notify: ffi::GhosttyTerminalDesktopNotificationFn = cb_desktop_notification;
             let progress: ffi::GhosttyTerminalProgressReportFn = cb_progress_report;
+            let scheme: ffi::GhosttyTerminalColorSchemeFn = cb_color_scheme;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_BELL, bell as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, title as *const c_void))?;
@@ -301,6 +307,7 @@ impl Terminal {
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, clip as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, notify as *const c_void))?;
             check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT, progress as *const c_void))?;
+            check(ffi::ghostty_terminal_set(raw, ffi::GHOSTTY_TERMINAL_OPT_COLOR_SCHEME, scheme as *const c_void))?;
         }
         Ok(t)
     }
@@ -627,6 +634,20 @@ impl Terminal {
             check(ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg as *const _ as *const c_void))?;
             let c = cursor.as_ref().map_or(ptr::null(), |c| c as *const _ as *const c_void);
             check(ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, c))
+        }
+    }
+
+    /// 配色がダークかを決める（T-102）。`CSI ? 996 n` にはこれで答え、変わったときにアプリが mode 2031 を立てていれば
+    /// `CSI ? 997 ; 1 n`（ダーク）/ `; 2 n`（ライト）を PTY に送る
+    pub fn set_dark(&mut self, dark: bool) {
+        let i = unsafe { &mut *self.inner };
+        if i.dark == dark {
+            return;
+        }
+        i.dark = dark;
+        if self.mode(Mode::REPORT_COLOR_SCHEME) {
+            let report: &[u8] = if dark { b"\x1b[?997;1n" } else { b"\x1b[?997;2n" };
+            i.effects.write_pty(report);
         }
     }
 
@@ -1158,6 +1179,16 @@ unsafe extern "C" fn cb_progress_report(_t: ffi::GhosttyTerminal, userdata: *mut
 }
 
 /// `CSI 14/16/18/19 t` と mode 2048 の答え。桁数・行数は端末から、セルの画素は [`Terminal::resize`] で覚えた値
+/// `CSI ? 996 n`（配色の問い合わせ。T-102）
+unsafe extern "C" fn cb_color_scheme(_t: ffi::GhosttyTerminal, userdata: *mut c_void, out: *mut c_int) -> bool {
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (Some(i), Some(out)) = (inner(userdata), out.as_mut()) else { return false };
+        *out = if i.dark { ffi::GHOSTTY_COLOR_SCHEME_DARK } else { ffi::GHOSTTY_COLOR_SCHEME_LIGHT };
+        true
+    }))
+    .unwrap_or(false)
+}
+
 unsafe extern "C" fn cb_size(t: ffi::GhosttyTerminal, userdata: *mut c_void, out: *mut ffi::GhosttySizeReportSize) -> bool {
     catch_unwind(AssertUnwindSafe(|| unsafe {
         let (Some(i), Some(out)) = (inner(userdata), out.as_mut()) else { return false };

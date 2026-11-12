@@ -388,6 +388,7 @@ pub const GHOSTTY_TERMINAL_OPT_BELL: c_int = 3;
 pub const GHOSTTY_TERMINAL_OPT_XTVERSION: c_int = 5;
 pub const GHOSTTY_TERMINAL_OPT_TITLE_CHANGED: c_int = 6;
 pub const GHOSTTY_TERMINAL_OPT_SIZE: c_int = 7;
+pub const GHOSTTY_TERMINAL_OPT_COLOR_SCHEME: c_int = 8;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND: c_int = 12;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: c_int = 13;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_CURSOR: c_int = 14;
@@ -629,6 +630,10 @@ pub type GhosttyTerminalDesktopNotificationFn = unsafe extern "C" fn(
     userdata: *mut c_void,
     notification: *const GhosttyTerminalDesktopNotification,
 );
+/// `CSI ? 996 n`（配色の問い合わせ）に答える。`out` は GhosttyColorScheme（T-102）
+pub type GhosttyTerminalColorSchemeFn = unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, out: *mut c_int) -> bool;
+pub const GHOSTTY_COLOR_SCHEME_LIGHT: c_int = 0;
+pub const GHOSTTY_COLOR_SCHEME_DARK: c_int = 1;
 pub type GhosttyTerminalProgressReportFn =
     unsafe extern "C" fn(terminal: GhosttyTerminal, userdata: *mut c_void, report: *const GhosttyTerminalProgressReport);
 

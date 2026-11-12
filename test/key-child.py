@@ -10,6 +10,7 @@
 #   drop-kkp  vt-kkp のあと、CSI <u を出さずに落ちる（フラグが残ったまま子が死ぬ。安全策の確認）
 #   syncout   同期出力を試す: CSI ?2026h を出し、途中の文字列を少しずつ書いて 300 ms 寝て CSI ?2026l で確定する
 #   mouse     VT 入力モードで CSI ?1002;1006h（ボタンのドラッグ + SGR）を求めて、マウスの報告を記録する
+#   scheme    VT 入力モードで CSI ?996n（配色の問い合わせ）を送り、mode 2031 を立てて、届いた答え・知らせを記録する（T-102）
 #   altwheel  VT 入力モードで代替画面に入り、ホイールが矢印キーになるのを記録する（報告は無効のまま）
 #
 # ログは 1 行 1 イベントで、先頭に時刻（秒。time.time()）を付ける。送る側のログと時刻で突き合わせる。
@@ -134,6 +135,13 @@ def main():
         w("\x1b[?1002;1006h")
         read_text_loop(time.time() + (float(sys.argv[3]) if len(sys.argv) > 3 else 120))
         w("\x1b[?1002;1006l")
+        return
+    if mode == "scheme":
+        # T-102: 配色を問い合わせ、mode 2031（配色が変わったら知らせる）を立てて、届いたものを記録する
+        stamp("QUERY 996")
+        w("\x1b[?996n\x1b[?2031h")
+        read_text_loop(time.time() + (float(sys.argv[3]) if len(sys.argv) > 3 else 120))
+        w("\x1b[?2031l")
         return
     if mode == "altwheel":
         w("\x1b[?1049hin alt screen\r\n")

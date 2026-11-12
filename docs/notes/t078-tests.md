@@ -122,3 +122,10 @@
 - **試験**: PostMessage の `WM_MOUSEMOVE` では本物のカーソルが外にあるので `WM_MOUSELEAVE` がすぐ来る。本物の経路では
   「URI が届いて、すぐ外れる」を確かめ、下線の範囲と描画はデバッグ用の `embterm-module-debug-hover` で直接置いて確かめた
   （`test/integration.el`。本物のマウスは動かさない）。画面は `target/t034/frame-link-hover.png`
+
+## 13. T-102 配色（ダーク / ライト）をアプリに知らせる
+
+- 端末の既定の背景色（Emacs のテーマに追従。T-034）が暗ければダークとする（輝度 = 0.2126R + 0.7152G + 0.0722B が 128 未満）
+- `CSI ? 996 n` には libghostty-vt のコールバック（`GHOSTTY_TERMINAL_OPT_COLOR_SCHEME`）で `CSI ? 997 ; 1 n`（ダーク）/ `; 2 n`（ライト）と答える
+- 色が変わってダーク / ライトが変わり、アプリが mode 2031 を立てていれば、同じ列を PTY に送る（`Terminal::set_dark`）
+- 確かめたこと: 単体テスト `color_scheme_query_and_report`、`test/scheme.el`（`emacs -Q` の白い背景でライト、`modus-vivendi` でダークを知らせ、外すとライト）

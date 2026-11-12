@@ -1140,3 +1140,23 @@ fn copy_text_drops_kitty_placeholders() {
     assert!(text.contains("LR"), "{text:?}");
     assert!(!text.contains('\u{10EEEE}'), "{text:?}");
 }
+
+#[test]
+fn color_scheme_query_and_report() {
+    // T-102: CSI ? 996 n にはダーク / ライトで答え、mode 2031 を立てたアプリには変わったときに知らせる
+    let t = types();
+    check_enum(&t, "GhosttyColorScheme", &[("LIGHT", GHOSTTY_COLOR_SCHEME_LIGHT), ("DARK", GHOSTTY_COLOR_SCHEME_DARK)]);
+    let (mut t, log) = terminal(80, 24);
+    let take = |log: &Arc<Mutex<Log>>| String::from_utf8_lossy(&std::mem::take(&mut log.lock().unwrap().pty)).into_owned();
+    t.vt_write(b"\x1b[?996n");
+    assert_eq!(take(&log), "\x1b[?997;2n", "既定はライト");
+    t.set_dark(true);
+    assert_eq!(take(&log), "", "mode 2031 が無ければ知らせない");
+    t.vt_write(b"\x1b[?996n");
+    assert_eq!(take(&log), "\x1b[?997;1n");
+    t.vt_write(b"\x1b[?2031h");
+    t.set_dark(false);
+    assert_eq!(take(&log), "\x1b[?997;2n", "変わったら知らせる");
+    t.set_dark(false);
+    assert_eq!(take(&log), "", "変わらなければ知らせない");
+}

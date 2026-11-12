@@ -260,7 +260,15 @@ fn read_system_clipboard() -> Option<String> {
 
 fn apply_colors(term: &mut Terminal, c: &Colors) -> et_vt::Result<()> {
     term.set_default_colors(c.foreground, c.background, c.cursor)?;
+    // 既定の背景が暗ければダーク（`CSI ? 996 n` の答えと mode 2031 の知らせ。T-102）
+    term.set_dark(is_dark(c.background));
     term.set_default_palette16(&c.palette)
+}
+
+/// 背景色が暗いか（相対輝度 0.5 未満。sRGB の値をそのまま重み付けした近似）
+fn is_dark(bg: et_vt::Rgb) -> bool {
+    let l = 0.2126 * bg.r as f32 + 0.7152 * bg.g as f32 + 0.0722 * bg.b as f32;
+    l < 128.0
 }
 
 /// 読みのスレッドと UI スレッドで共有するもの
