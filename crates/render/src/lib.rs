@@ -175,8 +175,11 @@ pub struct Renderer {
     spec: FontSpec,
     dpi: u32,
     brushes: HashMap<Rgb, ID2D1SolidColorBrush>,
-    /// 画像の GPU のビットマップ（画像の世代が鍵。世代が変わると一覧から外れて捨てられる。デバイスと一緒に捨てる）
-    bitmaps: HashMap<u64, ID2D1Bitmap1>,
+    /// 画像の GPU のビットマップ（画像の世代と、載せた大きさが鍵。世代が変わると一覧から外れて捨てられる。デバイスと一緒に捨てる）。
+    /// 表示より大幅に大きい画像は縮めて載せる（T-105）
+    bitmaps: HashMap<images::BitmapKey, ID2D1Bitmap1>,
+    /// 画像の変換を別のスレッドで行う口（T-105。[`Renderer::set_image_ready`] で有効にする）
+    image_jobs: images::ImageJobs,
     /// 背景のビットマップ（セル 1 つが 1 画素。大きさ（桁, 行）ごと。デバイスと一緒に捨てる）
     bg_bitmaps: Vec<((u32, u32), ID2D1Bitmap1)>,
     /// 背景の画素の作業場所（描くたびに確保しない）
@@ -206,6 +209,7 @@ impl Renderer {
             dpi,
             brushes: HashMap::new(),
             bitmaps: HashMap::new(),
+            image_jobs: images::ImageJobs::default(),
             bg_bitmaps: Vec::new(),
             bg_pixels: Vec::new(),
             theme: Theme::default(),

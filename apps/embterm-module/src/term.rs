@@ -71,6 +71,8 @@ const WM_APP_OUTPUT: u32 = WM_APP + 2;
 const WM_APP_SESSION: u32 = WM_APP + 3;
 /// 分け合う GPU デバイスが替わった（ほかの端末がデバイスを失って作り直した。T-067）
 const WM_APP_DEVICE: u32 = WM_APP + 4;
+/// 大きな画像の変換が別のスレッドで終わった（描き直す。T-105）
+const WM_APP_IMAGE: u32 = WM_APP + 5;
 /// スワップチェーンがフレームを受け付けるのを待つ時間の上限（ms）。過ぎたら待たずに描く（T-068）
 const FRAME_WAIT_TIMEOUT_MS: u32 = 250;
 
@@ -234,6 +236,9 @@ pub struct DebugInfo {
     /// Kitty graphics のアニメーションを進めた回数と、次のフレームの予定があるか（T-092）
     pub animation_ticks: u64,
     pub animation_playing: bool,
+    /// 別のスレッドでの画像の変換が終わった回数と、変換中の数（T-105）
+    pub images_converted: u64,
+    pub images_pending: usize,
 }
 
 /// Lisp に渡す知らせ
@@ -851,6 +856,8 @@ struct App {
     /// Kitty graphics のアニメーションの次のフレームの時刻（`epoch` からの ms。T-092）と、進めた回数
     animation_next: Option<u64>,
     animation_ticks: u64,
+    /// 別のスレッドでの画像の変換が終わった回数（T-105。自動確認用）
+    image_ready_count: u64,
     /// 点滅の回数（自動確認用）
     blink_ticks: u64,
     /// 前に描いたカーソルの位置（動いたら点滅をやり直して点ける）
@@ -966,6 +973,7 @@ impl App {
             text_blink_on: true,
             animation_next: None,
             animation_ticks: 0,
+            image_ready_count: 0,
             blink_ticks: 0,
             blink_pos: None,
             perf: Perf::new(),
@@ -1179,6 +1187,7 @@ impl App {
                     text_blink_on: self.text_blink_on,
                     animation_ticks: self.animation_ticks,
                     animation_playing: self.animation_next.is_some(),
+                    images_converted: self.image_ready_count,
                     ..Default::default()
                 };
                 for p in &self.panes {
@@ -1190,6 +1199,7 @@ impl App {
                             info.padding = v.renderer.padding();
                         }
                         info.hover = info.hover.or(p.hover);
+                        info.images_pending += v.renderer.images_pending();
                     }
                 }
                 let _ = reply.send(info);
@@ -1397,6 +1407,11 @@ impl App {
         match Renderer::with_gpu(gpu, hwnd, cw.max(1), ch.max(1), dpi, self.font.clone()) {
             Ok(mut renderer) => {
                 renderer.theme.narrow_wide = self.narrow_wide;
+                // 大きな画像は別のスレッドで変換し、終わったら制御用のウィンドウに知らせて描き直す（T-105）
+                let control = self.control.0 as isize;
+                renderer.set_image_ready(move || {
+                    post(control, WM_APP_IMAGE, 0);
+                });
                 self.colors.apply_theme(&mut renderer.theme);
                 log(&format!(
                     "子 HWND を作った: 0x{:x} / 親 0x{:x} / フォント {} / セル {:?} / DPI {dpi}{}",
@@ -1764,6 +1779,22 @@ impl App {
     }
 
     /// 点滅のタイマーを要るときだけ動かす（T-035）。カーソルが動いたら点けてやり直す。描く前に呼ぶ
+    /// 大きな画像の変換が別のスレッドで終わった。画像を置いている見えているペインを描き直す（T-105）
+    fn image_converted(&mut self) {
+        self.image_ready_count += 1;
+        let master_images = !self.master.images.is_empty();
+        for p in &mut self.panes {
+            let has = match &p.scrolled {
+                Some(s) if !matches!(p.position, Position::Follow) => !s.frame.images.is_empty(),
+                _ => master_images,
+            };
+            if p.visible() && has {
+                p.needs_draw = true;
+            }
+        }
+        self.refresh(false);
+    }
+
     /// アニメーションの次のフレームの時刻にタイマーを掛ける（`None` なら止める。T-092）
     fn schedule_animation(&mut self, now_ms: u64, next: Option<u64>) {
         if next == self.animation_next {
@@ -2793,6 +2824,7 @@ extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
         })
         .map(|_| LRESULT(0)),
         WM_APP_SESSION => with_app(|a| a.session_changed()).map(|_| LRESULT(0)),
+        WM_APP_IMAGE => with_app(|a| a.image_converted()).map(|_| LRESULT(0)),
         WM_APP_DEVICE => with_app(|a| {
             a.follow_device();
             a.refresh(true);
