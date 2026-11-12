@@ -307,7 +307,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-090** KKP の安全策の限界: 求めたアプリの子孫が長生きすると戻せない。`CSI <99u` は今の画面だけに効く（2026-11-12）→ 自動では見分けられないので限界として残し、手で戻す `embterm-reset-keyboard` を足した。docs/notes/t078-tests.md
 - ✅ **T-091** 手元での再確認（2026-11-11）→ ユーザーが確認: 日本語の確定、絵文字、claude の `Shift+Enter`、`C-c C-c`、PSReadLine のキー、yazi の png / svg / pdf のプレビュー。個別の報告が無いもの: `Esc`、JP 配列の `C-@`、AltGr、マウスの形
 - ✅ **T-092** Kitty graphics のアニメーション（`animation_tick` と次の時刻のタイマー。いまは最初のフレームだけ）（2026-11-12）→ 描く前に `animation_tick` を呼び、次のフレームの時刻にタイマー。3 色の画像で色が順に変わることを確かめた。docs/notes/t078-tests.md
-- ⬜ **T-093** 画像の保存量の上限の defcustom 化（いまは 128 MiB）と、`t=t` / `t=s`（`OpenFileMappingW`）への対応（yazi の `t=s` は大きな画像で base64 より速い）
+- ✅ **T-093** 画像の保存量の上限の defcustom 化（いまは 128 MiB）と、`t=t` / `t=s`（`OpenFileMappingW`）への対応（yazi の `t=s` は大きな画像で base64 より速い）（2026-11-12）→ `embterm-image-storage-limit`、`embterm-kitty-temp-file-directory`（指定したときだけ `t=t`）。`t=s` は libghostty-vt が Windows で未対応なので見送り（yazi は base64 で動く）。docs/notes/t078-tests.md
 - ✅ **T-094** 画像を含む行のコピーに placeholder の文字（`U+10EEEE`）が混じるので除く（2026-11-12）→ `format_plain` で placeholder と後ろの結合文字を除く。docs/notes/t078-tests.md
 - ✅ **T-095** 親の端末の環境変数（`WEZTERM_*`、`TERM_PROGRAM_VERSION`）が子に伝わる件。`et_pty` で落とすか決める（yazi の判定は XTVERSION で上書きされるので害は無い）（2026-11-12）→ 落とす（`WEZTERM_*`・`WT_SESSION`・`VSCODE_*` など。`setenv` したものは残る）。`TERM_PROGRAM_VERSION` は EmbTerm の版。docs/notes/t078-tests.md
 - ✅ **T-096** 大きな画像の PNG のデコードが端末のロックの中で走る時間を測る（T-054）（2026-11-11）→ 4000x4000 でデコード 33〜38 ms・`vt_write` 58〜65 ms がロックの中。Emacs には響かない。ロックの外に出す方法は libghostty-vt の API に無いので記録で終える。重いのは UI スレッドで GPU に載せるところ → T-105

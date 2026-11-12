@@ -218,6 +218,22 @@ def scene_anim():
     out("end of anim\r\n")
 
 
+def scene_tempfile():
+    """一時ファイル（t=t。T-093）: 2 番目の引数のディレクトリに tty-graphics-protocol を含む名前で PNG（紫 64x64）を書き、
+    その名前を送って 8 桁 x 3 行に置く。端末が読んだらファイルは消える"""
+    import os
+
+    d = next(a for a in sys.argv[2:] if not a.startswith("--"))
+    path = os.path.join(d, "tty-graphics-protocol-embterm-test.png")
+    with open(path, "wb") as f:
+        f.write(png_rgba(64, 64, solid_rgba(64, 64, (200, 0, 200))))
+    out(f"tempfile: {path}\r\n")
+    goto(3, 1)
+    apc("a=T,t=t,f=100,i=401,c=8,r=3,q=2", path.encode("utf-8"))
+    goto(7, 1)
+    out("end of tempfile\r\n")
+
+
 def scene_big():
     """大きな PNG（既定 4000x4000。2 番目の引数で 1 辺の画素数）を 1 枚、40 桁 x 20 行に縮めて置く（T-096 のデコードの時間の測定）"""
     n = next((int(a) for a in sys.argv[2:] if a.isdigit()), 4000)

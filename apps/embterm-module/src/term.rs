@@ -165,6 +165,8 @@ pub enum Request {
     SetCursor(CursorDefault),
     /// クリップボードの書き込み・読み取りを許すか（T-039）
     SetClipboardPolicy { write: bool, read: bool },
+    /// Kitty graphics の画像の保存量の上限と、一時ファイル（`t=t`）を読むディレクトリ（T-093）
+    SetImages(et_session::ImageSettings),
     /// ペインの画素の位置のハイパーリンク（デバッグ・自動確認用）
     LinkAt { pane: i64, x: i32, y: i32, reply: mpsc::Sender<Option<String>> },
     /// マウスがペインのクライアント座標 (x, y) にあるものとしてリンクの下線を調べ直す（自動確認用。T-101。
@@ -841,6 +843,8 @@ struct App {
     hover_uri: Option<String>,
     /// 点滅でカーソルが点いているか（タイマーが止まっているときは常に true）
     blink_on: bool,
+    /// Kitty graphics の設定（T-093。起動前に来たら起動のときに当てる）
+    images: et_session::ImageSettings,
     /// 文字の点滅（SGR 5）のタイマーが動いている・今は見せている側か（T-112）
     text_blink_timer: bool,
     text_blink_on: bool,
@@ -957,6 +961,7 @@ impl App {
             autoscroll: None,
             hover_uri: None,
             blink_on: true,
+            images: Default::default(),
             text_blink_timer: false,
             text_blink_on: true,
             animation_next: None,
@@ -1144,6 +1149,12 @@ impl App {
                     s.set_clipboard_policy(write, read);
                 }
             }
+            Request::SetImages(images) => {
+                if let Some(s) = &self.session {
+                    s.set_images(&images);
+                }
+                self.images = images;
+            }
             Request::LinkAt { pane, x, y, reply } => {
                 let _ = reply.send(self.link_at(pane, (x, y)));
             }
@@ -1304,6 +1315,7 @@ impl App {
                 scrollback_lines: opts.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
                 clipboard_write: self.clipboard.0,
                 clipboard_read: self.clipboard.1,
+                images: self.images.clone(),
             },
             notify,
         );

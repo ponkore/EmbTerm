@@ -171,3 +171,13 @@
 - 確かめたこと（`test/kitty.el` + `test/kitty-graphics.py anim`）: 赤 → 緑 → 青（300 ms ごと）の画像で、0.3 秒おきの 3 枚の画面の色が
   (220,0,0) → (0,200,0) → (0,0,220)。1.5 秒で 3 フレーム以上進む
 - embterm.exe（単体デバッグ用）は再生しない（最初のフレーム）
+
+## 17. T-093 画像の保存量の上限・一時ファイル（`t=t`）・共有メモリ（`t=s`）
+
+- `embterm-image-storage-limit`（MiB。既定 128。0 で Kitty graphics を使わない）を足した。開いている端末にも反映する（`embterm-module-set-images`）
+- `embterm-kitty-temp-file-directory`（既定 nil）: 指定したディレクトリの中の、名前に `tty-graphics-protocol` を含む一時ファイルに限って `t=t` を読む
+  （libghostty-vt の `KITTY_IMAGE_MEDIUM_TEMP_FILE`。Kitty の決まりどおり読んだファイルは消える）。既定は今までどおり読まない
+- **`t=s`（共有メモリ）は対応しない**: libghostty-vt 1.0 は POSIX の `shm_open` だけで、Windows は未対応（`graphics_image.zig` に
+  「windows is currently unsupported」）。対応するには出力の中の APC を自分で `OpenFileMappingW` で読んで `t=d` に書き換える必要があり、
+  手間に見合わない。yazi は問い合わせ（`a=q,t=s`）の失敗を見て base64（`t=d`）で送るので動く
+- 確かめたこと（`test/kitty.el` + `kitty-graphics.py tempfile`）: 設定しなければファイルが残る（読まない）、ディレクトリを指定すると読んで消え、画像が出る（`tempfile.png`）

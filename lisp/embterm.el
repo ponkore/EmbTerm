@@ -59,6 +59,7 @@
 (declare-function embterm-module-start "embterm-module")
 (declare-function embterm-module-reset-keyboard "embterm-module")
 (declare-function embterm-module-set-channel "embterm-module")
+(declare-function embterm-module-set-images "embterm-module")
 (declare-function embterm-module-ack-notify "embterm-module")
 (declare-function embterm-module-send-string "embterm-module")
 (declare-function embterm-module-send-key "embterm-module")
@@ -264,6 +265,21 @@ nil なら `embterm-color-foreground' などの値を使う。どちらでも、
   "non-nil なら、アプリが OSC 52 でクリップボードを読むのを許す（T-039）。
 許すと、端末で動くプログラム（ssh の先を含む）がクリップボードの中身を読めるので、既定では拒む。"
   :type 'boolean
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-image-storage-limit 128
+  "端末 1 つが持つ Kitty graphics の画像の保存量の上限（MiB。T-093）。nil なら既定（128）。
+0 にすると Kitty graphics を使わない（アプリに画像を表示できないと答える）。
+上限を超えると古い画像から消える。libghostty-vt の既定（10 MB）では大きな画像 1 枚で埋まるので大きめにしてある。"
+  :type '(choice (const :tag "既定" nil) number)
+  :set #'embterm--set-and-apply-term)
+
+(defcustom embterm-kitty-temp-file-directory nil
+  "Kitty graphics の一時ファイル（`t=t'）を読むディレクトリ（T-093）。nil なら一時ファイルでは受け取らない。
+アプリが画像をこのディレクトリの一時ファイルに書いて名前を送る方式（kitten icat など）を使えるようにする。
+Kitty の決まりどおり、読んだファイルは端末が消すので、ほかのファイルを置くディレクトリは指定しない。
+共有メモリ（`t=s'）は libghostty-vt が Windows で対応していないので使えない（yazi は base64 で送る）。"
+  :type '(choice (const :tag "使わない" nil) directory)
   :set #'embterm--set-and-apply-term)
 
 (defcustom embterm-notification-functions (list #'embterm-notification-default)
@@ -1238,11 +1254,15 @@ FG BG CURSOR SELECTION-BG SELECTION-FG PALETTE の順。`embterm-follow-theme' �
           (vconcat (seq-take (mapcar #'embterm--color-hex embterm-color-palette) 16)))))
 
 (defun embterm--apply-term-settings (colors)
-  "このバッファの端末に、色 COLORS（`embterm--color-args'）・カーソル・クリップボードの許可を送る（待たない）。"
+  "このバッファの端末に、色 COLORS（`embterm--color-args'）・カーソル・クリップボードの許可・画像の設定を送る（待たない）。"
   (when embterm--term
     (apply #'embterm-module-set-colors embterm--term colors)
     (embterm-module-set-cursor embterm--term (symbol-name embterm-cursor-style) embterm-cursor-blink)
-    (embterm-module-set-clipboard-policy embterm--term embterm-allow-clipboard-write embterm-allow-clipboard-read)))
+    (embterm-module-set-clipboard-policy embterm--term embterm-allow-clipboard-write embterm-allow-clipboard-read)
+    (embterm-module-set-images embterm--term
+                               (and embterm-image-storage-limit (round (* embterm-image-storage-limit 1024 1024)))
+                               (and embterm-kitty-temp-file-directory
+                                    (embterm--native-path embterm-kitty-temp-file-directory)))))
 
 (defun embterm--apply-term-settings-all ()
   "開いているすべての端末に、色・カーソル・クリップボードの許可を送る。"

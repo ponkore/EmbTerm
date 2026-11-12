@@ -30,6 +30,7 @@
 (defvar kitty-ng 0 "NG の数。")
 (defvar kitty-buf nil)
 (defvar kitty-anim-ticks 0 "アニメーションを進めた回数（T-092）。")
+(defconst kitty-tmp (expand-file-name "target/t093/tmp/" kitty-root) "一時ファイル（t=t）のディレクトリ（T-093）。")
 
 (defun kitty-log (fmt &rest args)
   (let ((line (format "[%s] %s\n" (format-time-string "%H:%M:%S.%3N") (apply #'format fmt args))))
@@ -178,7 +179,28 @@
          . ,(lambda ()
               (let ((i (with-current-buffer kitty-buf (embterm-module-debug-info embterm--term))))
                 (kitty-check "1.5 秒で 3 フレーム以上進んだ" (>= (- (plist-get i :animation-ticks) kitty-anim-ticks) 3)
-                             (format "%S → %S" kitty-anim-ticks (plist-get i :animation-ticks))))))
+                             (format "%S → %S" kitty-anim-ticks (plist-get i :animation-ticks))))
+              ;; T-093: 一時ファイル（t=t）。まず設定しないで送る（読まない）
+              (make-directory kitty-tmp t)
+              (kitty-type "cls" 'return)
+              (kitty-type (format "python -I %s/test/kitty-graphics.py tempfile --no-wait %s" kitty-root
+                                  (subst-char-in-string ?/ ?\\ kitty-tmp))
+                          'return)))
+    (2.5 "T-093: 一時ファイルは既定では読まない"
+         . ,(lambda ()
+              (let ((f (expand-file-name "tty-graphics-protocol-embterm-test.png" kitty-tmp)))
+                (kitty-check "設定しなければ一時ファイルを読まない（ファイルが残る）" (file-exists-p f))
+                (when (file-exists-p f) (delete-file f)))
+              (customize-set-variable 'embterm-kitty-temp-file-directory kitty-tmp)
+              (kitty-type "cls" 'return)
+              (kitty-type (format "python -I %s/test/kitty-graphics.py tempfile --no-wait %s" kitty-root
+                                  (subst-char-in-string ?/ ?\\ kitty-tmp))
+                          'return)))
+    (2.5 "T-093: ディレクトリを指定すると読む"
+         . ,(lambda ()
+              (kitty-check "読んだ一時ファイルは消える" (not (file-exists-p (expand-file-name "tty-graphics-protocol-embterm-test.png" kitty-tmp))))
+              (with-current-buffer kitty-buf (embterm-screenshot (expand-file-name "tempfile.png" kitty-out)))
+              (customize-set-variable 'embterm-kitty-temp-file-directory nil)))
     (1.0 "終わり"
          . ,(lambda ()
               (kitty-log "NG の数: %d" kitty-ng)

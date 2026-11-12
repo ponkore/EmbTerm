@@ -501,6 +501,18 @@ fn ack_notify() -> Result<bool> {
     Ok(notify::connected())
 }
 
+/// Kitty graphics の設定（T-093）。LIMIT は画像の保存量の上限（バイト。nil なら既定の 128 MiB、0 なら Kitty graphics を使わない）、
+/// TEMP-DIR は一時ファイル（`t=t`）を読むディレクトリ（nil なら読まない。読んだファイルは消える）
+#[defun]
+fn set_images(term: &RefCell<Term>, limit: Option<i64>, temp_dir: Option<String>) -> Result<()> {
+    let images = et_session::ImageSettings {
+        storage_limit: limit.map_or(et_session::KITTY_IMAGE_STORAGE_LIMIT, |n| n.max(0) as u64),
+        temp_dir,
+    };
+    term.borrow().request(Request::SetImages(images));
+    Ok(())
+}
+
 /// GPU デバイスを失ったことにする（デバッグ・自動確認用。T-067）。分け合うデバイスを捨て、開いている全部の端末に
 /// 新しいデバイスへ載せ替えさせる
 #[defun]

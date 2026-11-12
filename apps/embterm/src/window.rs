@@ -253,6 +253,7 @@ pub fn run(args: Args) -> Result<(), String> {
             scrollback_lines: 10_000,
             clipboard_write: false,
             clipboard_read: false,
+            images: Default::default(),
         },
         notify,
     )?;

@@ -81,6 +81,28 @@ pub struct SessionOptions {
     pub clipboard_write: bool,
     /// クリップボードの読み取り（OSC 52 の `?`）を許すか（T-039。既定で拒む）
     pub clipboard_read: bool,
+    /// Kitty graphics の画像の保存量の上限（バイト）と、一時ファイル（`t=t`）を読むディレクトリ（T-093）
+    pub images: ImageSettings,
+}
+
+/// Kitty graphics の設定（T-093）
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageSettings {
+    /// 画像の保存量の上限（バイト）。0 なら Kitty graphics を使わない
+    pub storage_limit: u64,
+    /// 一時ファイル（`t=t`）を読むディレクトリ。`None` なら読まない
+    pub temp_dir: Option<String>,
+}
+
+impl Default for ImageSettings {
+    fn default() -> Self {
+        Self { storage_limit: KITTY_IMAGE_STORAGE_LIMIT, temp_dir: None }
+    }
+}
+
+fn apply_images(term: &mut Terminal, s: &ImageSettings) -> et_vt::Result<()> {
+    term.set_kitty_image_storage_limit(s.storage_limit)?;
+    term.set_kitty_medium_temp_file(s.temp_dir.as_deref())
 }
 
 /// 端末の既定の色（T-034）
@@ -369,7 +391,7 @@ impl Session {
         term.set_scrollback_max_lines(opts.scrollback_lines).map_err(|e| e.to_string())?;
         // Kitty graphics（T-088）: 画像の置き場を広げ、ファイルでの転送（t=f）を許す。共有メモリ（t=s）と一時ファイル（t=t）は
         // libghostty-vt の既定（無効）のままで、問い合わせに失敗を返す（yazi は base64 の t=d に戻る）
-        term.set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT).map_err(|e| e.to_string())?;
+        apply_images(&mut term, &opts.images).map_err(|e| e.to_string())?;
         term.set_kitty_medium_file(true).map_err(|e| e.to_string())?;
         term.resize(opts.cols, opts.rows, opts.cell_px.0, opts.cell_px.1).map_err(|e| e.to_string())?;
 
@@ -474,6 +496,11 @@ impl Session {
     /// DECSCUSR の既定を変える（T-035。アプリが形を決めていなければ、今のカーソルも変わる）
     pub fn set_cursor_default(&self, cursor: CursorDefault) {
         let _ = self.lock().set_default_cursor(cursor.shape, cursor.blink);
+    }
+
+    /// Kitty graphics の設定を変える（T-093）
+    pub fn set_images(&self, s: &ImageSettings) {
+        let _ = apply_images(&mut self.lock(), s);
     }
 
     /// クリップボードの書き込み・読み取りを許すか（T-039）

@@ -407,6 +407,14 @@ impl Terminal {
     }
 
     /// Kitty graphics のファイルでの転送（`t=f`）を許すか。既定は不許可
+    /// Kitty graphics の一時ファイル（`t=t`）を `dir` の中のものに限って読む（`None` なら読まない。T-093）。
+    /// libghostty-vt は読んだあとそのファイルを消す（Kitty の決まり）
+    pub fn set_kitty_medium_temp_file(&mut self, dir: Option<&str>) -> Result<()> {
+        let s = dir.map(|d| ffi::GhosttyString { ptr: d.as_ptr(), len: d.len() });
+        let p = s.as_ref().map_or(ptr::null(), |s| s as *const _ as *const c_void);
+        check(unsafe { ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE, p) })
+    }
+
     pub fn set_kitty_medium_file(&mut self, allow: bool) -> Result<()> {
         check(unsafe {
             ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE, &allow as *const _ as *const c_void)
