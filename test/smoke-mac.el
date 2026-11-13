@@ -48,6 +48,7 @@
 (setq embterm-poll-interval 0.05)
 
 (defvar smoke-buf nil)
+(defvar smoke-ime-before nil)
 (defvar smoke-steps nil)
 
 (defun smoke-state ()
@@ -171,7 +172,37 @@
            (smoke-check (>= (length panes) 2) "ペインが 2 つになった"))
          (smoke-next))
        (lambda ()
-         ;; 10. カーソルの点滅（T-127。描画スレッドのタイマー）。既定は点滅しないので有効にする
+         ;; 10. IME の候補ウィンドウの位置（T-129）。端末のカーソルを追うこと
+         (with-current-buffer smoke-buf
+           (let* ((before (embterm-module-ime-rect embterm--term)))
+             (smoke-log "IME の矩形（打つ前）: %S" before)
+             (smoke-check (nth 4 before) "firstRectForCharacterRange: の差し替えが入っている")
+             (setq smoke-ime-before before)
+             ;; カーソルを右へ動かす（空白を 20 個）
+             (embterm-module-send-string embterm--term (make-string 20 ?x))))
+         (smoke-next))
+       (lambda ()
+         (with-current-buffer smoke-buf
+           (let ((after (embterm-module-ime-rect embterm--term)))
+             (smoke-log "IME の矩形（打った後）: %S" after)
+             (smoke-check (> (nth 0 after) (nth 0 smoke-ime-before))
+                          "カーソルが右へ動いたら IME の位置も右へ動いた（%.1f → %.1f）"
+                          (nth 0 smoke-ime-before) (nth 0 after))
+             (smoke-check (> (nth 3 after) 0) "矩形の高さが 0 でない（%.1f）" (nth 3 after))
+             ;; 端末を選んでいない状態では元の動き（Emacs のポイント）に戻る
+             (embterm-module-send-key embterm--term "c" "C")
+             (embterm-module-select embterm--term nil)))
+         (smoke-next))
+       (lambda ()
+         (with-current-buffer smoke-buf
+           (let ((off (embterm-module-ime-rect embterm--term)))
+             (smoke-log "IME の矩形（端末を選んでいない）: %S" off)
+             (smoke-check (not (equal (seq-take off 2) (seq-take smoke-ime-before 2)))
+                          "端末を選んでいないときは元の位置に戻る")
+             (embterm-module-select embterm--term 1)))
+         (smoke-next))
+       (lambda ()
+         ;; 11. カーソルの点滅（T-127。描画スレッドのタイマー）。既定は点滅しないので有効にする
          (customize-set-variable 'embterm-cursor-blink t)
          (smoke-next))
        (lambda ()
@@ -182,7 +213,7 @@
              (smoke-check (> (or (plist-get info :full-draws) 0) 0) "描画の回数が数えられている")))
          (smoke-next))
        (lambda ()
-         ;; 11. copy モード（C-c C-k。スクロールバックをバッファに写す）
+         ;; 12. copy モード（C-c C-k。スクロールバックをバッファに写す）
          (with-current-buffer smoke-buf
            (embterm-copy-mode))
          (smoke-next))
@@ -195,7 +226,7 @@
          (with-current-buffer smoke-buf (embterm-semi-char-mode))
          (smoke-next))
        (lambda ()
-         ;; 12. 閉じる
+         ;; 13. 閉じる
          (with-current-buffer smoke-buf
            (let ((kill-buffer-query-functions nil))
              (kill-buffer smoke-buf)))

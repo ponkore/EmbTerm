@@ -286,6 +286,9 @@ pub fn font_spec(families: Vec<String>, size: Option<f32>, fallback: Vec<String>
 /// 描画スレッドと main スレッドで分け合うペイン
 struct PaneRender {
     renderer: Renderer,
+    /// 置いてある `EmacsView` のアドレスと、その中での置き場所（論理ポイント。IME の位置に使う。T-129）
+    view_ptr: usize,
+    origin: (i32, i32),
     /// デバイス画素
     size: (u32, u32),
     cols: u16,
@@ -295,6 +298,8 @@ struct PaneRender {
     visible: bool,
     /// 選んでいるペイン（端末の大きさを決める）
     selected: bool,
+    /// マウスの下のハイパーリンクの範囲（ペインの行, 始めの桁, 終わりの桁。T-101 / T-129）
+    hover: Option<(u16, u16, u16)>,
 }
 
 // SAFETY: 中身は Metal のオブジェクト（デバイス・キュー・テクスチャ）と CAMetalLayer。
@@ -322,6 +327,8 @@ pub struct Shared {
     colors_dbg: Mutex<(Rgb, Rgb, Rgb)>,
     /// 点滅を切り替えた回数（デバッグ用）
     blink: AtomicU64,
+    /// Kitty graphics のアニメーションを進めた回数（デバッグ用。T-092）
+    animation: AtomicU64,
     /// 入力から表示までの遅れの測定（T-054 / T-128）
     probe: Mutex<LatencyProbe>,
 }
@@ -459,8 +466,10 @@ struct MacApp {
     scrollback: usize,
     clipboard: (bool, bool),
     focused: bool,
-    /// 選択のドラッグの始め（ペインの番号と、ビューポートの桁・行）
-    drag: Option<(i64, (u16, u16))>,
+    /// 選択のドラッグの始め（ペインの番号と、画面の座標の桁・行）
+    drag: Option<(i64, (u16, u32))>,
+    /// いまマウスの下にあるハイパーリンク（変わったときだけ Lisp に知らせる）
+    hover_uri: Option<String>,
     mouse: Option<et_vt::MouseEncoder>,
     opts: Option<SpawnOptions>,
     encoder: Option<KeyEncoder>,
@@ -476,6 +485,24 @@ pub struct Term {
 impl Term {
     pub fn shared(&self) -> &Shared {
         &self.shared
+    }
+
+    /// いま `EmacsView` が IME に返す矩形（画面座標）と、差し替えが入っているか（自動確認用。T-129）
+    pub fn ime_rect(&self) -> Option<(f64, f64, f64, f64, bool)> {
+        let id = self.id;
+        APPS.with(|apps| {
+            let apps = apps.borrow();
+            let app = apps.get(&id)?;
+            let pane = app.current_pane()?;
+            let host = pane.host.as_ref()?;
+            Some((
+                crate::ime_mac::ask_view_rect(host).0,
+                crate::ime_mac::ask_view_rect(host).1,
+                crate::ime_mac::ask_view_rect(host).2,
+                crate::ime_mac::ask_view_rect(host).3,
+                crate::ime_mac::installed(),
+            ))
+        })
     }
 
     /// 頼みごとをその場で片づける（AppKit は main スレッドだけ。描画は別のスレッドが持つ）
@@ -517,6 +544,7 @@ pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
         cursor_dbg: Mutex::new((false, false, "block")),
         colors_dbg: Mutex::new((DEFAULT_FG, DEFAULT_BG, Rgb::default())),
         blink: AtomicU64::new(0),
+        animation: AtomicU64::new(0),
         probe: Mutex::new(LatencyProbe::default()),
     });
     let mut theme = Theme::default();
@@ -534,6 +562,7 @@ pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
         clipboard: (false, false),
         focused: false,
         drag: None,
+        hover_uri: None,
         mouse: et_vt::MouseEncoder::new().ok(),
         opts: Some(opts),
         encoder: None,
@@ -601,6 +630,9 @@ impl MacApp {
             }
             Request::Focus(on) => {
                 self.focused = on;
+                if !on {
+                    crate::ime_mac::clear();
+                }
                 // フォーカスの出入りは、アプリが求めているとき（mode 1004）だけ送る。
                 // Windows は ConPTY が必ず求めるので常に送っている（T-070）が、macOS では
                 // 求めていないシェルにそのまま文字として出てしまう
@@ -653,8 +685,7 @@ impl MacApp {
             Request::LinkAt { pane, x, y, reply } => {
                 let _ = reply.send(self.link_at(pane, x, y));
             }
-            // マウスの下のリンクに下線を引くのは T-128（レイヤーはマウスの動きを受けないので、Lisp から送る形になる）
-            Request::DebugHover { .. } => {}
+            Request::DebugHover { pane, x, y } => self.update_hover(pane, Some((x, y))),
         }
     }
 
@@ -715,6 +746,7 @@ impl MacApp {
         pane.layer.setHidden(false);
         pane.layer.setContentsScale(scale as f64);
 
+        let host_ptr = Retained::as_ptr(&host) as usize;
         let px = ((w as f32 * scale).round() as u32, (h as f32 * scale).round() as u32);
         let render = pane.render.clone();
         let (cols, rows) = {
@@ -727,11 +759,15 @@ impl MacApp {
             r.cols = c;
             r.rows = rw;
             r.visible = true;
+            r.view_ptr = host_ptr;
+            r.origin = (x, y);
             (c, rw)
         };
         if self.selected.is_none() {
             self.selected = Some(id);
         }
+        // IME の候補ウィンドウを端末のカーソルに合わせる（T-129。1 回だけ差し替える）
+        crate::ime_mac::install();
         self.sync_panes();
         if self.shared.session().is_none() {
             self.start(cols, rows);
@@ -749,12 +785,15 @@ impl MacApp {
         let renderer = Renderer::for_layer(&layer, 1, 1, scale, self.font.clone())?;
         let mut render = PaneRender {
             renderer,
+            view_ptr: 0,
+            origin: (0, 0),
             size: (1, 1),
             cols: 1,
             rows: 1,
             scroll: 0,
             visible: false,
             selected: false,
+            hover: None,
         };
         render.renderer.set_theme(self.theme.clone());
         Ok(MacPane { id, layer, host: None, render: Arc::new(Mutex::new(render)) })
@@ -780,6 +819,7 @@ impl MacApp {
             p.layer.removeFromSuperlayer();
             if self.selected == Some(id) {
                 self.selected = self.panes.first().map(|p| p.id);
+                crate::ime_mac::clear();
             }
             self.sync_panes();
             self.publish_panes();
@@ -787,6 +827,10 @@ impl MacApp {
     }
 
     fn select(&mut self, id: Option<i64>) {
+        if id.is_none() {
+            // 端末のウィンドウを選んでいない間は、IME の位置を元に戻す
+            crate::ime_mac::clear();
+        }
         self.selected = id.or(self.selected);
         for p in &self.panes {
             let mut r = p.render.lock().unwrap_or_else(|e| e.into_inner());
@@ -1019,7 +1063,56 @@ impl MacApp {
         self.shared.emit(Event::CopyReady);
     }
 
-    /// ペインの画素の位置にあるハイパーリンク（OSC 8。T-127）。遡っているペインでは今は見ない
+    /// マウスの下のハイパーリンク（OSC 8）に下線を引く（T-101 の macOS 版。T-129）。
+    /// レイヤーはマウスの動きを受けないので、Lisp がポーリングで位置を送る
+    fn update_hover(&mut self, id: i64, at: Option<(i32, i32)>) {
+        let found = at.and_then(|(x, y)| {
+            let s = self.shared.session()?;
+            let p = self.panes.iter().find(|p| p.id == id)?;
+            let (cols, rows, scroll, scale) = {
+                let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
+                (r.cols, r.rows, r.scroll, r.renderer.scale())
+            };
+            let (cx, cy) = {
+                let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
+                r.renderer.cell_at((x as f32 * scale) as i32, (y as f32 * scale) as i32, cols, rows)
+            };
+            let term = s.lock();
+            let row = screen_row(&term, rows, scroll, cy);
+            let uri_at = |x: u16| term.grid_ref(x, row).ok().and_then(|r| term.hyperlink_uri(r));
+            let uri = uri_at(cx)?;
+            // 同じ URI が続く範囲を左右に広げる
+            let mut start = cx;
+            while start > 0 && uri_at(start - 1).as_deref() == Some(uri.as_str()) {
+                start -= 1;
+            }
+            let mut end = cx + 1;
+            while end < cols && uri_at(end).as_deref() == Some(uri.as_str()) {
+                end += 1;
+            }
+            Some((uri, (cy, start, end)))
+        });
+        let span = found.as_ref().map(|f| f.1);
+        let mut changed = false;
+        for p in &self.panes {
+            let want = if p.id == id { span } else { None };
+            let mut r = p.render.lock().unwrap_or_else(|e| e.into_inner());
+            if r.hover != want {
+                r.hover = want;
+                changed = true;
+            }
+        }
+        let uri = found.map(|f| f.0);
+        if uri != self.hover_uri {
+            self.hover_uri = uri.clone();
+            self.shared.emit(Event::Hover(uri));
+        }
+        if changed {
+            self.shared.mark_dirty();
+        }
+    }
+
+    /// ペインの画素の位置にあるハイパーリンク（OSC 8。T-127）
     fn link_at(&self, id: i64, x: i32, y: i32) -> Option<String> {
         let s = self.shared.session()?;
         let p = self.panes.iter().find(|p| p.id == id)?;
@@ -1027,16 +1120,12 @@ impl MacApp {
             let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
             (r.cols, r.rows, r.scroll, r.renderer.scale())
         };
-        if scroll != 0 {
-            return None;
-        }
         let (cx, cy) = {
             let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
             r.renderer.cell_at((x as f32 * scale) as i32, (y as f32 * scale) as i32, cols, rows)
         };
         let term = s.lock();
-        let total = term.total_rows() as i64;
-        let row = (total - rows as i64 + cy as i64).max(0) as u32;
+        let row = screen_row(&term, rows, scroll, cy);
         let at = term.grid_ref(cx, row).ok()?;
         term.hyperlink_uri(at)
     }
@@ -1098,17 +1187,18 @@ impl MacApp {
             return;
         }
 
-        // 選択（遡っているペインでは今は扱わない。T-128）
-        if scroll != 0 {
-            return;
-        }
+        // 選択（遡っているペインでも効く。画面の座標に直す。T-129）
         let (cx, cy) = {
             let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
             r.renderer.cell_at(px, py, cols, rows)
         };
+        let row = {
+            let t = s.lock();
+            screen_row(&t, rows, scroll, cy)
+        };
         match kind {
             MouseKind::Down => {
-                self.drag = Some((id, (cx, cy)));
+                self.drag = Some((id, (cx, row)));
                 let _ = s.lock().set_selection(None);
                 *self.shared.selection.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
@@ -1116,7 +1206,7 @@ impl MacApp {
                 if let Some((start_pane, start)) = self.drag
                     && start_pane == id
                 {
-                    let _ = s.lock().set_selection(Some((start, (cx, cy))));
+                    let _ = s.lock().set_selection_screen(Some((start, (cx, row))));
                 }
             }
             MouseKind::Up => {
@@ -1124,7 +1214,7 @@ impl MacApp {
                     && start_pane == id
                 {
                     let mut term = s.lock();
-                    let _ = term.set_selection(Some((start, (cx, cy))));
+                    let _ = term.set_selection_screen(Some((start, (cx, row))));
                     let text = term.format_plain(true, true).ok().flatten();
                     drop(term);
                     if let Some(text) = text.filter(|t| !t.is_empty()) {
@@ -1133,7 +1223,8 @@ impl MacApp {
                     }
                 }
             }
-            MouseKind::Move => {}
+            // 負の位置は「ペインから外れた」の印（Lisp がそう送る）
+            MouseKind::Move => self.update_hover(id, (x >= 0 && y >= 0).then_some((x, y))),
         }
         self.shared.mark_dirty();
     }
@@ -1241,12 +1332,15 @@ impl MacApp {
             full_draws: self.shared.draws.load(Ordering::Relaxed),
             blink_ticks: self.shared.blink.load(Ordering::Relaxed),
             blink_timer: self.shared.blink.load(Ordering::Relaxed) > 0,
+            animation_ticks: self.shared.animation.load(Ordering::Relaxed),
+            animation_playing: self.shared.animation.load(Ordering::Relaxed) > 0,
             ..DebugInfo::default()
         };
         if let Some(p) = self.current_pane() {
             let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
             info.cell = r.renderer.cell_size();
             info.padding = r.renderer.padding();
+            info.hover = r.hover;
         }
         let (visible, blinking, shape) = *self.shared.cursor_dbg.lock().unwrap_or_else(|e| e.into_inner());
         info.cursor_visible = visible;
@@ -1337,6 +1431,7 @@ impl MacApp {
         }
         self.panes.clear();
         self.sync_panes();
+        crate::ime_mac::clear();
         self.shared.stop.store(true, Ordering::Release);
         self.shared.wake.notify_all();
         if let Some(s) = self.shared.session() {
@@ -1406,6 +1501,12 @@ fn on_session_event(shared: &Arc<Shared>, e: SessionEvent) {
     }
 }
 
+/// ペインの行 `cy` が、端末の画面（スクロールバックを含む）の何行目か（T-129）
+fn screen_row(term: &et_vt::Terminal, rows: u16, scroll: i64, cy: u16) -> u32 {
+    let total = term.total_rows() as i64;
+    (total - rows as i64 - scroll + cy as i64).clamp(0, total.saturating_sub(1)).max(0) as u32
+}
+
 /// ペインのスクロール位置に合わせた描き方
 fn pane_view(r: &PaneRender, frame: &Frame) -> FrameView {
     FrameView {
@@ -1413,7 +1514,7 @@ fn pane_view(r: &PaneRender, frame: &Frame) -> FrameView {
         cols: r.cols,
         rows: r.rows,
         show_cursor: r.scroll == 0,
-        hover: None,
+        hover: r.hover,
         blink_off: false,
     }
 }
@@ -1432,6 +1533,10 @@ fn render_main(shared: Arc<Shared>) {
     let mut blink_on = true;
     let mut blink_at = Instant::now();
     let mut blink_ticks = 0u64;
+    // Kitty graphics のアニメーション（T-092）。次のフレームの時刻（epoch からの ms）
+    let epoch = Instant::now();
+    let mut animation_next: Option<u64> = None;
+    let mut animation_ticks = 0u64;
     loop {
         {
             let mut dirty = shared.dirty.lock().unwrap_or_else(|e| e.into_inner());
@@ -1453,6 +1558,15 @@ fn render_main(shared: Arc<Shared>) {
         session.take_output();
         let hold = {
             let mut term = session.lock();
+            // Kitty graphics のアニメーションを今の時刻まで進める（T-092。進んだ画像は世代が変わる）
+            let now_ms = epoch.elapsed().as_millis() as u64;
+            let next = term.kitty_animation_tick(now_ms);
+            if let Some(next_ms) = next {
+                animation_next = Some(next_ms);
+                animation_ticks += 1;
+            } else {
+                animation_next = None;
+            }
             let hold = term.render_hold(RENDER_HOLD_TIMEOUT);
             if let Some(held) = term.take_held_render_state() {
                 rs = held;
@@ -1478,7 +1592,7 @@ fn render_main(shared: Arc<Shared>) {
             blink_on = true;
             blinked = true;
         }
-        if !changed && !blinked && hold.is_none() {
+        if !changed && !blinked && animation_next.is_none() && hold.is_none() {
             // 点滅があるときは次の切り替えのために起こし直す
             if blinking || text_blink {
                 shared.mark_dirty();
@@ -1487,6 +1601,7 @@ fn render_main(shared: Arc<Shared>) {
             continue;
         }
         let mut cursor = None;
+        let mut ime: Option<(usize, objc2_core_foundation::CGRect)> = None;
         for (_, render) in &panes {
             let mut r = render.lock().unwrap_or_else(|e| e.into_inner());
             if !r.visible {
@@ -1497,6 +1612,16 @@ fn render_main(shared: Arc<Shared>) {
             view.show_cursor = view.show_cursor && (!blinking || blink_on);
             if r.selected || cursor.is_none() {
                 cursor = cursor_rect(&r, &frame, &view);
+                // IME の候補ウィンドウの位置（ビュー座標 = ペインの置き場所 + カーソル。T-129）
+                ime = cursor.filter(|_| r.selected || panes.len() == 1).map(|(x, y, w, h)| {
+                    (
+                        r.view_ptr,
+                        objc2_core_foundation::CGRect::new(
+                            objc2_core_foundation::CGPoint::new((r.origin.0 + x) as f64, (r.origin.1 + y) as f64),
+                            objc2_core_foundation::CGSize::new(w as f64, h as f64),
+                        ),
+                    )
+                });
             }
             if let Err(e) = r.renderer.draw_view(&frame, &view, true, None) {
                 log(&format!("描画に失敗: {e}"));
@@ -1515,6 +1640,17 @@ fn render_main(shared: Arc<Shared>) {
             // 次の切り替えのために起こす
             shared.mark_dirty();
         }
+        shared.animation.store(animation_ticks, Ordering::Relaxed);
+        if let Some(next_ms) = animation_next {
+            // アニメーションの次のフレームの時刻に起こす（長くても 1 秒で見回る）
+            let now = epoch.elapsed().as_millis() as u64;
+            let wait = next_ms.saturating_sub(now).clamp(8, 1000);
+            let shared2 = shared.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(wait));
+                shared2.mark_dirty();
+            });
+        }
         *shared.colors_dbg.lock().unwrap_or_else(|e| e.into_inner()) =
             (frame.foreground, frame.background, frame.palette[1]);
         *shared.cursor_dbg.lock().unwrap_or_else(|e| e.into_inner()) = (
@@ -1529,6 +1665,10 @@ fn render_main(shared: Arc<Shared>) {
         );
         // カーソルの位置は世代を上げない（出力のたびに変わる）
         shared.state.lock().unwrap_or_else(|e| e.into_inner()).cursor = cursor;
+        match ime {
+            Some((view, rect)) => crate::ime_mac::set_rect_raw(view, Some(rect)),
+            None => crate::ime_mac::clear(),
+        }
         if hold.is_some() {
             shared.mark_dirty();
             std::thread::sleep(Duration::from_millis(16));

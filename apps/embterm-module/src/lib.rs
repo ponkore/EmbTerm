@@ -25,6 +25,9 @@ mod term;
 #[cfg(target_os = "macos")]
 #[path = "term_mac.rs"]
 mod term;
+/// IME の候補ウィンドウの位置（T-129）
+#[cfg(target_os = "macos")]
+mod ime_mac;
 
 use std::cell::RefCell;
 use std::io::Write;
@@ -297,6 +300,17 @@ fn mouse(
         mods: mods.unwrap_or_default(),
     });
     Ok(())
+}
+
+/// いま `EmacsView` が IME に返す矩形 `(X Y W H INSTALLED)`（画面座標。T-129。macOS だけ。自動確認用）。
+/// 端末を選んでいれば端末のカーソルの位置、選んでいなければ Emacs のポイントの位置になる
+#[cfg(target_os = "macos")]
+#[defun]
+fn ime_rect<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
+    match term.borrow().ime_rect() {
+        Some((x, y, w, h, installed)) => env.list((x, y, w, h, installed.into_lisp(env)?)),
+        None => ().into_lisp(env),
+    }
 }
 
 /// IME の変換中の文字列 TEXT をカーソルの位置に描く（空か nil で消す。T-127。macOS だけ）

@@ -92,6 +92,11 @@ pub fn run(args: Args) -> Result<(), String> {
                 Err(e) => log(&format!("画面を保存できません: {e}")),
             }
         }
+        // Kitty graphics のアニメーションを進める（T-092 / T-129。描く前に毎回呼ぶ）
+        {
+            let mut term = session.lock();
+            term.kitty_animation_tick(crate::started().elapsed().as_millis() as u64);
+        }
         // 終わり
         if exit_at.is_some_and(|t| Instant::now() >= t) {
             log("--exit-after で閉じる");
@@ -150,7 +155,10 @@ fn screenshot(session: &Session, args: &Args, cols: u16, rows: u16, path: &std::
     let mut rs = RenderState::new().map_err(|e| e.to_string())?;
     let mut frame = Frame::default();
     {
-        let term = session.lock();
+        let mut term = session.lock();
+        // Kitty graphics のアニメーションを今の時刻まで進める（T-092 / T-129）
+        let now_ms = crate::started().elapsed().as_millis() as u64;
+        term.kitty_animation_tick(now_ms);
         rs.update(&term).map_err(|e| e.to_string())?;
         frame.capture_images(&mut rs, &term);
     }

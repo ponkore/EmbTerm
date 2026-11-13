@@ -32,7 +32,7 @@ pub fn log(msg: &str) {
     }
 }
 
-fn started() -> std::time::Instant {
+pub fn started() -> std::time::Instant {
     static T: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     *T.get_or_init(std::time::Instant::now)
 }

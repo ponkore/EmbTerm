@@ -806,6 +806,24 @@ impl Terminal {
 
     /// ビューポートの (桁, 行) で選択範囲を決める（両端を含む）。`None` で消す。
     /// 選択はスクロールバックの中の位置として持つので、スクロールしても同じ文字に付いて動く
+    /// 画面の座標（スクロールバックを含む行番号）で選択範囲を決める（T-129）。
+    /// ビューポートの外（遡って見ている行）も選べる。`None` で消す
+    pub fn set_selection_screen(&mut self, range: Option<((u16, u32), (u16, u32))>) -> Result<()> {
+        match range {
+            None => self.set_selection(None),
+            Some((a, b)) => {
+                let sel = ffi::GhosttySelection {
+                    start: self.grid_ref(a.0, a.1)?.0,
+                    end: self.grid_ref(b.0, b.1)?.0,
+                    rectangle: false,
+                };
+                check(unsafe {
+                    ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_SELECTION, &sel as *const _ as *const c_void)
+                })
+            }
+        }
+    }
+
     pub fn set_selection(&mut self, range: Option<((u16, u16), (u16, u16))>) -> Result<()> {
         match range {
             None => check(unsafe { ffi::ghostty_terminal_set(self.raw, ffi::GHOSTTY_TERMINAL_OPT_SELECTION, ptr::null()) }),

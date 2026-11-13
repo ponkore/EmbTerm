@@ -173,7 +173,10 @@ pub fn run(args: Args) -> Result<(), String> {
         // 端末の中身 → フレーム → 描画
         session.take_output();
         {
-            let term = session.lock();
+            let mut term = session.lock();
+            // Kitty graphics のアニメーション（T-092 / T-129）
+            let now_ms = crate::started().elapsed().as_millis() as u64;
+            term.kitty_animation_tick(now_ms);
             if let Err(e) = rs.update(&term) {
                 log(&format!("render state を更新できません: {e}"));
             }

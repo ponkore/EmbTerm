@@ -760,6 +760,42 @@ DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'�
                 (setq unread-command-events (cons ev unread-command-events)
                       done t))))))))))
 
+;;;; マウスの下のハイパーリンク（T-101 / T-129。macOS）
+
+(defvar embterm--hover-last nil
+  "最後に module に送ったマウスの位置 (BUFFER PANE X . Y)。同じなら送り直さない。")
+
+(defun embterm--update-hover ()
+  "マウスの下のペインに、マウスの位置を知らせる（リンクに下線を引くため。T-129）。
+端末のレイヤーはマウスの動きを受けないので、ポーリングのたびに `mouse-pixel-position\=' から求めて送る。
+Windows では子 HWND が直に受けるので要らない。"
+  (when (and embterm-show-link-on-hover (not (eq system-type 'windows-nt)) (fboundp 'embterm-module-mouse))
+    (pcase-let ((`(,frame ,x . ,y) (mouse-pixel-position)))
+      (let ((found nil))
+        (when (and (framep frame) x y (frame-visible-p frame))
+          (catch 'done
+            (dolist (win (window-list frame 'no-minibuf))
+              (let ((buf (window-buffer win)))
+                (when (buffer-local-value 'embterm--term buf)
+                  (pcase-let ((`(,l ,tp ,r ,b) (window-inside-pixel-edges win)))
+                    (when (and (<= l x) (< x r) (<= tp y) (< y b))
+                      (with-current-buffer buf
+                        (let ((pane (embterm--pane-of win)))
+                          (when pane
+                            (setq found (list buf (embterm--pane-id pane) (- x l) (- y tp)))
+                            (throw 'done nil)))))))))))
+        (unless (equal found embterm--hover-last)
+          ;; 外れたときは、前にいたペインに「外れた」ことを伝える
+          (when (and embterm--hover-last (buffer-live-p (car embterm--hover-last)))
+            (with-current-buffer (car embterm--hover-last)
+              (when embterm--term
+                (embterm-module-mouse embterm--term (nth 1 embterm--hover-last) "move" -1 -1 1 ""))))
+          (when found
+            (with-current-buffer (car found)
+              (when embterm--term
+                (embterm-module-mouse embterm--term (nth 1 found) "move" (nth 2 found) (nth 3 found) 1 ""))))
+          (setq embterm--hover-last found))))))
+
 ;;;; IME（T-127。macOS の NS 版）
 
 (declare-function embterm-module-set-preedit "embterm-module")
@@ -1100,6 +1136,7 @@ Windows はフレームの HWND（`window-id\=')。macOS は `window-id\=' が N
           (error (message "embterm: %s" (error-message-string err)))))))
   (embterm--update-focus)
   (embterm--update-ime)
+  (embterm--update-hover)
   (unless embterm--buffers
     (embterm--deactivate)))
 

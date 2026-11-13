@@ -418,9 +418,13 @@ requirements.md §4 の「とくに確かめること」を見ながら。
     フォント・テーマへの追従・スクロール・シェル統合（OSC 51;E）・OSC 8 のリンク・後始末の **12 項目**
   - **画像を縮めて載せる**（T-105 の macOS 版）: 4000x4000 で常駐 489 → 422 MB。縮小は描画スレッドで（別スレッド化は未）
   - 道具: `test/proc-stats.sh`（Windows の proc-stats.ps1 に当たる）、`test/perf-colors.sh`
-- ⬜ **T-129** macOS の残り（T-127 / T-128 で置いていったもの）
-  - IME の候補ウィンドウの位置（`-[EmacsView firstRectForCharacterRange:]`。ポイントの移動か method swizzling）
-  - 遡っているペインでの選択と、マウスの下のリンクの下線（位置の対応と、Lisp からのマウスの動きの通知）
-  - 大きな画像の変換を別のスレッドで（T-105 の後半）、Kitty graphics のアニメーション（T-092）
-  - **Windows 機での実ビルドと試験**（`cargo xtask test-screens` / `test-emacs` を Windows で通す。ずっとクロスの型チェックだけ）
-  - 普段の Emacs の設定（テーマ・corfu・tab-bar・claude）での使い心地の確認（利用者）
+- ✅ **T-129** macOS の残り（2026-11-13）→ docs/notes/t129-macos-rest.md
+  - **IME の候補ウィンドウの位置**: `EmacsView` の `firstRectForCharacterRange:actualRange:` を差し替え（method swizzling）、
+    端末を選んでいる間だけ端末のカーソルの矩形を返す（tr-ime の位置の上書きに当たる）。選んでいなければ必ず元の実装に渡す。
+    自動確認: 20 文字打つと矩形が 130 pt 右へ動き、端末を選んでいないときは Emacs のポイントの位置に戻る
+  - **Kitty graphics のアニメーション**（T-092 の macOS 版）: 描く前に毎回 `kitty_animation_tick` を呼び、次のフレームの時刻に起こす。
+    赤 → 緑 → 青が 300 ms ごとに変わることを PNG で確認（**撮るときだけ呼んでも進まない**）
+  - **遡っているペインでの選択**: `et_vt::Terminal::set_selection_screen`（画面の座標で選択）を足した。リンクも同じ計算に
+  - **マウスの下のリンクの下線**（T-101 の macOS 版）: Lisp がポーリングで `mouse-pixel-position` を送り、module が範囲を決める
+  - **大きな画像の変換の別スレッド化（T-105 の後半）はやらない**: macOS では描画スレッドで走るので Emacs は止まらない（1 枚 53 ms）
+  - 残り: **Windows 機での実ビルドと試験**（機械が要る）、普段の設定での使い心地（利用者）
