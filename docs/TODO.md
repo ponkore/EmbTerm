@@ -352,8 +352,8 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 ## 9. macOS への移植（T-121 の段階）
 
 この一式は複数の節（描画・PTY・入力・IME・試験・配布）にまたがるので、§8 ではなくここにまとめる。
-前提と見積もりは [research/macos-port.md](research/macos-port.md)。段階 0〜4（T-124〜T-128）は 2026-11-13 に通した。
-残りは T-129。**ghostel との比べ（T-122）の結論**: mac の ghostel も Emacs を固めないので、
+前提と見積もりは [research/macos-port.md](research/macos-port.md)。段階 0〜4（T-124〜T-128）と
+残り（T-129 / T-130 / T-131）は 2026-11-13 に通した。**ghostel との比べ（T-122）の結論**: mac の ghostel も Emacs を固めないので、
 この移植の値打ちは「速さ」より**文字幅とグリフの自由（eaw・全角・画像）と、Windows と同じ設定を使えること**（docs/notes/t128-macos-perf.md §2）。
 
 - ✅ **T-122**（判断）mac の ghostel の遅さの出どころを測る（2026-11-13。T-128 と一緒に）→ **mac の ghostel は Emacs を固めない。**
@@ -436,3 +436,13 @@ requirements.md §4 の「とくに確かめること」を見ながら。
     `use crate::terminal_env;` が抜けていた（`unix.rs` には入っていた）
   - 教訓: **`cargo check --workspace` は `#[cfg(test)]` をビルドしない**ので、mac から `--target x86_64-pc-windows-gnu` で確かめるときは
     `--all-targets` を付けないと Windows だけのテストの壊れを見落とす（T-124 §6 の手順に足す）
+- ✅ **T-131** zsh のシェル統合（`etc/embterm.zsh`）（2026-11-13）→ macOS の既定のシェルだけ統合が無かった。docs/notes/t118-shell-integration.md §4
+  - bash 版は `PROMPT_COMMAND` / `PS0` / `\[ \]` に依っていて zsh では動かない。フックは `precmd` / `preexec`（`add-zsh-hook`）、
+    プロンプトの `133;A` / `133;B` は `PS1` に `%{ %}` で埋める
+  - **カレントディレクトリ（OSC 7）も zsh 版だけは出す**。pwsh と bash では利用者のプロンプトが出している前提だが、
+    zsh（starship）は出さない。逃がすのは `%` と空白だけで非 ASCII は生のまま（Emacs 側が `url-unhex-string` を通すため）
+  - **【重要】`precmd` は列の先頭へ移し、`return $rc` で抜ける**。zsh の 2 番目以降のフックが見る `$?` は直前のフックの終了コードなので、
+    末尾のままだと `133;D` に嘘が載り、先頭に置くだけだと starship が終了コードを見失う（両方そろって正しい。実測）
+  - 配布物に入れる（`xtask`。macOS は zsh / bash、Windows は ps1 / bash / zsh / lua）。確認は `zsh -i` に流して `cat -v`
+    （133;A/B/C/D・終了コード 42・OSC 7 の `%` と空白・引数の逃がし方・zim + starship との共存）。
+    **端末の中での実動は未確認**（利用者が `~/.zshrc` に 1 行足して使うところから）

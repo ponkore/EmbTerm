@@ -332,11 +332,12 @@ fn build_release() -> Result<Vec<(PathBuf, &'static str)>, String> {
     run(build.current_dir(&root))?;
     let release = root.join("target/release");
     if !cfg!(windows) {
-        // macOS の配布物（T-126）: module（.dylib）・embterm・embterm.el・シェル統合（bash）
+        // macOS の配布物（T-126）: module（.dylib）・embterm・embterm.el・シェル統合（zsh / bash。T-131）
         return Ok(vec![
             (release.join("libembterm_module.dylib"), "embterm_module.dylib"),
             (release.join("embterm"), "embterm"),
             (root.join("lisp/embterm.el"), "embterm.el"),
+            (root.join("etc/embterm.zsh"), "etc/embterm.zsh"),
             (root.join("etc/embterm.bash"), "etc/embterm.bash"),
         ]);
     }
@@ -347,9 +348,10 @@ fn build_release() -> Result<Vec<(PathBuf, &'static str)>, String> {
         (root.join("lisp/embterm.el"), "embterm.el"),
         (conpty.join("conpty.dll"), "conpty.dll"),
         (conpty.join("x64/OpenConsole.exe"), "x64/OpenConsole.exe"),
-        // シェル統合（T-118 / T-119）
+        // シェル統合（T-118 / T-119 / T-131）
         (root.join("etc/embterm.ps1"), "etc/embterm.ps1"),
         (root.join("etc/embterm.bash"), "etc/embterm.bash"),
+        (root.join("etc/embterm.zsh"), "etc/embterm.zsh"),
         (root.join("etc/embterm.lua"), "etc/embterm.lua"),
     ];
     for (src, _) in &files {

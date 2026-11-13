@@ -32,11 +32,12 @@
 |---|---|
 | `embterm.ps1`（pwsh 7・Windows PowerShell 5.1） | `if ($env:TERM_PROGRAM -eq 'EmbTerm') { . '<配布物>/etc/embterm.ps1' }` |
 | `embterm.bash`（Git Bash・MSYS2・WSL） | `[ "$TERM_PROGRAM" = EmbTerm ] && . <配布物>/etc/embterm.bash` |
+| `embterm.zsh`（zsh。macOS の既定のシェル。2026-11-13 に追加 → [§4](#4-t-131-zsh-のシェル統合)） | `[[ $TERM_PROGRAM == EmbTerm ]] && source <配布物>/etc/embterm.zsh` |
 | `embterm.lua`（nyagos） | `if nyagos.env.TERM_PROGRAM == "EmbTerm" then dofile("<配布物>/etc/embterm.lua") end` |
 
 - 関数: `embterm_cmd 名前 引数...`、`embterm_find_file パス...`（`find-file-other-window`）、`embterm_dired [パス]`（`dired-other-window`）。
   短い名前はそれぞれのシェルの alias で（例: `Set-Alias ef embterm_find_file`）
-- パスはシェルのカレントディレクトリから絶対パスにして送る（pwsh は `$PWD`。Git Bash は `cygpath -w`、WSL は `wslpath -w`）
+- パスはシェルのカレントディレクトリから絶対パスにして送る（pwsh は `$PWD`。Git Bash は `cygpath -w`、WSL は `wslpath -w`。zsh は `${p:a}`）
 - nyagos は `nyagos.write` ではなく `io.write`（加工されない）。nyagos の Lua は 5.1 なので `table.unpack` が無い（最初の版で踏んだ）
 
 ### 1.4 確かめたこと（`test/shellcmd.el`）
@@ -98,4 +99,57 @@
 `<配布物>` は Emacs が読む配布物の場所（`~/.emacs.d/embterm`。T-120）。
 
 - pwsh: `~/.emacs.d/etc/pwsh-emacs-shell.ps1` が starship と OSC 7 の後で `embterm/etc/embterm.ps1` を読み込む（2026-11-12 に足した）
-- nyagos・bash: このリポジトリの外の設定に手で足す（`~/.emacs.d` の README の「EmbTerm の端末」に書いた）
+- nyagos・bash・zsh: このリポジトリの外の設定に手で足す（`~/.emacs.d` の README の「EmbTerm の端末」に書いた）
+
+---
+
+## 4. T-131 zsh のシェル統合
+
+- 日付: 2026-11-13
+- macOS 版（T-121〜T-130）を普段使いにしたら、**既定のシェル（zsh）だけ統合が無かった**ので足した（`etc/embterm.zsh`）。
+  bash 版は `PROMPT_COMMAND` / `PS0` / `\[ \]` に依っていて zsh では動かない
+
+### 4.1 bash 版との違い（3 つ）
+
+| | bash | zsh |
+|---|---|---|
+| フック | `PROMPT_COMMAND` + `PS0` | `precmd` / `preexec`（`add-zsh-hook`） |
+| プロンプトの `133;A` / `133;B` | `PS1` に `\[ \]` で埋める | `PS1` に `%{ %}` で埋める（zsh に `PS0` は無い） |
+| カレントディレクトリ（OSC 7） | **出さない**（利用者のプロンプト任せ） | **出す** |
+
+**OSC 7 を zsh 版だけ出すのは、出す人が誰もいないから。** pwsh は
+`~/.emacs.d/etc/pwsh-emacs-shell.ps1` が、Git Bash は利用者の PS1 が出している前提だが、
+zsh のプロンプト（starship）はこれを出さない。無いと端末のバッファの `default-directory` が
+起動したときのまま動かない。逃がすのは `%`（→ `%25`）と空白（→ `%20`）だけで、
+**非 ASCII は生のまま**送る（pwsh 版と同じ。Emacs 側は `url-unhex-string` を通すので、
+`%` を逃がさないと日本語のパスが壊れる）。
+
+### 4.2 【重要】precmd は列の先頭に置き、終了コードを返して抜ける
+
+zsh は `precmd_functions` を順に呼ぶが、**2 番目以降のフックが見る `$?` は
+「直前のフックの終了コード」**（実測）。`add-zsh-hook` は末尾に足すので、
+starship を先に読み込んでいると必ずこうなり、`133;D;終了コード` に嘘の値が載る。
+
+- 対策 1: 登録のあとで `precmd_functions=(__embterm_precmd ${precmd_functions:#__embterm_precmd})` と先頭へ移す
+- 対策 2: **`return $rc` で抜ける**。先頭に置くだけだと、今度は後ろのフック（starship）が
+  本当の終了コードを見られなくなる（プロンプトが赤くならない）
+
+実測（`zsh -i` に流し込み、`cat -v` で見る）: 後ろに置いた確認用のフックが
+`LATER_SEES=42` を出し、`(exit 42)` の次のプロンプトで starship の矢印が赤
+（`38;2;204;36;29`）になる。両方そろって初めて正しい。
+
+### 4.3 確かめたこと
+
+`zsh -i` に標準入力からコマンドを流し、出力を `cat -v` で読む（ZLE は tty でないと使われないので、
+`script` を噛まさなくてもフックは走る）。
+
+| | 結果 |
+|---|---|
+| `133;A` / `133;B` / `133;C` / `133;D;終了コード` | 出る。最初のプロンプトだけ `D` を出さない |
+| `(exit 42)` の次の `133;D` | `42`。後ろのフックにも 42 が渡る |
+| OSC 7 | `cd` のたびに出る。`/tmp/embterm test/日本語 100%` → `file://HOST/tmp/embterm%20test/日本語%20100%25` |
+| `embterm_find_file 'q"uote\back.txt'` | `"find-file-other-window" "…/q\"uote\\back.txt"`（逃がし方が bash 版と同じ） |
+| 利用者の普段の zsh（zim + starship + zim の termtitle） | すべて共存。プロンプトの桁も崩れない |
+
+**端末の中での実動（EmbTerm のバッファで `embterm_find_file` が開く・`C-c C-p` が効く）はまだ見ていない。**
+出している列が正しいことまでの確認。
