@@ -115,7 +115,8 @@ Windows のケース（cmd と vttest）は macOS では動かないので、**`
 - まだ Windows しか無いクレート（`et-render`・`embterm-module`）は、ほかの OS では `#![cfg(windows)]` で**空のクレート**にした。
   これで `cargo test --workspace` が macOS でも通る
 - **Windows 側を壊していないかは、この Mac から確かめられる**:
-  `rustup target add x86_64-pc-windows-gnu` → `cargo check --workspace --target x86_64-pc-windows-gnu`。
+  `rustup target add x86_64-pc-windows-gnu` → `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu`。
+  **`--all-targets` を忘れない**（無いと `#[cfg(test)]` をビルドしないので、Windows だけのテストの壊れを見落とす。T-130）。
   リンクはしないので `ghostty-vt-static.lib` が無くてもよい（build.rs の警告だけ出る）。**型の確認まではできる**ので、
   段階 1 以降も Windows 側の作業の後にこれを通すこと（本当のビルドと試験は Windows 機で）
 

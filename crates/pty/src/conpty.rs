@@ -927,6 +927,7 @@ fn write_loop(pipe: Handle, rx: Receiver<WriteMsg>, stop: Arc<Handle>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal_env;
 
     fn cl(args: &[&str]) -> String {
         let argv: Vec<OsString> = args.iter().map(OsString::from).collect();

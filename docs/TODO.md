@@ -365,7 +365,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   `crates/pty` を `common.rs` / `conpty.rs` / `unix.rs` に、`apps/embterm` を `window.rs` / `headless.rs` に分けた。
   `windows` クレートはすべて `[target.'cfg(windows)'.dependencies]` に移し、まだ Windows しか無いクレート（`et-render`・`embterm-module`）は
   ほかの OS では `#![cfg(windows)]` で空にした（`cargo test --workspace` が macOS でも通る）。
-  **Windows 側を壊していないかは Mac から `cargo check --workspace --target x86_64-pc-windows-gnu` で確かめられる**（リンクはしないので .lib は要らない）。
+  **Windows 側を壊していないかは Mac から `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu` で確かめられる**（リンクはしないので .lib は要らない。`--all-targets` は T-130）。
   本当のビルドと `test-emacs` は Windows 機で。docs/notes/t124-macos-stage0.md §6
 - ✅ **T-124**（段階 0）`et-vt` を macOS でリンクし、`et-pty` の Unix 版を書く（2026-11-13）→ **通った。** docs/notes/t124-macos-stage0.md
   - **zig は要らなかった**: 上流の `ghostty-vt-1.0.0.xcframework.zip`（universal の `libghostty-vt.a` + ヘッダ）を SHA256 で確かめて `vendor/ghostty-vt` に置く（`cargo xtask fetch-ghostty-vt`）。
@@ -427,4 +427,12 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - **遡っているペインでの選択**: `et_vt::Terminal::set_selection_screen`（画面の座標で選択）を足した。リンクも同じ計算に
   - **マウスの下のリンクの下線**（T-101 の macOS 版）: Lisp がポーリングで `mouse-pixel-position` を送り、module が範囲を決める
   - **大きな画像の変換の別スレッド化（T-105 の後半）はやらない**: macOS では描画スレッドで走るので Emacs は止まらない（1 枚 53 ms）
-  - 残り: **Windows 機での実ビルドと試験**（機械が要る）、普段の設定での使い心地（利用者）
+  - 残り: **Windows 機での実ビルドと試験**（機械が要る → T-130 で済）、普段の設定での使い心地（利用者）
+- ✅ **T-130** macOS への移植のあと、Windows 機で実ビルドと試験（2026-11-13）→ **通った。** T-129 の「残り」のうち機械が要る分
+  - `cargo build --workspace` / `--release` OK。`cargo test --workspace` **58 OK**（et-vt 32・et-session 9・et-render 7・et-pty 5・embterm 2・embterm-module 2・xtask 1）
+  - `cargo xtask test-screens` **41 ケース OK**、`cargo xtask test-emacs` **17 項目すべて OK**
+    （smoke / integration / split / env / resize / font / frames / copy / meta / scheme / idle / bigimage / shellcmd / prompt / kitty / close / cleanup）
+  - 直したのは 1 か所だけ: T-123 で `terminal_env` が `conpty.rs` から `common.rs` へ移ったのに、`conpty.rs` のテストモジュールだけ
+    `use crate::terminal_env;` が抜けていた（`unix.rs` には入っていた）
+  - 教訓: **`cargo check --workspace` は `#[cfg(test)]` をビルドしない**ので、mac から `--target x86_64-pc-windows-gnu` で確かめるときは
+    `--all-targets` を付けないと Windows だけのテストの壊れを見落とす（T-124 §6 の手順に足す）
