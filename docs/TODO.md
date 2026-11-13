@@ -184,6 +184,14 @@
 - ✅ **T-024** Emacs 31.1 の w32 の IME の扱いを読む（2026-11-11）→ docs/research/emacs-ime.md。変換中の文字列は IME 自身のウィンドウが描くので、子 HWND の下には隠れない見込み。位置は Emacs がポイントから決め、tr-ime の画素指定で上書きできる。確定した文字列は 1 文字ずつキーイベントで届く。**案 A + tr-ime で成り立つ見込み**。実測は P1〜P9（文書の §7）
 - ✅ **T-025** claude の文字幅を確かめる（2026-11-11）→ EmbTerm の中の claude で、`①②③` を入れた罫線の表が崩れないことをユーザーが確認した。Windows Terminal などとの見比べと、ZWJ の絵文字は確かめていない
 - ✅ **T-026** `emacs` クレートの版と Emacs 31.1 の module API の確認（2026-11-11）→ GenPreview と同じ `emacs` 0.23（feature `emacs-28`）で、Emacs 31.1 に読み込めた（spikes/vt-module）。`open_channel` を使うかどうかは T-014
+- ✅ **T-121** macOS（Emacs の NS 版）へ移植できるかを調べる（2026-11-13）→ **移植できる。価値もある。** docs/research/macos-port.md、プローブは docs/research/macos-port/
+  - 実測（`emacs -Q`、Emacs 31.1 の NS 版 / aarch64）: **`EmacsWindow` → `contentView` → `EmacsView` の中に子 NSView を足せ、Emacs の再描画（200 行の挿入・`scroll-up` 10 回・`redisplay`）でも消えない**
+  - 実測: **Lisp をビジーループで 1.4 秒占有している間に、別スレッドから `CATransaction` の commit が 212 回通った**（1 回 0.02〜0.06 ms）。
+    描画を Lisp から切り離せる = ghostel との差（レスポンス）の根拠
+  - 実測: child frame（corfu）は別の NSWindow なので必ず端末より上に出る（`HWND_BOTTOM` の工夫が要らない）。`backingScaleFactor` = 2 で DPI のぼやけ（T-043）は起きない。`HackGen Console NF` は mac にも入っている
+  - **`(frame-parameter nil 'window-id)` は NSWindow の番号ではない**（フレームごとの通し番号）。対応付けを自前で作る（macos-port.md §3.7）
+  - 見積もり: Rust の新規・書き直し 4,000〜4,600 行（既存 14,900 行の約 6 割は再利用）＋ `embterm.el` 200 行。最大の仕事は描画（D2D / DirectWrite → CoreText + Metal）
+  - ConPTY 一式・幅の三者合わせ（T-011）・win32-input-mode（T-069）・Job Object（T-073）・tr-ime（T-010 / T-083）は**丸ごと不要になる**
 
 ## 3. 最小構成（一本通す）
 
@@ -340,3 +348,40 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ⏸ **T-115** Windows Terminal と vttest を手で見比べる（DECCOLM・倍幅の行。T-055 では自動の比較を省いた）（2026-11-12: 手で見る作業なので利用者に。合格した画面は T-114 の回帰テストにした）
 - ✅ **T-116** 子の作業ディレクトリのドライブレターを大文字にする（2026-11-11）→ Emacs は `~` の展開や `directory-file-name` で小文字に落とす。claude は cwd を `.claude.json` のプロジェクトのキーに使うので、Emacs から開いたものと端末から開いたものでプロジェクトが割れる。プロンプトもほかの端末と同じ `C:\` になる
 - ✅ **T-117** 子に `PWD` / `OLDPWD` を渡さない（2026-11-11）→ Git Bash などから起動した Emacs の `PWD` が残り、starship（nyagos・pwsh のプロンプト）と yazi が実際の作業ディレクトリより `PWD` を信じて、Emacs を起動したディレクトリで開いたように見えた。`~/.emacs.d` の `M-x nyagos` / `yazi` を作っていて見つけた
+
+## 9. macOS への移植（T-121 の段階）
+
+この一式は複数の節（描画・PTY・入力・IME・試験・配布）にまたがるので、§8 ではなくここにまとめる。
+前提と見積もりは [research/macos-port.md](research/macos-port.md)。**やるとは決めていない**（T-122 の測定を見て決める）。
+
+- ⬜ **T-122**（判断）mac の ghostel の遅さの出どころを測る。redisplay / Lisp スレッドの詰まり / 入力の往復 / PTY の読みの間隔のどれか。
+  **redisplay か Lisp の詰まりなら EmbTerm の効果は確実、入力の往復が主因なら差は小さい**（macos-port.md §7）。ここで着手するかを決める
+- ⬜ **T-123**（設計）`cfg` とトレイト（`Pty` / `Renderer` / ビューの置き場）での platform 分岐。**リポジトリは分けない**（Windows が常用なので二重管理は避ける）。
+  Windows 側を壊さない保険は既存の回帰試験（`cargo xtask test-screens`、`cargo xtask test-emacs`）。この refactor は Windows で先に行い、試験を通してから macOS の実装を足す
+- ⬜ **T-124**（段階 0）`et-vt` を macOS でリンクし、`et-pty` の Unix 版を書く。VT だけのヘッドレスで `cargo xtask test-screens` を通す
+  - libghostty-vt は上流に `ghostty-vt-1.0.0.xcframework.zip` がある。**zig を入れずに済むかを先に確かめる**（済まなければ `zig -Dtarget=aarch64-macos`）
+  - `crates/vt/src/png.rs`（WIC）を ImageIO か `png` クレートに差し替え
+  - `et-pty`: `openpty` + `TIOCSWINSZ` + プロセスグループ + `SIGHUP` → 猶予 → `SIGKILL` + `waitpid`。再配布版の探索・Job Object・コマンドラインの引用・環境ブロックは不要
+  - **ここで失敗すれば一番早く分かる。半日で「心臓部は macOS で動く」まで行けるので、最初にやる**
+  - 通ったら requirements.md §3（「macOS / Linux は対象外【案】」）と §8 を書き換える
+- ⬜ **T-125**（段階 1）CoreText + Metal のレンダラと、NSWindow 1 枚の `embterm`（デバッグ用 exe）
+  - グリフのアトラス方式（Ghostty / WezTerm / Alacritty と同じ）。Windows の「アトラスは要らない」（T-008 / T-077）は D2D の `DrawGlyphRun` が速かったからで、macOS には同じ近道が無い
+  - 背景は Windows と同じ考え（セル 1 つ = 1 画素）でインスタンスの矩形にできる。`frame.rs`・eaw の overlap / shrink（T-013）・画像の層は移植する
+  - `Present(1)` の待ち（T-068）に当たるのは `CAMetalLayer` の drawable の待ち。**描画スレッドで待ち、main スレッド（= Emacs）は止めない**
+  - 画面比較の回帰試験（`test-screens` の 38 + 3 画面）で正しさを担保し、T-054 と同じ最悪の画面（314x70）で負荷を測る
+- ⬜ **T-126**（段階 2）Emacs module: `EmacsView` への埋め込み・位置合わせ・キー・ポーリング・イベント
+  - Win32 のメッセージループと「端末ごとの UI スレッド」を「main スレッド（Lisp から直接呼ぶ）+ 描画スレッド」に置き換える。
+    `PostMessage` の列は不要になるが、**ビューのジオメトリは main スレッドだけで触る**
+  - フレーム → NSWindow の対応付け（macos-port.md §3.7）: タイトルを一時的に一意にして引き、`window-id` をキーに覚える
+  - マウスは案 X（子ビューで受け、`acceptsFirstResponder` NO でフォーカスは奪わない）
+  - `keys.rs` から win32-input-mode と `VkKeyScan` 系を外し、macOS のキー（Option = Meta、Command）を足す
+- ⬜ **T-127**（段階 3）IME・マウス・選択 / コピー・Kitty graphics・OSC・通知・シェル統合
+  - **IME**: 端末のバッファでは `ns-put-working-text`（`ns-insert-working-text` / `ns-echo-working-text`、変数 `ns-working-text`）を奪い、
+    変換中の文字列を module に渡して端末のカーソル位置に自前で描く。候補ウィンドウの位置は `-[EmacsView firstRectForCharacterRange:]` 次第で、
+    ポイントの移動か method swizzling のどちらか（macos-port.md §5-2）
+  - 通知は `UNUserNotification` か `osascript`（T-099 の Windows のトーストに当たる）。クリップボードは NSPasteboard か Lisp 経由
+  - 画像の共有メモリ（`t=s`。T-093 で Windows では見送った）が使える見込み
+  - `etc/embterm.bash` はそのまま使える（OSC 51;E / OSC 133。T-118 / T-119）
+- ⬜ **T-128**（段階 4）測定と自動確認の移植
+  - mac の ghostel と比べる（T-122 で測った項目と同じ道具で）。入力から表示までと、大量の出力の最中の Emacs の止まり
+  - `test-emacs`（11 本）の移植。Windows は `PostMessage` でマウスを送っていた（T-081）が、macOS は合成イベントに権限が要るので module に試験用の注入口を作る
