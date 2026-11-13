@@ -118,7 +118,48 @@
          (smoke-check (file-exists-p (smoke-out "pane.png")) "ペインの画面を PNG に保存した")
          (smoke-next))
        (lambda ()
-         ;; 7. 分割して 2 つ目のペイン
+         ;; 7. マウスのドラッグで選択（T-127）。2 行目（hello from emacs）をなぞる
+         (with-current-buffer smoke-buf
+           (let* ((st (smoke-state))
+                  (rows (plist-get st :rows))
+                  (win (get-buffer-window smoke-buf))
+                  (edges (window-inside-pixel-edges win))
+                  (h (- (nth 3 edges) (nth 1 edges)))
+                  (row-h (/ (float h) (max rows 1)))
+                  (y (round (* row-h 1.5)))
+                  (pane (car (plist-get st :panes))))
+             (embterm-module-mouse embterm--term (car pane) "down" 2 y 1 "")
+             (embterm-module-mouse embterm--term (car pane) "drag" 300 y 1 "")
+             (embterm-module-mouse embterm--term (car pane) "up" 300 y 1 "")
+             (let ((sel (embterm-module-selection embterm--term)))
+               (smoke-log "選択: %S" sel)
+               (smoke-check (and sel (string-match-p "hello from emacs" sel))
+                            "マウスのドラッグで選択できた"))))
+         (smoke-next))
+       (lambda ()
+         ;; 8. IME の変換中の文字列（T-127）
+         (with-current-buffer smoke-buf
+           (embterm-module-clear-selection embterm--term)
+           (embterm-module-set-preedit embterm--term "にほんご")
+           (redisplay t))
+         (smoke-next))
+       (lambda ()
+         (with-current-buffer smoke-buf
+           (embterm-module-screenshot embterm--term (smoke-out "preedit.png") nil))
+         (smoke-next))
+       (lambda ()
+         (smoke-check (file-exists-p (smoke-out "preedit.png")) "変換中の文字列を描いた画面を保存した")
+         (with-current-buffer smoke-buf
+           ;; NS の経路（advice）も通ることを確かめる
+           (setq-local ns-working-text "かんじ")
+           (if (fboundp 'ns-put-working-text)
+               (progn (ns-put-working-text)
+                      (smoke-check t "ns-put-working-text を端末が受け取った"))
+             (smoke-check nil "ns-put-working-text が無い"))
+           (embterm-module-set-preedit embterm--term ""))
+         (smoke-next))
+       (lambda ()
+         ;; 9. 分割して 2 つ目のペイン
          (with-current-buffer smoke-buf
            (split-window-below)
            (redisplay t))
@@ -130,7 +171,31 @@
            (smoke-check (>= (length panes) 2) "ペインが 2 つになった"))
          (smoke-next))
        (lambda ()
-         ;; 8. 閉じる
+         ;; 10. カーソルの点滅（T-127。描画スレッドのタイマー）。既定は点滅しないので有効にする
+         (customize-set-variable 'embterm-cursor-blink t)
+         (smoke-next))
+       (lambda ()
+         (with-current-buffer smoke-buf
+           (let ((info (embterm-module-debug-info embterm--term)))
+             (smoke-log "debug-info: %S" info)
+             (smoke-check (> (or (plist-get info :blink-ticks) 0) 0) "カーソルの点滅が動いている")
+             (smoke-check (> (or (plist-get info :full-draws) 0) 0) "描画の回数が数えられている")))
+         (smoke-next))
+       (lambda ()
+         ;; 11. copy モード（C-c C-k。スクロールバックをバッファに写す）
+         (with-current-buffer smoke-buf
+           (embterm-copy-mode))
+         (smoke-next))
+       (lambda ()
+         (with-current-buffer smoke-buf
+           (let ((text (buffer-string)))
+             (smoke-log "copy モードのバッファ（先頭 200 字）: %S" (substring text 0 (min 200 (length text))))
+             (smoke-check (string-match-p "hello from emacs" text) "copy モードに画面のテキストが入った")
+             (smoke-check (not (string-match-p "写しています" text)) "copy モードの準備中の表示が消えた")))
+         (with-current-buffer smoke-buf (embterm-semi-char-mode))
+         (smoke-next))
+       (lambda ()
+         ;; 12. 閉じる
          (with-current-buffer smoke-buf
            (let ((kill-buffer-query-functions nil))
              (kill-buffer smoke-buf)))

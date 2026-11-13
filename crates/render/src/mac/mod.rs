@@ -17,10 +17,11 @@
 mod atlas;
 mod font;
 mod gpu;
+mod images;
 
 use std::path::Path;
 
-use et_vt::{CursorShape, Rgb, StyleExt, Underline, Wide};
+use et_vt::{CursorShape, ImageLayer, Rgb, StyleExt, Underline, Wide};
 use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -38,6 +39,7 @@ use crate::theme::{NarrowWide, Theme};
 use crate::view::FrameView;
 
 use atlas::Atlas;
+use images::{ImageCache, ImageDraw};
 use font::{GlyphKey, style_index};
 pub use font::FontSpec;
 pub use gpu::Gpu;
@@ -86,6 +88,12 @@ pub struct Renderer {
     /// 論理ポイント → デバイス画素
     scale: f32,
     insts: Vec<Inst>,
+    /// IME の変換中の文字列（T-127）。カーソルの位置に重ねて描く
+    preedit: Option<String>,
+    /// Kitty graphics の画像（T-127）
+    images: ImageCache,
+    /// 1 フレーム分の画像の描画（`insts` の何番目の後ろに描くか）
+    image_draws: Vec<(usize, ImageDraw)>,
     /// 描いた回数と、実際に画面に出した回数（T-125 の確認用）
     stats: DrawStats,
 }
@@ -142,6 +150,9 @@ impl Renderer {
             size: (width.max(1), height.max(1)),
             scale,
             insts: Vec::new(),
+            preedit: None,
+            images: ImageCache::default(),
+            image_draws: Vec::new(),
             stats: DrawStats::default(),
         })
     }
@@ -149,6 +160,11 @@ impl Renderer {
     /// 描画の回数（T-125 の確認用）
     pub fn stats(&self) -> DrawStats {
         self.stats
+    }
+
+    /// IME の変換中の文字列（T-127）。`None` で消す。カーソルの位置から描き、下線を引く
+    pub fn set_preedit(&mut self, text: Option<String>) {
+        self.preedit = text.filter(|t| !t.is_empty());
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -325,7 +341,7 @@ impl Renderer {
         });
         let cb = self.gpu.queue.commandBuffer().ok_or("コマンドバッファを作れません")?;
         let enc = cb.renderCommandEncoderWithDescriptor(&rp).ok_or("エンコーダを作れません")?;
-        if !self.insts.is_empty() {
+        if !self.insts.is_empty() || !self.image_draws.is_empty() {
             let bytes = std::mem::size_of_val(&self.insts[..]);
             let buf = unsafe {
                 self.gpu.device.newBufferWithBytes_length_options(
@@ -344,19 +360,70 @@ impl Renderer {
                     std::mem::size_of_val(&viewport),
                     1,
                 );
-                enc.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
-                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                    MTLPrimitiveType::TriangleStrip,
-                    0,
-                    4,
-                    self.insts.len(),
-                );
+            }
+            // 四角を順に描く。画像はその間に挟む（テクスチャを差し替えるので別の呼び出しになる）
+            let mut from = 0usize;
+            let mut images = self.image_draws.iter().peekable();
+            while from < self.insts.len() || images.peek().is_some() {
+                let until = images.peek().map(|(at, _)| *at).unwrap_or(self.insts.len()).min(self.insts.len());
+                if until > from {
+                    unsafe {
+                        // 画像を描いた後は頂点バッファが差し替わっているので、戻してから描く
+                        enc.setVertexBuffer_offset_atIndex(Some(&buf), 0, 0);
+                        enc.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+                        enc.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                            MTLPrimitiveType::TriangleStrip,
+                            0,
+                            4,
+                            until - from,
+                            from,
+                        );
+                    }
+                    from = until;
+                }
+                let Some((_, draw)) = images.next() else { break };
+                self.draw_image(&enc, draw, &viewport)?;
             }
         }
         enc.endEncoding();
         cb.commit();
         if wait {
             cb.waitUntilCompleted();
+        }
+        Ok(())
+    }
+
+    /// 画像 1 枚を描く（テクスチャを差し替えて四角 1 枚）
+    fn draw_image(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        draw: &ImageDraw,
+        viewport: &[f32; 2],
+    ) -> Result<(), String> {
+        let inst = Inst {
+            rect: draw.rect,
+            color: [1.0, 1.0, 1.0, 1.0],
+            uv: draw.uv,
+            mode: 2,
+            _pad: [0; 3],
+        };
+        let buf = unsafe {
+            self.gpu.device.newBufferWithBytes_length_options(
+                std::ptr::NonNull::new(&inst as *const Inst as *mut _).ok_or("画像のインスタンス")?,
+                std::mem::size_of::<Inst>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .ok_or("画像のバッファを作れません")?;
+        unsafe {
+            enc.setVertexBuffer_offset_atIndex(Some(&buf), 0, 0);
+            enc.setVertexBytes_length_atIndex(
+                std::ptr::NonNull::new(viewport.as_ptr() as *mut _).ok_or("viewport")?,
+                std::mem::size_of_val(viewport),
+                1,
+            );
+            enc.setFragmentTexture_atIndex(Some(&*draw.texture), 0);
+            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(MTLPrimitiveType::TriangleStrip, 0, 4, 1);
         }
         Ok(())
     }
@@ -377,6 +444,11 @@ impl Renderer {
 
         let mut fgs = vec![Rgb::default(); cols];
         let mut bgs: Vec<Option<Rgb>> = vec![None; cols];
+        self.image_draws.clear();
+        let cell = (cw, ch);
+
+        // 0. 背景色より下の画像（T-127）
+        self.push_images(frame, view, ImageLayer::BelowBackground, cell, pad, cols);
 
         // 1. 背景
         for y in 0..view.rows {
@@ -400,7 +472,10 @@ impl Renderer {
             }
         }
 
-        // 2. 文字
+        // 2. 文字より下の画像
+        self.push_images(frame, view, ImageLayer::BelowText, cell, pad, cols);
+
+        // 3. 文字
         for y in 0..view.rows {
             let Some(fy) = layout::frame_row(frame, view, y) else { continue };
             let row = &frame.row(fy)[..cols];
@@ -421,7 +496,10 @@ impl Renderer {
             }
         }
 
-        // 3. 下線・取り消し線・上線
+        // 4. 文字より上の画像
+        self.push_images(frame, view, ImageLayer::AboveText, cell, pad, cols);
+
+        // 5. 下線・取り消し線・上線
         for y in 0..view.rows {
             let Some(fy) = layout::frame_row(frame, view, y) else { continue };
             let row = &frame.row(fy)[..cols];
@@ -482,7 +560,13 @@ impl Renderer {
             }
         }
 
-        // 4. カーソル（塗りつぶしは背景として塗り済み）
+        // 6. IME の変換中の文字列（あればカーソルより先に描く。カーソルは文字列の終わりに出る）
+        if self.preedit.is_some() {
+            self.push_preedit(frame, view, cols, cursor);
+            return;
+        }
+
+        // 7. カーソル（塗りつぶしは背景として塗り済み）
         if let Some((cx, cy, span)) = cursor
             && (cx as usize) < cols
         {
@@ -503,6 +587,57 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    /// `layer` の画像を積む（`insts` の今の長さの後ろに描く）
+    fn push_images(&mut self, frame: &Frame, view: &FrameView, layer: ImageLayer, cell: (f32, f32), pad: f32, cols: usize) {
+        if frame.images.is_empty() {
+            return;
+        }
+        let at = self.insts.len();
+        let device = self.gpu.device.clone();
+        let draws = self.images.draws(&device, frame, view, layer, cell, pad, cols);
+        for d in draws {
+            self.image_draws.push((at, d));
+        }
+    }
+
+    /// IME の変換中の文字列をカーソルの位置から描く（T-127）。
+    /// 端末の中身の上に、選択と同じ背景 + 下線で重ねる。はみ出す分は行の終わりで切る
+    fn push_preedit(&mut self, frame: &Frame, view: &FrameView, cols: usize, cursor: Option<(u16, u16, usize)>) {
+        let Some(text) = self.preedit.clone() else { return };
+        let Some((cx, cy, _)) = cursor else { return };
+        let (cw, ch) = (self.fonts.cell_w as f32, self.fonts.cell_h as f32);
+        let pad = self.padding() as f32;
+        let top = pad + cy as f32 * ch;
+        let base_y = top + self.fonts.baseline;
+        let fg = frame.foreground;
+        let bg = self.theme.selection_bg;
+        let mut x = cx as usize;
+        for ch_c in text.chars() {
+            if x >= cols {
+                break;
+            }
+            let Some((face, glyph)) = self.fonts.glyph(ch_c, 0) else { continue };
+            let m = self.fonts.cache_metrics(face, glyph);
+            // 全角は 2 セル（送り幅で見分ける）
+            let span = if m.advance > cw * 1.5 { 2 } else { 1 };
+            let left = pad + x as f32 * cw;
+            let w = span as f32 * cw;
+            self.insts.push(Inst::solid(left, top, w, ch, bg));
+            let gx = left + (w - m.advance.min(w)) / 2.0;
+            self.push_glyph(face, glyph, 256, gx, base_y, fg);
+            // 下線（変換中であることを示す）
+            let t = self.fonts.underline_thick;
+            let uy = (base_y + self.fonts.underline_pos).min(top + ch - t);
+            self.insts.push(Inst::solid(left, uy, w, t, fg));
+            x += span;
+        }
+        // 変換中はカーソルを文字列の終わりに出す
+        let l = pad + (x.min(cols.saturating_sub(1))) as f32 * cw;
+        let thick = (self.scale * 2.0).round().max(1.0);
+        self.insts.push(Inst::solid(l, top, thick, ch, frame.cursor_color.unwrap_or(self.theme.cursor)));
+        let _ = view;
     }
 
     /// セル 1 つ分のグリフ（基底 + 結合文字）を積む

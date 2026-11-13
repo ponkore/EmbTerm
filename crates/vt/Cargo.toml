@@ -10,7 +10,11 @@ links = "ghostty-vt"
 
 [dependencies]
 
-# PNG のデコード（Kitty graphics）に WIC を使う。macOS は未実装（T-124。ImageIO にするのは T-127）
+# PNG のデコード（Kitty graphics）: Windows は WIC、macOS は ImageIO（T-127）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [

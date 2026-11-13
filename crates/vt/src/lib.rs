@@ -15,8 +15,12 @@ pub mod ffi;
 #[cfg(windows)]
 #[path = "png.rs"]
 mod png;
-/// Windows 以外では PNG のデコーダを登録しない（T-124。ImageIO にするのは T-127）
-#[cfg(not(windows))]
+/// macOS は ImageIO でデコードする（T-127）
+#[cfg(target_os = "macos")]
+#[path = "png_mac.rs"]
+mod png;
+/// Windows でも macOS でもない OS では、PNG のデコーダを登録しない
+#[cfg(not(any(windows, target_os = "macos")))]
 #[path = "png_none.rs"]
 mod png;
 #[cfg(test)]

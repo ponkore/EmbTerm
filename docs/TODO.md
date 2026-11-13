@@ -394,15 +394,18 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - `notify_mac.rs`: Unix では `open_channel` の fd に `write(2)` するだけ（Windows の CRT の工夫が要らない）
   - 自動確認 `test/smoke-mac.el`（`cargo xtask test-emacs`）: module の読み込み・起動・キー・日本語と eaw・画面の保存・分割で 2 ペイン・後始末の **9 項目 OK**
   - **画面に実際に出ている見た目は未確認**（画面収録の許可が要る）。利用者が `emacs -Q -l test/smoke-mac.el` で見るのが残り
-- ⬜ **T-127**（段階 3）IME・マウス・選択 / コピー・Kitty graphics・OSC・通知・シェル統合
-  - T-126 で置いていったもの: マウス（クリック・ドラッグ・ホイール・アプリへの報告）、copy モード、リンク（OSC 8）、
-    カーソルと文字の点滅、プロンプト間の移動（OSC 133）、クリップボードの読み取り、画像
-  - **IME**: 端末のバッファでは `ns-put-working-text`（`ns-insert-working-text` / `ns-echo-working-text`、変数 `ns-working-text`）を奪い、
-    変換中の文字列を module に渡して端末のカーソル位置に自前で描く。候補ウィンドウの位置は `-[EmacsView firstRectForCharacterRange:]` 次第で、
-    ポイントの移動か method swizzling のどちらか（macos-port.md §5-2）
-  - 通知は `UNUserNotification` か `osascript`（T-099 の Windows のトーストに当たる）。クリップボードは NSPasteboard か Lisp 経由
-  - 画像の共有メモリ（`t=s`。T-093 で Windows では見送った）が使える見込み
-  - `etc/embterm.bash` はそのまま使える（OSC 51;E / OSC 133。T-118 / T-119）
-- ⬜ **T-128**（段階 4）測定と自動確認の移植
+- ✅ **T-127**（段階 3）IME・マウス・選択 / コピー・Kitty graphics・点滅・クリップボード・通知（2026-11-13）→ **ふだん使う機能はひと通り動いた。** docs/notes/t127-macos-features.md
+  - **IME**: `ns-put-working-text` / `ns-unput-working-text` に advice を掛け、端末のバッファでは変換中の文字列を module に渡して
+    **カーソルの位置に自前で描く**（選択と同じ背景 + 下線）。tr-ime のような位置の上書きは要らない。候補ウィンドウの位置は残り（T-128）
+  - **マウス**: Emacs が受けたイベントを Lisp から渡す（`embterm-module-mouse`）。アプリがマウスを見ていれば報告、そうでなければドラッグで選択。
+    Shift を押している間は常に選択。Ctrl+クリックのリンクは `Event::Link`
+  - **copy モード**（1 MiB ずつ渡す。T-086 と同じ形）と**プロンプト間の移動**（OSC 133。T-119）
+  - **画像**（Kitty graphics）: 層ごとに画像 1 枚 = 描画 1 回。**PNG は `CGImageCreateWithPNGDataProvider`**。
+    落とし穴: CoreGraphics のビットマップはストレートアルファを受け付けない（premultiplied で描いて戻す）／上下の反転は要らない
+  - 点滅（カーソル・SGR 5。描画スレッドが 600 ms ごと）、クリップボードの読み取り（NSPasteboard）、通知（`osascript`）
+  - 自動確認: `test-emacs` が **16 項目 OK**（マウス・IME・点滅・copy モードを追加）、`test-screens` が **7 ケース OK**（`kitty-basic` を追加）、`cargo test` **53 OK**
+- ⬜ **T-128**（段階 4）測定と自動確認の移植、T-127 の残り
+  - T-127 の残り: IME の候補ウィンドウの位置（ポイントの移動か swizzling）、遡っているペインでの選択、マウスの下のリンクの下線、
+    大きな画像の縮小・別スレッドでの変換・アニメーション（T-105 / T-092 の macOS 版）
   - mac の ghostel と比べる（T-122 で測った項目と同じ道具で）。入力から表示までと、大量の出力の最中の Emacs の止まり
   - `test-emacs`（11 本）の移植。Windows は `PostMessage` でマウスを送っていた（T-081）が、macOS は合成イベントに権限が要るので module に試験用の注入口を作る

@@ -867,8 +867,8 @@ fn kitty_raw_pixels_placed_at_cursor() {
     assert!(term.kitty_image(7).is_none());
 }
 
-/// PNG のデコーダ（WIC）は Windows だけ（T-124。macOS の ImageIO は T-127）
-#[cfg(windows)]
+/// PNG のデコーダ（Windows は WIC、macOS は ImageIO。T-127）
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn kitty_png_is_decoded_by_wic() {
     let (mut term, _log) = image_terminal();

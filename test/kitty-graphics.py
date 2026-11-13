@@ -12,13 +12,15 @@ import sys
 import time
 import zlib
 
-# 再配布版の ConPTY が通す VT の出力を有効にする
-kernel32 = ctypes.windll.kernel32
+# 再配布版の ConPTY が通す VT の出力を有効にする（Windows だけ。T-127 で macOS でも動くようにした）
 ENABLE_VT = 0x0004
 DISABLE_AUTO_RETURN = 0x0008
 
 
 def setup_console():
+    if sys.platform != "win32":
+        return  # Unix の PTY はそのまま VT が通る
+    kernel32 = ctypes.windll.kernel32
     h = kernel32.GetStdHandle(-11)
     mode = ctypes.c_uint32()
     kernel32.GetConsoleMode(h, ctypes.byref(mode))

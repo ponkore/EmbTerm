@@ -260,7 +260,8 @@ nil なら `embterm-color-foreground' などの値を使う。どちらでも、
 
 (defcustom embterm-cursor-blink nil
   "non-nil ならカーソルを点滅させる（アプリが DECSCUSR で決めたら、そちらが優先する）。
-点滅は、端末のウィンドウを選んでいてフレームにフォーカスがあるときだけ。間隔は Windows の設定（キャレットの点滅）。"
+点滅は、端末のウィンドウを選んでいてフレームにフォーカスがあるときだけ。
+間隔は Windows の設定（キャレットの点滅）、macOS は 600 ms（T-127）。"
   :type 'boolean
   :set #'embterm--set-and-apply-term)
 
@@ -682,7 +683,11 @@ DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'�
   "C-c C-p" #'embterm-previous-prompt
   "C-c C-n" #'embterm-next-prompt
   "C-c C-o" #'embterm-copy-last-output
-  "C-c C-y" #'embterm-yank)
+  "C-c C-y" #'embterm-yank
+  ;; マウス（T-127。macOS ではレイヤーが当たり判定に出ないので Emacs がイベントを受ける）
+  "<down-mouse-1>" #'embterm-mouse-drag
+  "<mouse-1>" #'ignore
+  "<drag-mouse-1>" #'ignore)
 
 (define-derived-mode embterm-mode fundamental-mode "EmbTerm"
   "EmbTerm の端末のバッファ。バッファの中身は置き物で、端末は子 HWND が描く。
@@ -699,8 +704,91 @@ DISPLAY はバッファを出す関数（nil なら `pop-to-buffer-same-window'�
   (embterm--placeholder)
   (embterm--emulation-first)
   (embterm--tr-ime-setup)
+  (embterm--ns-ime-setup)
   (add-hook 'text-scale-mode-hook #'embterm--apply-font nil t)
   (add-hook 'kill-buffer-hook #'embterm--close nil t))
+
+;;;; マウス（T-127。macOS）
+
+(declare-function embterm-module-mouse "embterm-module")
+
+(defun embterm--mouse-mods (event)
+  "EVENT の修飾キーを module に渡す形（`C\=' `M\=' `S\='）にする。"
+  (let ((m (event-modifiers event)) (out ""))
+    (when (memq 'control m) (setq out (concat out "C")))
+    (when (memq 'meta m) (setq out (concat out "M")))
+    (when (memq 'shift m) (setq out (concat out "S")))
+    out))
+
+(defun embterm--mouse-send (pane kind posn mods)
+  "ペイン PANE に、POSN の位置のマウス KIND を送る。"
+  (when (and embterm--term (fboundp 'embterm-module-mouse))
+    (let ((xy (posn-x-y posn)))
+      (when xy
+        (embterm-module-mouse embterm--term pane kind (car xy) (cdr xy) 1 mods)))))
+
+(defun embterm-mouse-drag (event)
+  "端末の上で左ボタンを押したとき（T-127）。
+アプリがマウスを見ていれば送り、そうでなければドラッグで選択する（選び終わると module が
+`selected\=' の知らせを出し、`embterm-copy-on-select\=' なら kill-ring に入る）。
+端末のペインでなければ、ふつうの `mouse-drag-region\=' にする。"
+  (interactive "e")
+  (let* ((start (event-start event))
+         (win (posn-window start))
+         (pane (and (windowp win) (embterm--pane-of win))))
+    (when (window-live-p win)
+      (select-window win))
+    (if (not pane)
+        (mouse-drag-region event)
+      (let ((id (embterm--pane-id pane))
+            (mods (embterm--mouse-mods event))
+            (done nil))
+        (embterm--mouse-send id "down" start mods)
+        (track-mouse
+          (while (not done)
+            (let ((ev (read-event)))
+              (cond
+               ((mouse-movement-p ev)
+                (let ((p (event-start ev)))
+                  (when (eq (posn-window p) win)
+                    (embterm--mouse-send id "drag" p mods))))
+               ((memq (event-basic-type ev) '(mouse-1))
+                (embterm--mouse-send id "up" (event-end ev) mods)
+                (setq done t))
+               (t
+                (embterm--mouse-send id "up" start mods)
+                (setq unread-command-events (cons ev unread-command-events)
+                      done t))))))))))
+
+;;;; IME（T-127。macOS の NS 版）
+
+(declare-function embterm-module-set-preedit "embterm-module")
+(defvar ns-working-text)
+
+(defun embterm--ns-preedit (text)
+  "変換中の文字列 TEXT を端末に描かせる。"
+  (when (and embterm--term (fboundp 'embterm-module-set-preedit))
+    (embterm-module-set-preedit embterm--term (or text ""))))
+
+(defun embterm--ns-put-working-text (orig &rest args)
+  "端末のバッファでは、変換中の文字列をバッファに入れず端末に描く（T-127）。
+NS 版の Emacs は変換中の文字列（`ns-working-text\='）をバッファの overlay で描くが、
+端末のレイヤーの下になって見えないので、module に渡してカーソルの位置に描く。"
+  (if (not embterm--term)
+      (apply orig args)
+    (embterm--ns-preedit (and (boundp 'ns-working-text) ns-working-text))))
+
+(defun embterm--ns-unput-working-text (orig &rest args)
+  "変換が終わったら、端末に描いている変換中の文字列を消す。"
+  (if (not embterm--term)
+      (apply orig args)
+    (embterm--ns-preedit nil)))
+
+(defun embterm--ns-ime-setup ()
+  "NS 版の Emacs で、変換中の文字列を端末に描くようにする（一度だけ）。"
+  (when (and (eq window-system 'ns) (fboundp 'ns-put-working-text))
+    (advice-add 'ns-put-working-text :around #'embterm--ns-put-working-text)
+    (advice-add 'ns-unput-working-text :around #'embterm--ns-unput-working-text)))
 
 ;;;; tr-ime の再変換・前後参照（T-083。docs/research/emacs-ime.md §3.5）
 
@@ -1169,12 +1257,28 @@ module も、まだ読んでいないベルを 1 つにまとめている。"
        (with-selected-frame frame
          (ignore-errors (w32-notification-close id)))))))
 
+(defun embterm--ns-toast (title body buffer)
+  "macOS の通知センターに通知を出す（T-127）。`osascript' で `display notification\=' を呼ぶ。
+消す時刻は OS が決めるので `embterm-notification-toast-seconds\=' は効かない。"
+  (let* ((flat (lambda (s) (string-trim (replace-regexp-in-string "[\n\r\t\"\\\\]+" " " (or s "")))))
+         (head (format "%s%s" (if (string-empty-p (funcall flat title)) "" (concat (funcall flat title) " — "))
+                       (if (buffer-live-p buffer) (buffer-name buffer) "embterm")))
+         (script (format "display notification \"%s\" with title \"EmbTerm\" subtitle \"%s\""
+                         (truncate-string-to-width (funcall flat body) 255)
+                         (truncate-string-to-width head 63))))
+    (ignore-errors (call-process "osascript" nil 0 nil "-e" script))))
+
 (defun embterm-notification-toast (title body buffer)
-  "通知（OSC 9 / 777）を Windows の通知（トースト）で出す（T-099）。
-`embterm-notification-toast-seconds' 秒で消す。前の通知が残っていれば先に消す。
-`w32-notification-notify' が無ければ `message'。"
-  (if (not (fboundp 'w32-notification-notify))
-      (message "%s" (embterm-notification-text title body buffer))
+  "通知（OSC 9 / 777）を OS の通知で出す（T-099 / T-127）。
+Windows は `w32-notification-notify\='（`embterm-notification-toast-seconds\=' 秒で消す）、
+macOS は `osascript\=' の `display notification\='。どちらも無ければ `message\='。
+前の通知が残っていれば先に消す。"
+  (cond
+   ((and (not (fboundp 'w32-notification-notify)) (eq system-type 'darwin))
+    (embterm--ns-toast title body buffer))
+   ((not (fboundp 'w32-notification-notify))
+      (message "%s" (embterm-notification-text title body buffer)))
+   (t
     (embterm--toast-close)
     (let* ((flat (lambda (s) (string-trim (replace-regexp-in-string "[\n\r\t]+" " " (or s "")))))
            (head (format "%s%s" (if (string-empty-p (funcall flat title)) "" (concat (funcall flat title) " — "))
@@ -1185,7 +1289,7 @@ module も、まだ読んでいないベルを 1 つにまとめている。"
       (when id
         (setq embterm--toast
               (list (selected-frame) id
-                    (run-at-time embterm-notification-toast-seconds nil #'embterm--toast-close)))))))
+                    (run-at-time embterm-notification-toast-seconds nil #'embterm--toast-close))))))))
 
 (defun embterm-notification-default (title body buffer)
   "通知（OSC 9 / 777）の既定（`embterm-notification-functions'。T-099）。

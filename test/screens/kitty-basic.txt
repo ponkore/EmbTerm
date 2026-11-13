@@ -1,0 +1,14 @@
+basic: PNG (a=T,f=100,t=d) RGB (f=24) RGBA (f=32)
+
+
+
+
+
+
+
+
+
+
+
+
+end of basic

@@ -193,6 +193,7 @@ version = "0.1.0"
 dependencies = [
  "et-pty",
  "et-vt",
+ "objc2-app-kit",
  "windows",
 ]
 
@@ -200,6 +201,8 @@ dependencies = [
 name = "et-vt"
 version = "0.1.0"
 dependencies = [
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "windows",
 ]
 

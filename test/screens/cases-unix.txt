@@ -25,3 +25,7 @@ sh-sgr
 # 入力の経路（行の編集のエコーと、アプリへの受け渡し）。cat は打った文字をそのまま返す
 @cat 60 8 500 300 700 -- /bin/cat
 cat-echo	hello 日本語\r	①★※ ─│┌┐\r
+
+# Kitty graphics（T-127。画像そのものは PNG を目で見る。テキストは崩れないことの確認）
+@kitty 60 20 300 200 1800 -- python3 -I test/kitty-graphics.py basic
+kitty-basic

@@ -273,6 +273,40 @@ fn scroll(term: &RefCell<Term>, pane: i64, kind: String, n: Option<i64>) -> Resu
     Ok(())
 }
 
+/// ペイン PANE のマウス。KIND は "down" / "up" / "drag" / "move"、X Y はペインの中の位置（論理ポイント。
+/// `posn-x-y' の値）、BUTTON は 1 = 左 / 2 = 中 / 3 = 右、MODS は `C' `M' `S' の組（nil 可）。
+/// アプリがマウスを見ていれば送り、そうでなければ選択に使う（T-127。macOS だけ）
+#[cfg(target_os = "macos")]
+#[defun]
+fn mouse(
+    term: &RefCell<Term>,
+    pane: i64,
+    kind: String,
+    x: i64,
+    y: i64,
+    button: Option<i64>,
+    mods: Option<String>,
+) -> Result<()> {
+    let kind = kind.parse().map_err(lisp_err)?;
+    term.borrow().request(Request::Mouse {
+        pane,
+        x: x as i32,
+        y: y as i32,
+        kind,
+        button: button.unwrap_or(1) as i32,
+        mods: mods.unwrap_or_default(),
+    });
+    Ok(())
+}
+
+/// IME の変換中の文字列 TEXT をカーソルの位置に描く（空か nil で消す。T-127。macOS だけ）
+#[cfg(target_os = "macos")]
+#[defun]
+fn set_preedit(term: &RefCell<Term>, text: Option<String>) -> Result<()> {
+    term.borrow().request(Request::SetPreedit(text.unwrap_or_default()));
+    Ok(())
+}
+
 /// スクロールバックの行数の上限を変える
 #[defun]
 fn set_scrollback(term: &RefCell<Term>, lines: i64) -> Result<()> {

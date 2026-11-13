@@ -51,8 +51,34 @@ const RENDER_HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_PENDING_EVENTS: usize = 1000;
 /// 描画スレッドが何も起きなくても見回る間隔
 const RENDER_TICK: Duration = Duration::from_millis(50);
+/// 点滅の半周期（カーソルと SGR 5。xterm の既定に近い値。T-035 / T-112）
+const BLINK_MS: u64 = 600;
 
 // ---- Lisp とやりとりする型（Windows 版と同じ形）----
+
+/// マウスの出来事（Lisp から来る）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseKind {
+    Down,
+    Up,
+    /// ボタンを押したままの移動（ドラッグ）
+    Drag,
+    /// ボタンを押していない移動
+    Move,
+}
+
+impl std::str::FromStr for MouseKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "down" => Ok(Self::Down),
+            "up" => Ok(Self::Up),
+            "drag" => Ok(Self::Drag),
+            "move" => Ok(Self::Move),
+            _ => Err(format!("down / up / drag / move のどれか（{s}）")),
+        }
+    }
+}
 
 /// ペインのスクロールのしかた
 #[derive(Clone, Copy, Debug)]
@@ -77,6 +103,10 @@ pub enum Request {
     SendKey { key: String, mods: String },
     Paste(String),
     Scroll { pane: i64, amount: ScrollAmount },
+    /// マウス（T-127）。`x` `y` はペインの中の論理ポイント。Emacs が受けたイベントを Lisp が渡す
+    Mouse { pane: i64, x: i32, y: i32, kind: MouseKind, button: i32, mods: String },
+    /// IME の変換中の文字列（T-127）。空なら消す
+    SetPreedit(String),
     ClearSelection,
     SetScrollback(usize),
     SetFont(FontSpec),
@@ -215,7 +245,23 @@ pub struct SpawnOptions {
     pub scrollback_lines: Option<usize>,
 }
 
-/// copy モードのテキストの一部（T-127 で中身を入れる）
+/// copy モード用のテキスト（`Event::CopyReady` のあと Lisp が分けて受け取る。T-086 / T-127）
+struct CopyText {
+    text: String,
+    /// Lisp に渡し終えたバイト数
+    sent: usize,
+    /// 見ているペインの先頭の行（テキストの行番号。0 から）
+    top: i64,
+    /// ポイントを置く行
+    point: i64,
+    /// 端末が折り返した行の番号
+    wraps: Vec<i64>,
+}
+
+/// 1 回に Lisp へ渡す大きさ（T-086。大きなスクロールバックで Emacs を止めない）
+const COPY_CHUNK: usize = 1 << 20;
+
+/// copy モードのテキストの一部
 pub struct CopyChunk {
     pub text: String,
     pub top: i64,
@@ -260,6 +306,8 @@ pub struct Shared {
     events: Mutex<Vec<Event>>,
     session: OnceLock<Arc<Session>>,
     selection: Mutex<Option<String>>,
+    /// copy モードのテキスト（T-127）
+    copy: Mutex<Option<CopyText>>,
     /// 描くもの（描画スレッドが使う）
     panes: Mutex<Vec<(i64, Arc<Mutex<PaneRender>>)>>,
     /// 描き直しが要る
@@ -272,6 +320,8 @@ pub struct Shared {
     cursor_dbg: Mutex<(bool, bool, &'static str)>,
     /// 最後に描いたときの色（前景・背景・パレットの 1 番。デバッグ用）
     colors_dbg: Mutex<(Rgb, Rgb, Rgb)>,
+    /// 点滅を切り替えた回数（デバッグ用）
+    blink: AtomicU64,
 }
 
 impl Shared {
@@ -311,9 +361,30 @@ impl Shared {
         self.selection.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// copy モードは T-127（まだ中身が無い）
+    /// copy モードのテキストを少しずつ渡す（T-086 と同じ形）
     pub fn take_copy(&self) -> Option<CopyChunk> {
-        None
+        let mut slot = self.copy.lock().unwrap_or_else(|e| e.into_inner());
+        let c = slot.as_mut()?;
+        let rest = &c.text[c.sent..];
+        let mut end = rest.len();
+        if end > COPY_CHUNK {
+            end = rest[..COPY_CHUNK].rfind('\n').map_or_else(
+                || (COPY_CHUNK..rest.len()).find(|&i| rest.is_char_boundary(i)).unwrap_or(rest.len()),
+                |i| i + 1,
+            );
+        }
+        let chunk = CopyChunk {
+            text: rest[..end].to_string(),
+            top: c.top,
+            point: c.point,
+            wraps: if c.sent == 0 { std::mem::take(&mut c.wraps) } else { Vec::new() },
+            more: c.sent + end < c.text.len(),
+        };
+        c.sent += end;
+        if !chunk.more {
+            *slot = None;
+        }
+        Some(chunk)
     }
 }
 
@@ -364,6 +435,9 @@ struct MacApp {
     scrollback: usize,
     clipboard: (bool, bool),
     focused: bool,
+    /// 選択のドラッグの始め（ペインの番号と、ビューポートの桁・行）
+    drag: Option<(i64, (u16, u16))>,
+    mouse: Option<et_vt::MouseEncoder>,
     opts: Option<SpawnOptions>,
     encoder: Option<KeyEncoder>,
     closed: bool,
@@ -410,6 +484,7 @@ pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
         events: Mutex::new(Vec::new()),
         session: OnceLock::new(),
         selection: Mutex::new(None),
+        copy: Mutex::new(None),
         panes: Mutex::new(Vec::new()),
         dirty: Mutex::new(false),
         wake: Condvar::new(),
@@ -417,6 +492,7 @@ pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
         draws: AtomicU64::new(0),
         cursor_dbg: Mutex::new((false, false, "block")),
         colors_dbg: Mutex::new((DEFAULT_FG, DEFAULT_BG, Rgb::default())),
+        blink: AtomicU64::new(0),
     });
     let mut theme = Theme::default();
     theme.narrow_wide = opts.narrow_wide;
@@ -432,6 +508,8 @@ pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
         scrollback: opts.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
         clipboard: (false, false),
         focused: false,
+        drag: None,
+        mouse: et_vt::MouseEncoder::new().ok(),
         opts: Some(opts),
         encoder: None,
         closed: false,
@@ -476,6 +554,8 @@ impl MacApp {
                 }
             }
             Request::Scroll { pane, amount } => self.scroll(pane, amount),
+            Request::Mouse { pane, x, y, kind, button, mods } => self.mouse(pane, x, y, kind, button, &mods),
+            Request::SetPreedit(text) => self.set_preedit(text),
             Request::ClearSelection => {
                 if let Some(s) = self.shared.session() {
                     let _ = s.lock().set_selection(None);
@@ -545,11 +625,11 @@ impl MacApp {
                 let _ = reply.send(text);
             }
             Request::Close => self.close(),
-            // T-127 で作る（copy モード・リンク・マウスの下の下線）
-            Request::Copy(_) => log("copy モードは macOS では未対応（T-127）"),
-            Request::LinkAt { reply, .. } => {
-                let _ = reply.send(None);
+            Request::Copy(pane) => self.prepare_copy(pane),
+            Request::LinkAt { pane, x, y, reply } => {
+                let _ = reply.send(self.link_at(pane, x, y));
             }
+            // マウスの下のリンクに下線を引くのは T-128（レイヤーはマウスの動きを受けないので、Lisp から送る形になる）
             Request::DebugHover { .. } => {}
         }
     }
@@ -810,8 +890,30 @@ impl MacApp {
             }
             ScrollAmount::Top => i64::MAX,
             ScrollAmount::Bottom => i64::MIN,
-            ScrollAmount::Prompt(_) => {
-                log("プロンプトへの移動は macOS では未対応（T-127）");
+            ScrollAmount::Prompt(n) => {
+                // シェルのプロンプト（OSC 133）へ飛ぶ（T-119）。その行をペインの一番上にする
+                let here = {
+                    let t = s.lock();
+                    let sb = t.scrollbar();
+                    (sb.total as i64 - sb.len as i64 - self.pane_scroll(id)).max(0)
+                };
+                let mut row = here;
+                for _ in 0..n.unsigned_abs().max(1) {
+                    match s.find_prompt(row, n < 0) {
+                        Some(r) => row = r,
+                        None => break,
+                    }
+                }
+                let max = {
+                    let t = s.lock();
+                    let sb = t.scrollbar();
+                    (sb.total as i64 - sb.len as i64).max(0)
+                };
+                if let Some(p) = self.panes.iter().find(|p| p.id == id) {
+                    p.render.lock().unwrap_or_else(|e| e.into_inner()).scroll = (max - row).clamp(0, max);
+                }
+                self.publish_panes();
+                self.shared.mark_dirty();
                 return;
             }
         };
@@ -830,6 +932,187 @@ impl MacApp {
             };
         }
         self.publish_panes();
+        self.shared.mark_dirty();
+    }
+
+    fn pane_scroll(&self, id: i64) -> i64 {
+        self.panes
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.render.lock().unwrap_or_else(|e| e.into_inner()).scroll)
+            .unwrap_or(0)
+    }
+
+    /// copy モードのテキストを作る（T-086 / T-127）。できたら [`Event::CopyReady`]
+    fn prepare_copy(&mut self, pane: Option<i64>) {
+        let Some(s) = self.shared.session() else {
+            *self.shared.copy.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(CopyText { text: String::new(), sent: 0, top: 0, point: 0, wraps: Vec::new() });
+            self.shared.emit(Event::CopyReady);
+            return;
+        };
+        let id = pane.or(self.selected).or(self.panes.first().map(|p| p.id));
+        let scroll = id.map(|i| self.pane_scroll(i)).unwrap_or(0);
+        let rows = id
+            .and_then(|i| self.panes.iter().find(|p| p.id == i))
+            .map(|p| p.render.lock().unwrap_or_else(|e| e.into_inner()).rows as i64)
+            .unwrap_or(24);
+        let t0 = Instant::now();
+        let (text, top, point, wraps) = {
+            let term = s.lock();
+            let text = term.format_plain(false, false).ok().flatten().unwrap_or_default();
+            let (cols, _) = term.size();
+            // 折り返した行（T-086）。折り返す行はほぼ端まで埋まっているので、短い行は端末に尋ねない
+            let wraps: Vec<i64> = text
+                .split('\n')
+                .enumerate()
+                .filter(|(_, l)| l.chars().count() * 2 + 2 >= cols as usize)
+                .filter(|(i, _)| term.row_wraps(*i as u32))
+                .map(|(i, _)| i as i64)
+                .collect();
+            let total = term.total_rows() as i64;
+            let cursor_row = total - rows + term.cursor().1 as i64;
+            let top = (total - rows - scroll).max(0);
+            let point = if scroll > 0 { top } else { cursor_row };
+            (text, top, point, wraps)
+        };
+        log(&format!(
+            "copy モードのテキスト: {} バイト、折り返し {} 行、{} ms",
+            text.len(),
+            wraps.len(),
+            t0.elapsed().as_millis()
+        ));
+        *self.shared.copy.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(CopyText { text, sent: 0, top, point, wraps });
+        self.shared.emit(Event::CopyReady);
+    }
+
+    /// ペインの画素の位置にあるハイパーリンク（OSC 8。T-127）。遡っているペインでは今は見ない
+    fn link_at(&self, id: i64, x: i32, y: i32) -> Option<String> {
+        let s = self.shared.session()?;
+        let p = self.panes.iter().find(|p| p.id == id)?;
+        let (cols, rows, scroll, scale) = {
+            let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
+            (r.cols, r.rows, r.scroll, r.renderer.scale())
+        };
+        if scroll != 0 {
+            return None;
+        }
+        let (cx, cy) = {
+            let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
+            r.renderer.cell_at((x as f32 * scale) as i32, (y as f32 * scale) as i32, cols, rows)
+        };
+        let term = s.lock();
+        let total = term.total_rows() as i64;
+        let row = (total - rows as i64 + cy as i64).max(0) as u32;
+        let at = term.grid_ref(cx, row).ok()?;
+        term.hyperlink_uri(at)
+    }
+
+    /// マウス（T-127）。アプリがマウスを見ていれば送り、そうでなければ選択に使う
+    fn mouse(&mut self, id: i64, x: i32, y: i32, kind: MouseKind, button: i32, mods: &str) {
+        let Some(s) = self.shared.session() else { return };
+        let Some(p) = self.panes.iter().find(|p| p.id == id) else { return };
+        let (cols, rows, scroll, cell, pad, scale, size) = {
+            let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
+            (r.cols, r.rows, r.scroll, r.renderer.cell_size(), r.renderer.padding(), r.renderer.scale(), r.size)
+        };
+        // Lisp がくれるのは論理ポイント。描画はデバイス画素
+        let (px, py) = ((x as f32 * scale) as i32, (y as f32 * scale) as i32);
+        let m = keys_mac::parse_mods(mods);
+
+        // Ctrl+クリックしたのがハイパーリンクなら、開くのは Lisp に任せる（選択もアプリへの報告もしない）
+        if kind == MouseKind::Down
+            && m.ctrl
+            && let Some(uri) = self.link_at(id, x, y)
+        {
+            log(&format!("リンクを Ctrl+クリック: {uri}"));
+            self.shared.emit(Event::Link(uri));
+            return;
+        }
+
+        let tracking = { s.lock().mouse_tracking() };
+        if tracking && !m.shift {
+            // アプリへ報告する（Shift を押している間は Emacs 側の選択。端末の慣習）
+            let bytes = {
+                let term = s.lock();
+                let geometry = et_vt::MouseGeometry {
+                    screen_width: size.0,
+                    screen_height: size.1,
+                    cell_width: cell.0,
+                    cell_height: cell.1,
+                    padding: pad,
+                };
+                let action = match kind {
+                    MouseKind::Down => et_vt::MouseAction::Press,
+                    MouseKind::Up => et_vt::MouseAction::Release,
+                    _ => et_vt::MouseAction::Motion,
+                };
+                let btn = match button {
+                    1 => Some(et_vt::MouseButton::Left),
+                    2 => Some(et_vt::MouseButton::Middle),
+                    3 => Some(et_vt::MouseButton::Right),
+                    _ => None,
+                };
+                let any = matches!(kind, MouseKind::Down | MouseKind::Drag);
+                match self.mouse.as_mut() {
+                    Some(enc) => enc.encode(&term, geometry, action, btn, any, (px as f32, py as f32), m),
+                    None => Vec::new(),
+                }
+            };
+            if !bytes.is_empty() {
+                s.write(&bytes);
+            }
+            return;
+        }
+
+        // 選択（遡っているペインでは今は扱わない。T-128）
+        if scroll != 0 {
+            return;
+        }
+        let (cx, cy) = {
+            let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
+            r.renderer.cell_at(px, py, cols, rows)
+        };
+        match kind {
+            MouseKind::Down => {
+                self.drag = Some((id, (cx, cy)));
+                let _ = s.lock().set_selection(None);
+                *self.shared.selection.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            MouseKind::Drag => {
+                if let Some((start_pane, start)) = self.drag
+                    && start_pane == id
+                {
+                    let _ = s.lock().set_selection(Some((start, (cx, cy))));
+                }
+            }
+            MouseKind::Up => {
+                if let Some((start_pane, start)) = self.drag.take()
+                    && start_pane == id
+                {
+                    let mut term = s.lock();
+                    let _ = term.set_selection(Some((start, (cx, cy))));
+                    let text = term.format_plain(true, true).ok().flatten();
+                    drop(term);
+                    if let Some(text) = text.filter(|t| !t.is_empty()) {
+                        *self.shared.selection.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.clone());
+                        self.shared.emit(Event::Selected(text));
+                    }
+                }
+            }
+            MouseKind::Move => {}
+        }
+        self.shared.mark_dirty();
+    }
+
+    /// IME の変換中の文字列（T-127）
+    fn set_preedit(&mut self, text: String) {
+        let text = if text.is_empty() { None } else { Some(text) };
+        for p in &self.panes {
+            let mut r = p.render.lock().unwrap_or_else(|e| e.into_inner());
+            r.renderer.set_preedit(text.clone());
+        }
         self.shared.mark_dirty();
     }
 
@@ -922,7 +1205,12 @@ impl MacApp {
     }
 
     fn debug_info(&self) -> DebugInfo {
-        let mut info = DebugInfo { full_draws: self.shared.draws.load(Ordering::Relaxed), ..DebugInfo::default() };
+        let mut info = DebugInfo {
+            full_draws: self.shared.draws.load(Ordering::Relaxed),
+            blink_ticks: self.shared.blink.load(Ordering::Relaxed),
+            blink_timer: self.shared.blink.load(Ordering::Relaxed) > 0,
+            ..DebugInfo::default()
+        };
         if let Some(p) = self.current_pane() {
             let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
             info.cell = r.renderer.cell_size();
@@ -1057,6 +1345,10 @@ fn render_main(shared: Arc<Shared>) {
         }
     };
     let mut frame = Frame::default();
+    // 点滅（カーソルと SGR 5）。見せている side と、最後に切り替えた時刻
+    let mut blink_on = true;
+    let mut blink_at = Instant::now();
+    let mut blink_ticks = 0u64;
     loop {
         {
             let mut dirty = shared.dirty.lock().unwrap_or_else(|e| e.into_inner());
@@ -1090,7 +1382,25 @@ fn render_main(shared: Arc<Shared>) {
             hold
         };
         let changed = frame.update(&mut rs);
-        if !changed && hold.is_none() {
+        // 点滅（カーソル・SGR 5）。見えているものがあるときだけ切り替える
+        let blinking = frame.cursor.blinking && frame.cursor.visible;
+        let text_blink = frame.has_blink();
+        let mut blinked = false;
+        if (blinking || text_blink) && blink_at.elapsed() >= Duration::from_millis(BLINK_MS) {
+            blink_on = !blink_on;
+            blink_at = Instant::now();
+            blink_ticks += 1;
+            blinked = true;
+        } else if !blinking && !text_blink && !blink_on {
+            blink_on = true;
+            blinked = true;
+        }
+        if !changed && !blinked && hold.is_none() {
+            // 点滅があるときは次の切り替えのために起こし直す
+            if blinking || text_blink {
+                shared.mark_dirty();
+                std::thread::sleep(Duration::from_millis(BLINK_MS / 6));
+            }
             continue;
         }
         let mut cursor = None;
@@ -1099,7 +1409,9 @@ fn render_main(shared: Arc<Shared>) {
             if !r.visible {
                 continue;
             }
-            let view = pane_view(&r, &frame);
+            let mut view = pane_view(&r, &frame);
+            view.blink_off = text_blink && !blink_on;
+            view.show_cursor = view.show_cursor && (!blinking || blink_on);
             if r.selected || cursor.is_none() {
                 cursor = cursor_rect(&r, &frame, &view);
             }
@@ -1108,6 +1420,11 @@ fn render_main(shared: Arc<Shared>) {
             }
         }
         shared.draws.fetch_add(1, Ordering::Relaxed);
+        shared.blink.store(blink_ticks, Ordering::Relaxed);
+        if blinking || text_blink {
+            // 次の切り替えのために起こす
+            shared.mark_dirty();
+        }
         *shared.colors_dbg.lock().unwrap_or_else(|e| e.into_inner()) =
             (frame.foreground, frame.background, frame.palette[1]);
         *shared.cursor_dbg.lock().unwrap_or_else(|e| e.into_inner()) = (

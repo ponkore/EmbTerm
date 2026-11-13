@@ -268,8 +268,18 @@ impl Effects for TermEffects {
 }
 
 /// システムのクリップボードのテキストを読む（OSC 52 の読み取りを許したとき。読みのスレッドで呼ばれる）。
-/// macOS の NSPasteboard は T-127（段階 3）で足す
-#[cfg(not(windows))]
+/// macOS は NSPasteboard（T-127）
+#[cfg(target_os = "macos")]
+fn read_system_clipboard() -> Option<String> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    // NSPasteboard は main スレッド以外からも読んでよい
+    let pb = unsafe { NSPasteboard::generalPasteboard() };
+    let s = unsafe { pb.stringForType(NSPasteboardTypeString) }?;
+    Some(s.to_string())
+}
+
+/// Windows でも macOS でもない OS では読まない
+#[cfg(not(any(windows, target_os = "macos")))]
 fn read_system_clipboard() -> Option<String> {
     None
 }

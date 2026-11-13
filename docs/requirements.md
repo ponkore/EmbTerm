@@ -46,7 +46,7 @@ embterm.el                          端末 1 つにつき:
 
 | 項目 | 内容 |
 |---|---|
-| OS | Windows（11 で使う）【確定】。**macOS は移植中**（T-124 で VT と PTY、T-125 で描画と窓、T-126 で Emacs の中の端末まで通った。残りは T-127 = IME・マウス・画像など）。Linux は対象外【案】 |
+| OS | Windows（11 で使う）【確定】。**macOS は移植中**（T-124 で VT と PTY、T-125 で描画と窓、T-126 で Emacs の中の端末、T-127 で IME・マウス・画像まで通った。残りは T-128）。Linux は対象外【案】 |
 | Emacs | GNU 公式の Windows ビルド、31.1 以降（`x86_64-w64-mingw32`）【案: GenPreview と同じ】。ソース `C:/Apps/emacs/src/emacs-31.1/` |
 | フレーム | GUI フレームだけ。`emacs -nw` は対象外【案】 |
 | アーキテクチャ | x86_64。arm64 は後回し【案】 |
