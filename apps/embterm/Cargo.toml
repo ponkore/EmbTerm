@@ -14,10 +14,13 @@ path = "src/main.rs"
 [dependencies]
 et-vt = { path = "../../crates/vt" }
 et-pty = { path = "../../crates/pty" }
-et-render = { path = "../../crates/render" }
 et-session = { path = "../../crates/session" }
 
-[dependencies.windows]
+# 描画はまだ Windows だけ（macOS の CoreText + Metal は T-125）
+[target.'cfg(windows)'.dependencies]
+et-render = { path = "../../crates/render" }
+
+[target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",

@@ -9,9 +9,12 @@ publish = false
 
 [dependencies]
 et-vt = { path = "../vt" }
+
+[target.'cfg(windows)'.dependencies]
 windows-numerics = "0.3"
 
-[dependencies.windows]
+
+[target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",

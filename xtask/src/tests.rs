@@ -1,6 +1,7 @@
 //! 自動確認（T-078 / T-081 / T-114）。
 //!
-//! - `test-screens`: embterm.exe に入力を送って画面のテキストを撮り、test/screens/<名前>.txt と比べる
+//! - `test-screens`: embterm に入力を送って画面のテキストを撮り、test/screens/<名前>.txt と比べる
+//!   （ケースの一覧は Windows が cases.txt、Unix が cases-unix.txt。T-124）
 //! - `test-emacs`: 別に起こした `emacs -Q` で test/*.el を動かし、終了コードとログの NG を見る
 
 use std::path::{Path, PathBuf};
@@ -105,7 +106,7 @@ fn run_case(exe: &Path, out: &Path, case: &Case) -> Result<String, String> {
         .stderr(Stdio::null());
     let status = wait_with_timeout(cmd, Duration::from_millis(shot as u64 + 30_000))?;
     if !status {
-        return Err(format!("{}: embterm.exe が失敗しました", case.name));
+        return Err(format!("{}: embterm が失敗しました", case.name));
     }
     let text = std::fs::read_to_string(&txt).map_err(|e| format!("{}: {e}", txt.display()))?;
     Ok(normalize(&text))
@@ -148,12 +149,15 @@ pub fn test_screens(args: &[String]) -> Result<(), String> {
     }
     let root = root();
     let dir = root.join("test/screens");
-    let text = std::fs::read_to_string(dir.join("cases.txt")).map_err(|e| format!("test/screens/cases.txt: {e}"))?;
+    // ケースの一覧は OS で違う（Windows は cmd と vttest、Unix は test/screens/unix/*.sh。T-124）
+    let cases_file = if cfg!(windows) { "cases.txt" } else { "cases-unix.txt" };
+    let text = std::fs::read_to_string(dir.join(cases_file))
+        .map_err(|e| format!("test/screens/{cases_file}: {e}"))?;
     let cases: Vec<Case> = parse_cases(&text)?
         .into_iter()
         .filter(|c| filters.is_empty() || filters.iter().any(|f| c.name.contains(f.as_str())))
         .collect();
-    let exe = root.join("target/dist/embterm.exe");
+    let exe = root.join(crate::dist_exe());
     let out = root.join("target/screens");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
 

@@ -2,10 +2,17 @@
 //!
 //! トップレベルのウィンドウ 1 枚に端末 1 つ。描画・VT・PTY は Emacs module（T-028）と同じクレート
 //! （et-render・et-session（et-vt・et-pty のつなぎとキーの変換））を使う。設定はコマンドライン引数だけ（args.rs）。
+//!
+//! **macOS では今のところウィンドウを持たない**（T-124。描画は段階 1 = T-125 で作る）。
+//! `--input` で入力を送り、`--screenshot` の隣に画面のテキストを書くところまでは同じに動く（headless.rs）。
 
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod args;
+/// ウィンドウを持たない動かし方（T-124。描画が Windows 専用なので、macOS ではこちらだけ）
+#[cfg(not(windows))]
+mod headless;
+#[cfg(windows)]
 mod window;
 
 use std::io::Write;
@@ -35,7 +42,7 @@ fn main() -> std::process::ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
-            window::message_box(&e);
+            message_box(&e);
             return std::process::ExitCode::from(2);
         }
     };
@@ -45,12 +52,31 @@ fn main() -> std::process::ExitCode {
             Err(e) => eprintln!("ログ {} を作れません: {e}", p.display()),
         }
     }
-    match window::run(args) {
+    match run(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             log(&format!("エラー: {e}"));
-            window::message_box(&e);
+            message_box(&e);
             std::process::ExitCode::FAILURE
         }
     }
 }
+
+#[cfg(windows)]
+fn run(args: args::Args) -> Result<(), String> {
+    window::run(args)
+}
+
+#[cfg(not(windows))]
+fn run(args: args::Args) -> Result<(), String> {
+    headless::run(args)
+}
+
+/// 起動できなかったことを伝える（Windows はメッセージボックス、ほかは標準エラーだけ）
+#[cfg(windows)]
+fn message_box(msg: &str) {
+    window::message_box(msg);
+}
+
+#[cfg(not(windows))]
+fn message_box(_msg: &str) {}

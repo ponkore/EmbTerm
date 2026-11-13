@@ -14,3 +14,6 @@ zig-out/
 # vim の swap（試験で vim を動かしたときに残ることがある）
 *.swp
 *.swo
+
+# macOS（Finder が勝手に作る。T-124）
+.DS_Store

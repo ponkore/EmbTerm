@@ -15,6 +15,9 @@
 //! - OSC 52 / 9 / 777 / 9;4（T-039）は [`Event`] に中身を載せて知らせる。クリップボードの書き込み・読み取りを
 //!   許すかは [`Session::set_clipboard_policy`]（読みのスレッドで、ロックを持ったまま判断するので `AtomicBool`）
 
+/// キーの変換は Windows の仮想キー・スキャンコードに作り込んである（T-069）。
+/// macOS 版は T-126（段階 2）で作る
+#[cfg(windows)]
 pub mod keys;
 pub mod perf;
 
@@ -25,8 +28,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use et_pty::{ConptyKind, ExitStatus, ProcessWatch, Pty, PtyOptions, PtyWriter};
-use et_vt::{CursorShape, Effects, KeyEncoder, Mode, ProgressState, Rgb, Terminal};
+use et_pty::{ExitStatus, ProcessWatch, Pty, PtyKind, PtyOptions, PtyWriter};
+#[cfg(windows)]
+use et_vt::KeyEncoder;
+use et_vt::{CursorShape, Effects, Mode, ProgressState, Rgb, Terminal};
 
 /// 呼び出し側（UI）に知らせること
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,8 +263,16 @@ impl Effects for TermEffects {
     }
 }
 
-/// Windows のクリップボードのテキストを読む（OSC 52 の読み取りを許したとき。読みのスレッドで呼ばれる）。
+/// システムのクリップボードのテキストを読む（OSC 52 の読み取りを許したとき。読みのスレッドで呼ばれる）。
+/// macOS の NSPasteboard は T-127（段階 3）で足す
+#[cfg(not(windows))]
+fn read_system_clipboard() -> Option<String> {
+    None
+}
+
+/// Windows のクリップボードのテキストを読む。
 /// ほかのプロセスが開いていれば少しだけ待ち直し、だめなら `None`（待ち続けない）
+#[cfg(windows)]
 fn read_system_clipboard() -> Option<String> {
     use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
@@ -368,7 +381,7 @@ pub struct Session {
     writer: PtyWriter,
     /// 閉じたら `None`。閉じる処理は別のスレッドへ持っていく
     pty: Mutex<Option<Pty>>,
-    kind: ConptyKind,
+    kind: PtyKind,
     pid: u32,
     warnings: Vec<String>,
     notify: Notify,
@@ -424,7 +437,7 @@ impl Session {
         });
 
         let pty_opts = PtyOptions {
-            argv: if opts.argv.is_empty() { vec!["cmd.exe".into()] } else { opts.argv },
+            argv: if opts.argv.is_empty() { et_pty::default_shell() } else { opts.argv },
             cwd: opts.cwd,
             env: opts.env.into_iter().chain(et_pty::terminal_env()).collect(),
             cols: opts.cols,
@@ -536,6 +549,7 @@ impl Session {
 
     /// キーの送り方（T-069）。KKP のフラグが立っていれば KKP、そうでなく ConPTY が 9001 を求めていれば
     /// win32-input-mode、どちらでもなければレガシーの VT（Windows Terminal と同じ切り替え）。端末のロックを持って呼ぶ
+    #[cfg(windows)]
     pub fn key_protocol(&self, term: &Terminal) -> keys::KeyProtocol {
         if term.kitty_keyboard_flags() != 0 {
             keys::KeyProtocol::Kitty
@@ -552,6 +566,7 @@ impl Session {
     }
 
     /// キーのイベントを、今のモードの送り方でバイト列にする。KKP のフラグが残っているのにアプリが落ちていたら、ここで戻す
+    #[cfg(windows)]
     pub fn encode_key(&self, encoder: &mut KeyEncoder, ev: &keys::KeyEvent, phase: keys::KeyPhase) -> Vec<u8> {
         let mut t = self.lock();
         self.reset_stale_kkp(&mut t);
@@ -656,7 +671,7 @@ impl Session {
         self.shared.saw_da1.load(Ordering::Relaxed)
     }
 
-    pub fn conpty_kind(&self) -> &ConptyKind {
+    pub fn pty_kind(&self) -> &PtyKind {
         &self.kind
     }
 

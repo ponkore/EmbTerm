@@ -17,7 +17,7 @@ et-vt = { path = "../../crates/vt" }
 et-render = { path = "../../crates/render" }
 et-session = { path = "../../crates/session" }
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",

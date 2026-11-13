@@ -46,7 +46,7 @@ embterm.el                          端末 1 つにつき:
 
 | 項目 | 内容 |
 |---|---|
-| OS | Windows（11 で使う）【確定】。macOS / Linux は対象外【案】 |
+| OS | Windows（11 で使う）【確定】。**macOS は移植中**（T-124 で段階 0 = VT と PTY まで通った。T-125 以降で描画と module）。Linux は対象外【案】 |
 | Emacs | GNU 公式の Windows ビルド、31.1 以降（`x86_64-w64-mingw32`）【案: GenPreview と同じ】。ソース `C:/Apps/emacs/src/emacs-31.1/` |
 | フレーム | GUI フレームだけ。`emacs -nw` は対象外【案】 |
 | アーキテクチャ | x86_64。arm64 は後回し【案】 |
@@ -213,7 +213,7 @@ GenPreview とプローブで分かったことに従う【案】。
 
 - Windows Terminal / WezTerm のような設定画面、コマンドパレット、lua などの拡張言語【確定】
 - 端末の中のタブ・ペイン（Emacs のウィンドウで行う）【案】
-- Windows 以外の OS、`emacs -nw`【案】
+- `emacs -nw`【案】。Linux【案】（macOS は T-121 の検討のうえ移植中。TODO.md §9）
 - ghostel の統合機能（`compile` / `shell-command` / comint を端末に置き換える）は当面持たない【案】
 
 ## 9. 参考

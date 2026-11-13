@@ -12,6 +12,12 @@
 //! 複数のスレッドから使うときは呼ぶ側が `Mutex` で守る（[`Terminal`] は `Send` だが `Sync` ではない）。
 
 pub mod ffi;
+#[cfg(windows)]
+#[path = "png.rs"]
+mod png;
+/// Windows 以外では PNG のデコーダを登録しない（T-124。ImageIO にするのは T-127）
+#[cfg(not(windows))]
+#[path = "png_none.rs"]
 mod png;
 #[cfg(test)]
 mod tests;

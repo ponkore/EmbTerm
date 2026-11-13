@@ -1,0 +1,2 @@
+red bold-green underline
+truecolor reverse

@@ -10,7 +10,8 @@ links = "ghostty-vt"
 
 [dependencies]
 
-[dependencies.windows]
+# PNG のデコード（Kitty graphics）に WIC を使う。macOS は未実装（T-124。ImageIO にするのは T-127）
+[target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",

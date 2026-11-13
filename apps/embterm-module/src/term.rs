@@ -1348,7 +1348,7 @@ impl App {
         match started {
             Ok(s) => {
                 let s = Arc::new(s);
-                log(&format!("起動: {:?} / {cols}x{rows} / pid {} / ConPTY: {}", opts.argv, s.pid(), s.conpty_kind()));
+                log(&format!("起動: {:?} / {cols}x{rows} / pid {} / ConPTY: {}", opts.argv, s.pid(), s.pty_kind()));
                 for w in s.warnings() {
                     log(&format!("注意: {w}"));
                 }
@@ -1362,7 +1362,7 @@ impl App {
                 if self.focused {
                     s.write(b"\x1b[I");
                 }
-                let (pid, kind) = (s.pid(), s.conpty_kind().to_string());
+                let (pid, kind) = (s.pid(), s.pty_kind().to_string());
                 self.shared.update(|st| {
                     st.started = true;
                     st.pid = pid;

@@ -1,0 +1,27 @@
+# 画面の回帰テスト（Unix。T-124）。`cargo xtask test-screens [--bless] [--no-dist] [名前の一部...]`
+#
+# 書き方は cases.txt と同じ。**コマンドは空白で区切るので、引数に空白を入れられない**ため、
+# 確かめたいことはスクリプト（test/screens/unix/*.sh）に書いて、それを動かす。
+# 作業ディレクトリはリポジトリの根（xtask から起動するため）。
+#
+# 期待値（test/screens/<名前>.txt）は 2026-11-13 に目で見て確かめた（docs/notes/t124-macos-stage0.md §5）。
+
+# スクリプトを動かすだけのもの（プロンプトを出さないので、機械や設定で変わらない）
+@sh 60 8 300 200 700 -- /bin/sh test/screens/unix/basic.sh
+sh-basic
+
+@sh-wrap 60 8 300 200 700 -- /bin/sh test/screens/unix/wrap.sh
+sh-wrap
+
+@sh-clear 60 8 300 200 700 -- /bin/sh test/screens/unix/clear.sh
+sh-clear
+
+@sh-cup 60 10 300 200 700 -- /bin/sh test/screens/unix/cup.sh
+sh-cup
+
+@sh-sgr 60 8 300 200 700 -- /bin/sh test/screens/unix/sgr.sh
+sh-sgr
+
+# 入力の経路（行の編集のエコーと、アプリへの受け渡し）。cat は打った文字をそのまま返す
+@cat 60 8 500 300 700 -- /bin/cat
+cat-echo	hello 日本語\r	①★※ ─│┌┐\r

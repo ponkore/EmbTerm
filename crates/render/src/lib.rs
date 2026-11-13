@@ -25,6 +25,11 @@
 //!   GPU のビットマップは画像の世代ごとにキャッシュする
 //!
 //! unsafe（COM の呼び出し）はこのクレートの中に閉じ込める。
+//!
+//! **描画（Direct2D / DirectWrite + DXGI）は今のところ Windows だけ**（T-124）。ほかの OS ではクレートごと空にしてある
+//! （`cargo test --workspace` を通すため）。macOS 版は T-125（CoreText + Metal）。
+
+#![cfg(windows)]
 
 mod font;
 mod frame;

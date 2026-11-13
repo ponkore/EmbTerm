@@ -5,12 +5,18 @@ fn main() {
     let prefix = std::env::var("GHOSTTY_VT_PREFIX")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| root.join("vendor/ghostty-vt"));
+    // ライブラリの名前は OS で違う（T-124。Windows は zig の出力、macOS は xcframework の中身）
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let static_name = if target_os == "windows" { "ghostty-vt-static" } else { "ghostty-vt" };
+    if target_os == "macos" || target_os == "ios" {
+        println!("cargo:rustc-link-lib=dylib=c++");
+    }
     println!("cargo:rerun-if-env-changed=GHOSTTY_VT_PREFIX");
     println!("cargo:rustc-link-search=native={}", prefix.join("lib").display());
     if std::env::var("SPIKE_DYNAMIC").is_ok() {
         println!("cargo:rustc-link-lib=dylib=ghostty-vt");
     } else {
-        println!("cargo:rustc-link-lib=static=ghostty-vt-static");
+        println!("cargo:rustc-link-lib=static={static_name}");
     }
     println!("cargo:rerun-if-env-changed=SPIKE_DYNAMIC");
 }

@@ -10,6 +10,11 @@
 //! - `#[defun]` の中の panic は emacs クレートが Lisp のエラー（`rust-panic`）に変える。UI スレッドの本体・wndproc・
 //!   user-ptr の `Drop` は自分で `catch_unwind` する（T-031。term.rs）
 //! - **`SetProcessDpiAwareness` 系は呼ばない**（Emacs のプロセスの設定を変えてしまう）
+//!
+//! **Emacs module（子 HWND）は今のところ Windows だけ**（T-124）。ほかの OS ではクレートごと空にしてある
+//! （`cargo test --workspace` を通すため）。macOS 版は T-126（NSView の埋め込み）。
+
+#![cfg(windows)]
 
 mod notify;
 mod term;

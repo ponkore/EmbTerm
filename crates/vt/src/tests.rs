@@ -155,7 +155,8 @@ fn types() -> Json {
     let json = type_json();
     assert!(!json.is_empty());
     let root = Parser { s: json.as_bytes(), i: 0 }.value();
-    assert_eq!(root.get("abi").get("os").str(), "windows");
+    // libghostty-vt が名乗る OS は Rust の `std::env::consts::OS` と同じ綴り（windows / macos）
+    assert_eq!(root.get("abi").get("os").str(), std::env::consts::OS);
     root.get("types").clone()
 }
 
@@ -866,6 +867,8 @@ fn kitty_raw_pixels_placed_at_cursor() {
     assert!(term.kitty_image(7).is_none());
 }
 
+/// PNG のデコーダ（WIC）は Windows だけ（T-124。macOS の ImageIO は T-127）
+#[cfg(windows)]
 #[test]
 fn kitty_png_is_decoded_by_wic() {
     let (mut term, _log) = image_terminal();

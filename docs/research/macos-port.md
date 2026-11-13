@@ -143,7 +143,7 @@ Lisp 側で `(while (< (- (float-time) t0) 1.4) ...)` のビジーループを�
 
 | 項目 | 実測 |
 |---|---|
-| libghostty-vt | リリースに **`ghostty-vt-1.0.0.xcframework.zip`** がある（`SHA256SUMS` を取得して確認）。Apple 向けのビルドが上流から出ているので、**zig を入れずに済む可能性がある**（未確認。段階 0 で確かめる） |
+| libghostty-vt | リリースに **`ghostty-vt-1.0.0.xcframework.zip`** がある（`SHA256SUMS` を取得して確認）。Apple 向けのビルドが上流から出ている。→ **2026-11-13 に段階 0（T-124）で確かめた: zig は要らず、`et-vt` のテストが macOS で 31 本すべて通った**（[../notes/t124-macos-stage0.md](../notes/t124-macos-stage0.md) §2） |
 | Emacs の module 対応 | `module-file-suffix` = `".dylib"`、`(fboundp 'module-load)` = t。プローブの module が実際に読み込めた。なお `(featurep 'dynamic-modules)` は nil を返す（判定に使わない） |
 | フォント | **`HackGen Console NF` がこの Mac にも入っている**（`~/Library/Fonts`）。Windows と同じ見た目にできる |
 | 画像の共有メモリ（T-093 の `t=s`） | libghostty-vt が Windows では未対応で見送った経路。**macOS では使える見込み**（推測） |
@@ -233,9 +233,9 @@ TODO.md §9 に T-124〜T-128 として起こした。
 
 | 段階 | 内容 | 目安 | TODO |
 |---|---|---|---|
-| 判断 | mac の ghostel の遅さの出どころを測る | 1 時間 | T-122 |
-| 設計 | `cfg` とトレイトでの platform 分岐（Windows を壊さない） | 半日 | T-123 |
-| 0 | `et-vt` を macOS でリンク（xcframework か zig）＋ `et-pty` の Unix 版。VT だけのヘッドレスで `test-screens` を通す | 半日 | T-124 |
+| 判断 | mac の ghostel の遅さの出どころを測る | 1 時間 | T-122（未） |
+| 設計 | `cfg` とトレイトでの platform 分岐（Windows を壊さない） | 半日 | **T-123 ✅ 2026-11-13** |
+| 0 | `et-vt` を macOS でリンク（xcframework か zig）＋ `et-pty` の Unix 版。VT だけのヘッドレスで `test-screens` を通す | 半日 | **T-124 ✅ 2026-11-13**（[notes](../notes/t124-macos-stage0.md)） |
 | 1 | CoreText + Metal のレンダラと `embterm`（NSWindow 1 枚）。画面比較の回帰試験で正しさを担保し、描画の負荷を測る | 1〜2 日 | T-125 |
 | 2 | module（NSView の埋め込み・配置・キー・ポーリング・イベント）。ここで「Emacs の中で動く端末」が完成 | 1〜2 日 | T-126 |
 | 3 | IME・マウス・選択 / コピー・Kitty graphics・OSC・通知・シェル統合 | 1〜2 日 | T-127 |
@@ -249,7 +249,7 @@ TODO.md §9 に T-124〜T-128 として起こした。
 | # | 内容 | どこで分かるか |
 |---|---|---|
 | 1 | `CAMetalLayer` に別スレッドから描いて present したときの実際のコマ落ち・遅れ（今回測ったのは `CATransaction` の commit だけ） | 段階 1 |
-| 2 | xcframework を Rust からリンクできるか（zig を入れずに済むか） | 段階 0 |
+| 2 | ~~xcframework を Rust からリンクできるか（zig を入れずに済むか）~~ → **済み**（T-124。`static=ghostty-vt` + `dylib=c++`） | ✅ 2026-11-13 |
 | 3 | IME の候補ウィンドウの位置を寄せられるか（ポイントの移動 / swizzling） | 段階 3 |
 | 4 | スケールの違うディスプレイをまたいだときの作り直し | 段階 1〜2 |
 | 5 | `ns-frame-list-z-order` と `[NSApp orderedWindows]` の順序が一致するか | 段階 2 |
@@ -261,6 +261,7 @@ TODO.md §9 に T-124〜T-128 として起こした。
 | | |
 |---|---|
 | [macos-port/](macos-port/) | 今回のプローブ（`run.sh` で再現） |
+| [../notes/t124-macos-stage0.md](../notes/t124-macos-stage0.md) | 段階 0（T-124）の記録。この文書の見積もりと実際の差もここに |
 | [genpreview-embedding.md](genpreview-embedding.md) | Windows 側の埋め込みの設計と、そこで踏んだ穴 |
 | [conpty.md](conpty.md) | §6 で「消える」と書いたものの出どころ |
 | [../notes/t054-performance.md](../notes/t054-performance.md) | Windows での性能の実測（比較の基準） |

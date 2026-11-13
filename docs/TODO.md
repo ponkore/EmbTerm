@@ -356,15 +356,25 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 
 - ⬜ **T-122**（判断）mac の ghostel の遅さの出どころを測る。redisplay / Lisp スレッドの詰まり / 入力の往復 / PTY の読みの間隔のどれか。
   **redisplay か Lisp の詰まりなら EmbTerm の効果は確実、入力の往復が主因なら差は小さい**（macos-port.md §7）。ここで着手するかを決める
-- ⬜ **T-123**（設計）`cfg` とトレイト（`Pty` / `Renderer` / ビューの置き場）での platform 分岐。**リポジトリは分けない**（Windows が常用なので二重管理は避ける）。
-  Windows 側を壊さない保険は既存の回帰試験（`cargo xtask test-screens`、`cargo xtask test-emacs`）。この refactor は Windows で先に行い、試験を通してから macOS の実装を足す
-- ⬜ **T-124**（段階 0）`et-vt` を macOS でリンクし、`et-pty` の Unix 版を書く。VT だけのヘッドレスで `cargo xtask test-screens` を通す
-  - libghostty-vt は上流に `ghostty-vt-1.0.0.xcframework.zip` がある。**zig を入れずに済むかを先に確かめる**（済まなければ `zig -Dtarget=aarch64-macos`）
-  - `crates/vt/src/png.rs`（WIC）を ImageIO か `png` クレートに差し替え
-  - `et-pty`: `openpty` + `TIOCSWINSZ` + プロセスグループ + `SIGHUP` → 猶予 → `SIGKILL` + `waitpid`。再配布版の探索・Job Object・コマンドラインの引用・環境ブロックは不要
-  - **ここで失敗すれば一番早く分かる。半日で「心臓部は macOS で動く」まで行けるので、最初にやる**
-  - 通ったら requirements.md §3（「macOS / Linux は対象外【案】」）と §8 を書き換える
+- ✅ **T-123**（設計）`cfg` と OS ごとのファイルでの platform 分岐（2026-11-13。T-124 と一緒に実装）→ **リポジトリは分けない。**
+  `crates/pty` を `common.rs` / `conpty.rs` / `unix.rs` に、`apps/embterm` を `window.rs` / `headless.rs` に分けた。
+  `windows` クレートはすべて `[target.'cfg(windows)'.dependencies]` に移し、まだ Windows しか無いクレート（`et-render`・`embterm-module`）は
+  ほかの OS では `#![cfg(windows)]` で空にした（`cargo test --workspace` が macOS でも通る）。
+  **Windows 側を壊していないかは Mac から `cargo check --workspace --target x86_64-pc-windows-gnu` で確かめられる**（リンクはしないので .lib は要らない）。
+  本当のビルドと `test-emacs` は Windows 機で。docs/notes/t124-macos-stage0.md §6
+- ✅ **T-124**（段階 0）`et-vt` を macOS でリンクし、`et-pty` の Unix 版を書く（2026-11-13）→ **通った。** docs/notes/t124-macos-stage0.md
+  - **zig は要らなかった**: 上流の `ghostty-vt-1.0.0.xcframework.zip`（universal の `libghostty-vt.a` + ヘッダ）を SHA256 で確かめて `vendor/ghostty-vt` に置く（`cargo xtask fetch-ghostty-vt`）。
+    リンクは `static=ghostty-vt` + `dylib=c++`（中の highway・simdutf が C++）
+  - **`et-vt` のテストが macOS で 31 本すべて通った**（`ghostty_type_json()` との構造体の照合込み = ABI が合っている）。直したのは「`abi.os` が windows 決め打ち」と「WIC のテストを cfg」の 2 つだけ
+  - `et-pty` の Unix 版（`openpty` + `setsid` + `TIOCSCTTY`、閉じるのは `killpg(SIGHUP)` → 猶予 → `SIGKILL`）。試験 6 本（終了コード・エコー・`stty size`・**子と孫の後始末**・環境変数）
+  - 落とし穴: macOS の `proc_listchildpids` は**バッファを渡すと「個数」を返す**（`proc_listpids` と違いバイト数ではない）。どちらでも壊れない読み方にした
+  - ヘッドレスの `embterm`（`headless.rs`）と Unix 用の画面の回帰テスト（`test/screens/cases-unix.txt` + `unix/*.sh`）。**6 ケース OK、期待値は目で確認**
+  - PNG のデコード（WIC）・クリップボードの読み取り・キーの変換は Windows だけにして残した（T-126 / T-127）
+  - requirements.md §3 / §8 を書き換えた（macOS は「移植中（段階 0 まで）」）
 - ⬜ **T-125**（段階 1）CoreText + Metal のレンダラと、NSWindow 1 枚の `embterm`（デバッグ用 exe）
+  - 置き場は決まっている: `crates/render` はいま `#![cfg(windows)]` で空にしてあるので、ここに macOS の実装を足す。
+    `apps/embterm` は `headless.rs`（段階 0）と並べて窓の実装を置き、`--screenshot` で PNG も書くようにする
+  - `--font` / `--font-size` / `--font-fallback` は今は受け取るだけ、`--narrow-wide` は捨てている。ここで効かせる
   - グリフのアトラス方式（Ghostty / WezTerm / Alacritty と同じ）。Windows の「アトラスは要らない」（T-008 / T-077）は D2D の `DrawGlyphRun` が速かったからで、macOS には同じ近道が無い
   - 背景は Windows と同じ考え（セル 1 つ = 1 画素）でインスタンスの矩形にできる。`frame.rs`・eaw の overlap / shrink（T-013）・画像の層は移植する
   - `Present(1)` の待ち（T-068）に当たるのは `CAMetalLayer` の drawable の待ち。**描画スレッドで待ち、main スレッド（= Emacs）は止めない**

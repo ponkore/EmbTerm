@@ -263,7 +263,7 @@ pub fn run(args: Args) -> Result<(), String> {
         grid.0,
         grid.1,
         session.pid(),
-        session.conpty_kind()
+        session.pty_kind()
     ));
     for w in session.warnings() {
         log(&format!("注意: {w}"));

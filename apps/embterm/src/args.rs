@@ -21,7 +21,9 @@ pub struct Args {
     pub font_size: Option<f32>,
     /// 主フォントに無い文字に、システムのフォールバックより先に使うファミリ（T-033）
     pub font_fallback: Vec<String>,
-    /// 幅 1 と数えたのにグリフが広い文字の描き方（T-013）。None なら既定（overlap）
+    /// 幅 1 と数えたのにグリフが広い文字の描き方（T-013）。None なら既定（overlap）。
+    /// 描画が Windows だけなので今は Windows だけ（T-125 で macOS にも）
+    #[cfg(windows)]
     pub narrow_wide: Option<et_render::NarrowWide>,
     pub cols: Option<u16>,
     pub rows: Option<u16>,
@@ -116,7 +118,13 @@ pub fn parse(mut it: impl Iterator<Item = OsString>) -> Result<Args, String> {
             "--font" => a.font = Some(val().ok_or("--font に値が要る")?),
             "--font-size" => a.font_size = Some(num("--font-size", val())?),
             "--font-fallback" => a.font_fallback.push(val().ok_or("--font-fallback に値が要る")?),
+            #[cfg(windows)]
             "--narrow-wide" => a.narrow_wide = Some(val().ok_or("--narrow-wide に値が要る")?.parse()?),
+            // 描かない OS では受け取って捨てる（呼ぶ側を OS で分けずに済むように。T-124）
+            #[cfg(not(windows))]
+            "--narrow-wide" => {
+                let _ = val().ok_or("--narrow-wide に値が要る")?;
+            }
             "--cols" => a.cols = Some(num("--cols", val())?),
             "--rows" => a.rows = Some(num("--rows", val())?),
             "--cwd" => a.cwd = Some(val().ok_or("--cwd に値が要る")?.into()),

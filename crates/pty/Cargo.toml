@@ -1,13 +1,13 @@
 [package]
 name = "et-pty"
-description = "ConPTY（再配布版の conpty.dll を優先し、無ければ OS 同梱）で子プロセスを動かす"
+description = "子プロセスを PTY で動かす（Windows: ConPTY、Unix: openpty。T-124）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",
@@ -21,3 +21,7 @@ features = [
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ]
+
+[target.'cfg(unix)'.dependencies]
+# PTY・シグナル・sysctl の呼び出し（Unix の標準的な依存。T-124）
+libc = "0.2"
