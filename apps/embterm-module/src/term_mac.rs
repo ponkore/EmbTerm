@@ -322,6 +322,8 @@ pub struct Shared {
     colors_dbg: Mutex<(Rgb, Rgb, Rgb)>,
     /// 点滅を切り替えた回数（デバッグ用）
     blink: AtomicU64,
+    /// 入力から表示までの遅れの測定（T-054 / T-128）
+    probe: Mutex<LatencyProbe>,
 }
 
 impl Shared {
@@ -385,6 +387,28 @@ impl Shared {
             *slot = None;
         }
         Some(chunk)
+    }
+}
+
+/// 入力から表示までの遅れの測定（T-054 の macOS 版。T-128）。キーを 1 つ追いかける:
+/// Lisp が送った → 読みのスレッドが端末に書いた（出力が来た）→ 描画スレッドが描き終えた
+#[derive(Default)]
+struct LatencyProbe {
+    sent: Option<Instant>,
+    /// 送ってから出力が届くまで（ms）
+    echo_ms: Vec<f64>,
+    /// 送ってから描き終わるまで（ms）
+    draw_ms: Vec<f64>,
+}
+
+impl LatencyProbe {
+    fn line(name: &str, v: &mut Vec<f64>) -> String {
+        if v.is_empty() {
+            return format!("{name}: 無し");
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let q = |x: f64| v[((x * (v.len() - 1) as f64).round() as usize).min(v.len() - 1)];
+        format!("{name}: n={} p50={:.2} p90={:.2} max={:.2} ms", v.len(), q(0.5), q(0.9), q(1.0))
     }
 }
 
@@ -493,6 +517,7 @@ pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
         cursor_dbg: Mutex::new((false, false, "block")),
         colors_dbg: Mutex::new((DEFAULT_FG, DEFAULT_BG, Rgb::default())),
         blink: AtomicU64::new(0),
+        probe: Mutex::new(LatencyProbe::default()),
     });
     let mut theme = Theme::default();
     theme.narrow_wide = opts.narrow_wide;
@@ -621,8 +646,7 @@ impl MacApp {
                 let _ = reply.send(self.debug_info());
             }
             Request::Perf { reset, reply } => {
-                let text = self.shared.session().map(|s| s.perf_report(reset)).unwrap_or_default();
-                let _ = reply.send(text);
+                let _ = reply.send(self.perf_report(reset));
             }
             Request::Close => self.close(),
             Request::Copy(pane) => self.prepare_copy(pane),
@@ -634,8 +658,15 @@ impl MacApp {
         }
     }
 
-    /// 出力のあと、描画スレッドを起こす
+    /// 出力のあと、描画スレッドを起こす。入力の時刻も記録する（T-128 の測定）
     fn follow_output(&self) {
+        {
+            let mut p = self.shared.probe.lock().unwrap_or_else(|e| e.into_inner());
+            // エコーが来なかった（表示の変わらないキー）ものは 1 秒で捨てて測り直す
+            if p.sent.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
+                p.sent = Some(Instant::now());
+            }
+        }
         self.shared.mark_dirty();
     }
 
@@ -858,6 +889,7 @@ impl MacApp {
         };
         if !bytes.is_empty() {
             s.write(&bytes);
+            self.follow_output();
             // キーを打ったら最新の画面に戻す
             for p in &self.panes {
                 p.render.lock().unwrap_or_else(|e| e.into_inner()).scroll = 0;
@@ -1228,6 +1260,48 @@ impl MacApp {
         info
     }
 
+    /// 性能の測定の報告（T-054 の macOS 版。読みのスレッド + 描画 + 入力の遅れ + PNG）
+    fn perf_report(&self, reset: bool) -> String {
+        let mut out = self.shared.session().map(|s| s.perf_report(reset)).unwrap_or_default();
+        if let Some(p) = self.current_pane() {
+            let st = p.render.lock().unwrap_or_else(|e| e.into_inner()).renderer.stats();
+            let avg = |d: Duration, n: u64| if n == 0 { 0.0 } else { d.as_secs_f64() * 1000.0 / n as f64 };
+            out.push_str(&format!(
+                "draw.count={} present={} skipped={} instances={}\n\
+                 draw.ms avg={:.2} max={:.2}（うち垂直同期の待ち avg={:.2} max={:.2}）\n",
+                st.drawn,
+                st.presented,
+                st.skipped,
+                st.instances,
+                avg(st.total_draw, st.drawn),
+                st.max_draw.as_secs_f64() * 1000.0,
+                avg(st.total_wait, st.drawn),
+                st.max_wait.as_secs_f64() * 1000.0,
+            ));
+        }
+        {
+            let mut probe = self.shared.probe.lock().unwrap_or_else(|e| e.into_inner());
+            let echo = LatencyProbe::line("input.echo", &mut probe.echo_ms);
+            let draw = LatencyProbe::line("input.draw", &mut probe.draw_ms);
+            out.push_str(&format!("{echo}\n{draw}\n"));
+            if reset {
+                *probe = LatencyProbe::default();
+            }
+        }
+        let png = et_vt::png_decode_stats();
+        if png.count > 0 {
+            out.push_str(&format!(
+                "png.count={} total={:.1} ms max={:.1} ms last={:.1} ms last_pixels={}\n",
+                png.count,
+                png.total_us as f64 / 1000.0,
+                png.max_us as f64 / 1000.0,
+                png.last_us as f64 / 1000.0,
+                png.last_pixels
+            ));
+        }
+        out
+    }
+
     fn publish_panes(&self) {
         let panes: Vec<PaneInfo> = self
             .panes
@@ -1283,7 +1357,16 @@ impl MacApp {
 /// セッションからの知らせ（PTY の読みのスレッドから呼ばれる）
 fn on_session_event(shared: &Arc<Shared>, e: SessionEvent) {
     match e {
-        SessionEvent::Output => shared.mark_dirty(),
+        SessionEvent::Output => {
+            {
+                let mut p = shared.probe.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(t) = p.sent {
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    p.echo_ms.push(ms);
+                }
+            }
+            shared.mark_dirty();
+        }
         SessionEvent::Title => {
             if let Some(s) = shared.session() {
                 let t = s.title();
@@ -1421,6 +1504,13 @@ fn render_main(shared: Arc<Shared>) {
         }
         shared.draws.fetch_add(1, Ordering::Relaxed);
         shared.blink.store(blink_ticks, Ordering::Relaxed);
+        {
+            let mut p = shared.probe.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = p.sent.take() {
+                let ms = t.elapsed().as_secs_f64() * 1000.0;
+                p.draw_ms.push(ms);
+            }
+        }
         if blinking || text_blink {
             // 次の切り替えのために起こす
             shared.mark_dirty();

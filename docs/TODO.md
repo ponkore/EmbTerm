@@ -352,10 +352,15 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 ## 9. macOS への移植（T-121 の段階）
 
 この一式は複数の節（描画・PTY・入力・IME・試験・配布）にまたがるので、§8 ではなくここにまとめる。
-前提と見積もりは [research/macos-port.md](research/macos-port.md)。**やるとは決めていない**（T-122 の測定を見て決める）。
+前提と見積もりは [research/macos-port.md](research/macos-port.md)。段階 0〜4（T-124〜T-128）は 2026-11-13 に通した。
+残りは T-129。**ghostel との比べ（T-122）の結論**: mac の ghostel も Emacs を固めないので、
+この移植の値打ちは「速さ」より**文字幅とグリフの自由（eaw・全角・画像）と、Windows と同じ設定を使えること**（docs/notes/t128-macos-perf.md §2）。
 
-- ⬜ **T-122**（判断）mac の ghostel の遅さの出どころを測る。redisplay / Lisp スレッドの詰まり / 入力の往復 / PTY の読みの間隔のどれか。
-  **redisplay か Lisp の詰まりなら EmbTerm の効果は確実、入力の往復が主因なら差は小さい**（macos-port.md §7）。ここで着手するかを決める
+- ✅ **T-122**（判断）mac の ghostel の遅さの出どころを測る（2026-11-13。T-128 と一緒に）→ **mac の ghostel は Emacs を固めない。**
+  同じ測り方・同じデータで比べて、10 ms タイマーの p99 は ghostel 16.9 ms / EmbTerm 21.6 ms（どちらも固まらない）。
+  差が出たのは**速さ**（10 MB の `cat` が終わるまで 0.21 秒 / 0.10 秒）。
+  **この移植の値打ちは「Emacs が固まらないこと」ではなく、文字幅とグリフの自由（eaw・全角・画像）と、Windows と同じ設定を使えること**。
+  docs/notes/t128-macos-perf.md §2
 - ✅ **T-123**（設計）`cfg` と OS ごとのファイルでの platform 分岐（2026-11-13。T-124 と一緒に実装）→ **リポジトリは分けない。**
   `crates/pty` を `common.rs` / `conpty.rs` / `unix.rs` に、`apps/embterm` を `window.rs` / `headless.rs` に分けた。
   `windows` クレートはすべて `[target.'cfg(windows)'.dependencies]` に移し、まだ Windows しか無いクレート（`et-render`・`embterm-module`）は
@@ -396,7 +401,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - **画面に実際に出ている見た目は未確認**（画面収録の許可が要る）。利用者が `emacs -Q -l test/smoke-mac.el` で見るのが残り
 - ✅ **T-127**（段階 3）IME・マウス・選択 / コピー・Kitty graphics・点滅・クリップボード・通知（2026-11-13）→ **ふだん使う機能はひと通り動いた。** docs/notes/t127-macos-features.md
   - **IME**: `ns-put-working-text` / `ns-unput-working-text` に advice を掛け、端末のバッファでは変換中の文字列を module に渡して
-    **カーソルの位置に自前で描く**（選択と同じ背景 + 下線）。tr-ime のような位置の上書きは要らない。候補ウィンドウの位置は残り（T-128）
+    **カーソルの位置に自前で描く**（選択と同じ背景 + 下線）。tr-ime のような位置の上書きは要らない。候補ウィンドウの位置は残り（T-129）
   - **マウス**: Emacs が受けたイベントを Lisp から渡す（`embterm-module-mouse`）。アプリがマウスを見ていれば報告、そうでなければドラッグで選択。
     Shift を押している間は常に選択。Ctrl+クリックのリンクは `Event::Link`
   - **copy モード**（1 MiB ずつ渡す。T-086 と同じ形）と**プロンプト間の移動**（OSC 133。T-119）
@@ -404,8 +409,18 @@ requirements.md §4 の「とくに確かめること」を見ながら。
     落とし穴: CoreGraphics のビットマップはストレートアルファを受け付けない（premultiplied で描いて戻す）／上下の反転は要らない
   - 点滅（カーソル・SGR 5。描画スレッドが 600 ms ごと）、クリップボードの読み取り（NSPasteboard）、通知（`osascript`）
   - 自動確認: `test-emacs` が **16 項目 OK**（マウス・IME・点滅・copy モードを追加）、`test-screens` が **7 ケース OK**（`kitty-basic` を追加）、`cargo test` **53 OK**
-- ⬜ **T-128**（段階 4）測定と自動確認の移植、T-127 の残り
-  - T-127 の残り: IME の候補ウィンドウの位置（ポイントの移動か swizzling）、遡っているペインでの選択、マウスの下のリンクの下線、
-    大きな画像の縮小・別スレッドでの変換・アニメーション（T-105 / T-092 の macOS 版）
-  - mac の ghostel と比べる（T-122 で測った項目と同じ道具で）。入力から表示までと、大量の出力の最中の Emacs の止まり
-  - `test-emacs`（11 本）の移植。Windows は `PostMessage` でマウスを送っていた（T-081）が、macOS は合成イベントに権限が要るので module に試験用の注入口を作る
+- ✅ **T-128**（段階 4）測定と自動確認の移植（2026-11-13）→ docs/notes/t128-macos-perf.md
+  - **性能**（`cargo xtask test-emacs perf`）: 10 MB の出力の最中でも Emacs の 10 ms タイマーは p99 21.6 ms。
+    PTY の読みは 112 MiB/s、描く仕事は 1 枚 0.5〜1 ms（残りは垂直同期の待ち）、入力から描き終わるまで p50 1.69 ms。
+    端末 15 個で 433 MB・スレッド 51
+  - **ghostel との比べ**（T-122）: 上のとおり。`test/perf-ghostel.el`（利用者の ~/.emacs.d の ghostel を `emacs -Q` に読む）
+  - **機能の回帰テスト**（`cargo xtask test-emacs features`。`test/features-mac.el`）: 環境変数・TERM・リサイズと `stty size`・
+    フォント・テーマへの追従・スクロール・シェル統合（OSC 51;E）・OSC 8 のリンク・後始末の **12 項目**
+  - **画像を縮めて載せる**（T-105 の macOS 版）: 4000x4000 で常駐 489 → 422 MB。縮小は描画スレッドで（別スレッド化は未）
+  - 道具: `test/proc-stats.sh`（Windows の proc-stats.ps1 に当たる）、`test/perf-colors.sh`
+- ⬜ **T-129** macOS の残り（T-127 / T-128 で置いていったもの）
+  - IME の候補ウィンドウの位置（`-[EmacsView firstRectForCharacterRange:]`。ポイントの移動か method swizzling）
+  - 遡っているペインでの選択と、マウスの下のリンクの下線（位置の対応と、Lisp からのマウスの動きの通知）
+  - 大きな画像の変換を別のスレッドで（T-105 の後半）、Kitty graphics のアニメーション（T-092）
+  - **Windows 機での実ビルドと試験**（`cargo xtask test-screens` / `test-emacs` を Windows で通す。ずっとクロスの型チェックだけ）
+  - 普段の Emacs の設定（テーマ・corfu・tab-bar・claude）での使い心地の確認（利用者）

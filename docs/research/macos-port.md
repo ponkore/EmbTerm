@@ -233,7 +233,7 @@ TODO.md §9 に T-124〜T-128 として起こした。
 
 | 段階 | 内容 | 目安 | TODO |
 |---|---|---|---|
-| 判断 | mac の ghostel の遅さの出どころを測る | 1 時間 | T-122（未） |
+| 判断 | mac の ghostel の遅さの出どころを測る | 1 時間 | **T-122 ✅ 2026-11-13**（[notes](../notes/t128-macos-perf.md) §2。**ghostel も固まらなかった**） |
 | 設計 | `cfg` とトレイトでの platform 分岐（Windows を壊さない） | 半日 | **T-123 ✅ 2026-11-13** |
 | 0 | `et-vt` を macOS でリンク（xcframework か zig）＋ `et-pty` の Unix 版。VT だけのヘッドレスで `test-screens` を通す | 半日 | **T-124 ✅ 2026-11-13**（[notes](../notes/t124-macos-stage0.md)） |
 | 1 | CoreText + Metal のレンダラと `embterm`（NSWindow 1 枚）。画面比較の回帰試験で正しさを担保し、描画の負荷を測る | 1〜2 日 | T-125 |
@@ -248,12 +248,12 @@ TODO.md §9 に T-124〜T-128 として起こした。
 
 | # | 内容 | どこで分かるか |
 |---|---|---|
-| 1 | `CAMetalLayer` に別スレッドから描いて present したときの実際のコマ落ち・遅れ（今回測ったのは `CATransaction` の commit だけ） | 段階 1 |
+| 1 | ~~`CAMetalLayer` に別スレッドから描いて present したときの実際のコマ落ち・遅れ~~ → **測った**（T-125 / T-128。描く仕事は 1 枚 0.5〜1 ms、残りは垂直同期の待ち） | ✅ 2026-11-13 |
 | 2 | ~~xcframework を Rust からリンクできるか（zig を入れずに済むか）~~ → **済み**（T-124。`static=ghostty-vt` + `dylib=c++`） | ✅ 2026-11-13 |
 | 3 | IME の候補ウィンドウの位置を寄せられるか（ポイントの移動 / swizzling） | 段階 3 |
 | 4 | スケールの違うディスプレイをまたいだときの作り直し | 段階 1〜2 |
 | 5 | `ns-frame-list-z-order` と `[NSApp orderedWindows]` の順序が一致するか | 段階 2 |
-| 6 | mac の ghostel が実際に何で遅いのか | T-122 |
+| 6 | ~~mac の ghostel が実際に何で遅いのか~~ → **測った**: 固まってはいない。差は速さ（10 MB の cat で 2 倍）と文字幅・グリフの自由 | ✅ 2026-11-13 |
 | 7 | Linux（pgtk / X11）への移植。PTY と描画の抽象は再利用できるが、埋め込みの作法は別物 | 今回は見ていない |
 
 ## 10. 参考

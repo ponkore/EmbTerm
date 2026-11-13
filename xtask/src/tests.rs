@@ -220,8 +220,14 @@ struct EmacsTest {
 
 /// macOS の試験（T-126。Windows の試験は cmd / pwsh / ConPTY を前提にしているので動かない）
 #[cfg(not(windows))]
-const EMACS_TESTS: &[EmacsTest] =
-    &[EmacsTest { name: "smoke-mac", file: "smoke-mac.el", log: "target/t126/smoke-mac.log", default: true }];
+const EMACS_TESTS: &[EmacsTest] = &[
+    EmacsTest { name: "smoke-mac", file: "smoke-mac.el", log: "target/t126/smoke-mac.log", default: true },
+    EmacsTest { name: "features", file: "features-mac.el", log: "target/t128/features-mac.log", default: true },
+    // 性能の測定（T-128）。時間がかかるので既定では動かさない
+    EmacsTest { name: "perf", file: "perf-mac.el", log: "target/t128/perf-run.log", default: false },
+    // ghostel との比べ（T-122）。利用者の ~/.emacs.d の ghostel を読む
+    EmacsTest { name: "ghostel", file: "perf-ghostel.el", log: "target/t128/ghostel.log", default: false },
+];
 
 #[cfg(windows)]
 const EMACS_TESTS: &[EmacsTest] = &[
