@@ -1,15 +1,17 @@
-//! ウィンドウを持たない動かし方（T-124。macOS の段階 0）。
+//! ウィンドウを持たない動かし方（T-124 / T-125）。
 //!
-//! 描画（et-render）はまだ Windows 専用なので、macOS では**画面のテキストだけ**を扱う。
 //! `cargo xtask test-screens` の回帰テストはこの経路で動く（PTY → VT → 画面のテキスト）。
-//! 段階 1（T-125）で CoreText + Metal の窓が付いたら、`--screenshot` は PNG も書くようにする。
+//! **`--screenshot` では Metal のオフスクリーンに描いて PNG も書く**（T-125）。窓を開かないので、
+//! 自動確認でも描画そのものを確かめられる。
 //!
 //! 時刻の進み方は window.rs のタイマーと同じ:
 //! `--input-delay` → `--input` を `--input-interval` おきに送る → `--screenshot-after` で撮る → `--exit-after` で閉じる
 
 use std::time::{Duration, Instant};
 
+use et_render::{Frame, Renderer, Theme};
 use et_session::{CLOSE_TIMEOUT, Colors, Event, Session, SessionOptions};
+use et_vt::RenderState;
 
 use crate::args::Args;
 use crate::log;
@@ -84,7 +86,11 @@ pub fn run(args: Args) -> Result<(), String> {
             let text = screen_text(&session, rows);
             let txt = path.with_extension("txt");
             std::fs::write(&txt, text).map_err(|e| format!("{} に書けません: {e}", txt.display()))?;
-            log(&format!("画面のテキストを保存: {}（PNG は段階 1 で）", txt.display()));
+            log(&format!("画面のテキストを保存: {}", txt.display()));
+            match screenshot(&session, &args, cols, rows, &path) {
+                Ok(()) => log(&format!("画面を保存: {}", path.display())),
+                Err(e) => log(&format!("画面を保存できません: {e}")),
+            }
         }
         // 終わり
         if exit_at.is_some_and(|t| Instant::now() >= t) {
@@ -125,3 +131,30 @@ fn screen_text(session: &Session, rows: u16) -> String {
     }
     text
 }
+
+/// Metal のオフスクリーンに 1 枚描いて PNG にする（T-125）
+fn screenshot(session: &Session, args: &Args, cols: u16, rows: u16, path: &std::path::Path) -> Result<(), String> {
+    let spec = crate::font_spec(args);
+    // 拡大率は 2（Retina と同じ条件で確かめる）。窓ではその画面の値を使う
+    let scale = args.screenshot_scale.unwrap_or(2.0);
+    let probe = Renderer::offscreen(16, 16, scale, spec.clone())?;
+    let (w, h) = probe.client_size_for(cols, rows);
+    drop(probe);
+    let mut renderer = Renderer::offscreen(w, h, scale, spec)?;
+    let mut theme = Theme::default();
+    if let Some(nw) = args.narrow_wide {
+        theme.narrow_wide = nw;
+    }
+    renderer.set_theme(theme);
+
+    let mut rs = RenderState::new().map_err(|e| e.to_string())?;
+    let mut frame = Frame::default();
+    {
+        let term = session.lock();
+        rs.update(&term).map_err(|e| e.to_string())?;
+        frame.capture_images(&mut rs, &term);
+    }
+    frame.update(&mut rs);
+    renderer.draw(&frame, true, Some(path))
+}
+

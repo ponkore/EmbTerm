@@ -579,6 +579,7 @@ impl Session {
     /// KKP が有効になったときの最初の子（シェル）の子孫プロセス（親子関係で求める）がすべて終わっていれば「求めたアプリは
     /// もういない」とみなす（シェルが KKP を求めることはない）。フラグが残ったまま送ると、再配布版の ConPTY では
     /// コンソールのアプリにゴミ文字が入る。KKP を使うアプリが動いている間は何もしない
+    #[cfg(windows)]
     fn reset_stale_kkp(&self, term: &mut Terminal) {
         if term.kitty_keyboard_flags() == 0 {
             return;

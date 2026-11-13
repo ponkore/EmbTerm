@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 
 use crate::frame::{Frame, ImagePixels, PlacedImage};
 use crate::view::FrameView;
-use crate::{Renderer, rect};
+use crate::d2d::{Renderer, rect};
 
 /// GPU のビットマップの鍵（画像の世代, 載せた幅, 高さ）
 pub(crate) type BitmapKey = (u64, u32, u32);

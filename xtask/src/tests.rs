@@ -90,6 +90,10 @@ fn run_case(exe: &Path, out: &Path, case: &Case) -> Result<String, String> {
     let _ = std::fs::remove_file(&txt);
     let shot = case.shot_at();
     let mut cmd = Command::new(exe);
+    if !cfg!(windows) {
+        // macOS は窓を開かず、オフスクリーンに描いて PNG と画面のテキストを書く（T-125）
+        cmd.arg("--headless");
+    }
     cmd.args(["--cols", &case.cols.to_string(), "--rows", &case.rows.to_string()])
         .args(["--input-delay", &case.delay.to_string(), "--input-interval", &case.interval.to_string()]);
     for i in &case.inputs {

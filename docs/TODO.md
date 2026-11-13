@@ -371,15 +371,22 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - ヘッドレスの `embterm`（`headless.rs`）と Unix 用の画面の回帰テスト（`test/screens/cases-unix.txt` + `unix/*.sh`）。**6 ケース OK、期待値は目で確認**
   - PNG のデコード（WIC）・クリップボードの読み取り・キーの変換は Windows だけにして残した（T-126 / T-127）
   - requirements.md §3 / §8 を書き換えた（macOS は「移植中（段階 0 まで）」）
-- ⬜ **T-125**（段階 1）CoreText + Metal のレンダラと、NSWindow 1 枚の `embterm`（デバッグ用 exe）
-  - 置き場は決まっている: `crates/render` はいま `#![cfg(windows)]` で空にしてあるので、ここに macOS の実装を足す。
-    `apps/embterm` は `headless.rs`（段階 0）と並べて窓の実装を置き、`--screenshot` で PNG も書くようにする
-  - `--font` / `--font-size` / `--font-fallback` は今は受け取るだけ、`--narrow-wide` は捨てている。ここで効かせる
-  - グリフのアトラス方式（Ghostty / WezTerm / Alacritty と同じ）。Windows の「アトラスは要らない」（T-008 / T-077）は D2D の `DrawGlyphRun` が速かったからで、macOS には同じ近道が無い
-  - 背景は Windows と同じ考え（セル 1 つ = 1 画素）でインスタンスの矩形にできる。`frame.rs`・eaw の overlap / shrink（T-013）・画像の層は移植する
-  - `Present(1)` の待ち（T-068）に当たるのは `CAMetalLayer` の drawable の待ち。**描画スレッドで待ち、main スレッド（= Emacs）は止めない**
-  - 画面比較の回帰試験（`test-screens` の 38 + 3 画面）で正しさを担保し、T-054 と同じ最悪の画面（314x70）で負荷を測る
+- ✅ **T-125**（段階 1）CoreText + Metal のレンダラと、NSWindow 1 枚の `embterm`（2026-11-13）→ **描けた。** docs/notes/t125-macos-render.md
+  - `crates/render` を「OS に依らない部分（`frame` / `view` / `theme` / `layout` / `png`）+ `d2d`（Windows）+ `mac`（macOS）」に分けた。
+    色の解決・カーソルの位置・縮める比（T-013）は**共通の `layout` を両方が使う**ので、規則が片方だけずれることがない
+  - 描き方: CoreText でグリフをアトラスに焼き、背景・文字・装飾・カーソルを**1 つのインスタンスの列**にして 1 回で描く。
+    縮める（shrink）ときはその大きさで焼き直すのでぼけない。色付きの絵文字はシェーダの `mode` で切り替える
+  - **測定**: 最悪の画面（200x50 でセルごとに色が違う、19,608 枚）で**描く仕事は 1 枚 1.0 ms**（6.27 ms のうち 5.2 ms は垂直同期の待ち）。
+    ふつうの画面（80x24）は 0.7 ms。Windows の実測（T-054: 6〜8 ms）と同じかそれより速い
+  - 落とし穴: **MSL の `uint3` は 16 バイト境界**で Rust の `#[repr(C)]` と大きさが食い違い、文字がばらばらの位置に出た。`uint` 3 つに分けて揃えた
+  - 目で確認: 日本語・eaw（overlap と shrink の違い）・罫線・ブロック・**色付きの絵文字**・SGR・カーソル・256 色の画面（PNG は target/t125/）
+  - 自動確認: `cargo test -p et-render` に**画素を読み戻して確かめる試験 4 本**。`cargo xtask test-screens` は `--headless` で動き、PNG も書くようになった
+  - `--headless` を足した（窓を作らず、オフスクリーンに描いて PNG と画面のテキストを書く）。`--screenshot-scale` で拡大率を指定できる
+  - 窓のキーは最小限（文字・Enter・Tab・Esc・Backspace・矢印・Ctrl・Option = Meta）。KKP / レガシーの作り分けは T-126
 - ⬜ **T-126**（段階 2）Emacs module: `EmacsView` への埋め込み・位置合わせ・キー・ポーリング・イベント
+  - 描画は T-125 の `et_render::Renderer`（`for_layer` で CAMetalLayer に描く）をそのまま使える。
+    **`nextDrawable` は垂直同期まで待つので、描画は Lisp のスレッドから外す**（requirements.md §6.1 のとおり）
+  - 窓の側（`window_mac.rs`）の最小限のキーの変換を、`et_session::keys` 相当（KKP / レガシーの作り分け、修飾キー）に差し替える
   - Win32 のメッセージループと「端末ごとの UI スレッド」を「main スレッド（Lisp から直接呼ぶ）+ 描画スレッド」に置き換える。
     `PostMessage` の列は不要になるが、**ビューのジオメトリは main スレッドだけで触る**
   - フレーム → NSWindow の対応付け（macos-port.md §3.7）: タイトルを一時的に一意にして引き、`window-id` をキーに覚える

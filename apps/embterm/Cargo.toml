@@ -16,9 +16,17 @@ et-vt = { path = "../../crates/vt" }
 et-pty = { path = "../../crates/pty" }
 et-session = { path = "../../crates/session" }
 
-# 描画はまだ Windows だけ（macOS の CoreText + Metal は T-125）
 [target.'cfg(windows)'.dependencies]
 et-render = { path = "../../crates/render" }
+
+# macOS: 描画（CoreText + Metal。T-125）と窓（AppKit）
+[target.'cfg(target_os = "macos")'.dependencies]
+et-render = { path = "../../crates/render" }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSView", "NSResponder", "NSEvent", "NSRunningApplication", "NSGraphics", "NSScreen", "NSMenu", "NSMenuItem", "NSColor", "NSColorSpace"] }
+objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer", "CALayer", "objc2-metal"] }
+objc2-core-foundation = "0.3"
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true

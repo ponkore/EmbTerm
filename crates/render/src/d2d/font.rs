@@ -284,27 +284,4 @@ impl FontSet {
 /// ghostel（`Renderer.zig` の `adjustGlyph`）と同じく、幅・上・下の比の最小で縮める（1 より大きくはしない）。
 /// ghostel はフォントの ascent / descent で比べるが、ここではグリフのインクの範囲で比べる
 /// （日本語のフォールバックのフォントは行の高さが大きいだけで、インクはセルに収まることが多いため）
-pub(crate) fn fit_scale(advance: f32, ink_ascent: f32, ink_descent: f32, slot_w: f32, asc: f32, desc: f32) -> f32 {
-    // 丸めの誤差で縮めないよう、0.5px までのはみ出しは許す
-    let sw = if advance > slot_w + 0.5 { slot_w / advance } else { 1.0 };
-    let sa = if ink_ascent > asc + 0.5 { asc / ink_ascent } else { 1.0 };
-    let sd = if ink_descent > desc + 0.5 { desc / ink_descent } else { 1.0 };
-    sw.min(sa).min(sd).clamp(0.05, 1.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::fit_scale;
-
-    #[test]
-    fn scale_rules() {
-        // 収まる
-        assert_eq!(fit_scale(10.0, 12.0, 3.0, 10.0, 14.0, 4.0), 1.0);
-        // 幅が 2 倍 → 半分
-        assert_eq!(fit_scale(20.0, 12.0, 3.0, 10.0, 14.0, 4.0), 0.5);
-        // 上にはみ出す → 上の比
-        assert!((fit_scale(10.0, 28.0, 3.0, 10.0, 14.0, 4.0) - 0.5).abs() < 1e-6);
-        // 幅と下の両方 → 小さいほう
-        assert!((fit_scale(15.0, 10.0, 8.0, 10.0, 14.0, 4.0) - 0.5).abs() < 1e-6);
-    }
-}
+pub(crate) use crate::layout::fit_scale;

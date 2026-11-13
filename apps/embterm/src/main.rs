@@ -3,17 +3,20 @@
 //! トップレベルのウィンドウ 1 枚に端末 1 つ。描画・VT・PTY は Emacs module（T-028）と同じクレート
 //! （et-render・et-session（et-vt・et-pty のつなぎとキーの変換））を使う。設定はコマンドライン引数だけ（args.rs）。
 //!
-//! **macOS では今のところウィンドウを持たない**（T-124。描画は段階 1 = T-125 で作る）。
-//! `--input` で入力を送り、`--screenshot` の隣に画面のテキストを書くところまでは同じに動く（headless.rs）。
+//! macOS では NSWindow + CAMetalLayer に Metal + CoreText で描く（T-125。window_mac.rs）。
+//! `--headless` を付けると窓を作らず、`--screenshot` だけをオフスクリーンに描く（自動確認用。headless.rs）。
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod args;
-/// ウィンドウを持たない動かし方（T-124。描画が Windows 専用なので、macOS ではこちらだけ）
+/// ウィンドウを持たない動かし方（T-124。`--headless` と、窓を作れない OS で使う）
 #[cfg(not(windows))]
 mod headless;
 #[cfg(windows)]
 mod window;
+/// macOS の窓（T-125）
+#[cfg(target_os = "macos")]
+mod window_mac;
 
 use std::io::Write;
 use std::sync::Mutex;
@@ -67,9 +70,30 @@ fn run(args: args::Args) -> Result<(), String> {
     window::run(args)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn run(args: args::Args) -> Result<(), String> {
+    if args.headless { headless::run(args) } else { window_mac::run(args) }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn run(args: args::Args) -> Result<(), String> {
     headless::run(args)
+}
+
+/// `--font` などからフォントの指定を作る（窓とヘッドレスで同じ）
+#[cfg(not(windows))]
+pub fn font_spec(args: &args::Args) -> et_render::FontSpec {
+    let mut spec = et_render::FontSpec::default();
+    if let Some(f) = &args.font {
+        spec.families = vec![f.clone()];
+    }
+    if let Some(s) = args.font_size {
+        spec.size_pt = s;
+    }
+    if !args.font_fallback.is_empty() {
+        spec.fallback = args.font_fallback.clone();
+    }
+    spec
 }
 
 /// 起動できなかったことを伝える（Windows はメッセージボックス、ほかは標準エラーだけ）

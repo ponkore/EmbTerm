@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::core::{Interface, Result};
 
-use crate::gpu::Gpu;
+use crate::d2d::gpu::Gpu;
 
 /// スワップチェーンの作り方の印（作るときと `ResizeBuffers` で同じものを渡す）
 const SWAP_FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;

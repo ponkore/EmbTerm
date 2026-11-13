@@ -46,7 +46,7 @@ embterm.el                          端末 1 つにつき:
 
 | 項目 | 内容 |
 |---|---|
-| OS | Windows（11 で使う）【確定】。**macOS は移植中**（T-124 で段階 0 = VT と PTY まで通った。T-125 以降で描画と module）。Linux は対象外【案】 |
+| OS | Windows（11 で使う）【確定】。**macOS は移植中**（T-124 で VT と PTY、T-125 で描画と窓まで通った。残りは module = T-126）。Linux は対象外【案】 |
 | Emacs | GNU 公式の Windows ビルド、31.1 以降（`x86_64-w64-mingw32`）【案: GenPreview と同じ】。ソース `C:/Apps/emacs/src/emacs-31.1/` |
 | フレーム | GUI フレームだけ。`emacs -nw` は対象外【案】 |
 | アーキテクチャ | x86_64。arm64 は後回し【案】 |
@@ -129,7 +129,7 @@ GenPreview の設計と HWND 埋め込みのプローブ（`~/.emacs.d/docs/embe
 
 ### 5.6 描画
 
-- 子 HWND に直接描く。Direct2D / DirectWrite + DXGI のフリップモデル【決定 T-008】。文字は色ごとに画面全体でまとめ、背景はセル 1 つを 1 画素にしたビットマップで描く。GPU デバイスは端末どうしで 1 つを共有する（T-067）
+- 子 HWND に直接描く。Direct2D / DirectWrite + DXGI のフリップモデル【決定 T-008】（**macOS は CAMetalLayer に Metal + CoreText のグリフアトラス**。決定 T-125）。文字は色ごとに画面全体でまとめ、背景はセル 1 つを 1 画素にしたビットマップで描く。GPU デバイスは端末どうしで 1 つを共有する（T-067）
 - フォントのフォールバック（日本語・Nerd Font の記号）【決定 T-033】: 主フォントに無い文字は `embterm-font-fallback-families` のファミリ →
   Windows（DirectWrite）のフォールバックの順に探す。**合字はしない**（セルごとに描く）
 - カーソル（ブロック・下線・縦棒、点滅）、選択範囲、IME の変換中の文字列の表示【案】
