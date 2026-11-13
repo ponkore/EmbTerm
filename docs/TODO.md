@@ -383,16 +383,20 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - 自動確認: `cargo test -p et-render` に**画素を読み戻して確かめる試験 4 本**。`cargo xtask test-screens` は `--headless` で動き、PNG も書くようになった
   - `--headless` を足した（窓を作らず、オフスクリーンに描いて PNG と画面のテキストを書く）。`--screenshot-scale` で拡大率を指定できる
   - 窓のキーは最小限（文字・Enter・Tab・Esc・Backspace・矢印・Ctrl・Option = Meta）。KKP / レガシーの作り分けは T-126
-- ⬜ **T-126**（段階 2）Emacs module: `EmacsView` への埋め込み・位置合わせ・キー・ポーリング・イベント
-  - 描画は T-125 の `et_render::Renderer`（`for_layer` で CAMetalLayer に描く）をそのまま使える。
-    **`nextDrawable` は垂直同期まで待つので、描画は Lisp のスレッドから外す**（requirements.md §6.1 のとおり）
-  - 窓の側（`window_mac.rs`）の最小限のキーの変換を、`et_session::keys` 相当（KKP / レガシーの作り分け、修飾キー）に差し替える
-  - Win32 のメッセージループと「端末ごとの UI スレッド」を「main スレッド（Lisp から直接呼ぶ）+ 描画スレッド」に置き換える。
-    `PostMessage` の列は不要になるが、**ビューのジオメトリは main スレッドだけで触る**
-  - フレーム → NSWindow の対応付け（macos-port.md §3.7）: タイトルを一時的に一意にして引き、`window-id` をキーに覚える
-  - マウスは案 X（子ビューで受け、`acceptsFirstResponder` NO でフォーカスは奪わない）
-  - `keys.rs` から win32-input-mode と `VkKeyScan` 系を外し、macOS のキー（Option = Meta、Command）を足す
+- ✅ **T-126**（段階 2）Emacs module: `EmacsView` への埋め込み・位置合わせ・キー・ポーリング・イベント（2026-11-13）→ **Emacs の中で端末が動いた。** docs/notes/t126-macos-module.md
+  - **子ビューではなく、`EmacsView` のレイヤー（`EmacsLayer`）に CAMetalLayer を足す。** レイヤーはマウスの当たり判定に出ないので、
+    クリック・ドラッグ・ホイールは何もしなくても Emacs のまま動く（T-121 §3.6 の案 X / 案 Y より良い第 3 の道）。
+    `EmacsLayer` は `geometryFlipped = true` なので `window-inside-pixel-edges` をそのまま渡せる
+  - **UI スレッドを作らない**（AppKit は main スレッドだけ）。Lisp からの頼みごとはその場で片づけ、**描画だけ別のスレッド**（T-125 の `nextDrawable` は垂直同期まで待つため）
+  - フレームの指定は「z 順の番号 : 幅 : 高さ」（`window-id` は NSWindow の番号ではない。T-121 §3.7）。`embterm--frame-key`
+  - キーは `et_session::keys_mac`（KKP / レガシー。win32-input-mode は要らない）。OS 共通の部分は `keys_common.rs` に切り出した
+  - フォーカスの報告は**アプリが mode 1004 を求めたときだけ**（求めていない `sh` に `^[[O` が出た）
+  - `notify_mac.rs`: Unix では `open_channel` の fd に `write(2)` するだけ（Windows の CRT の工夫が要らない）
+  - 自動確認 `test/smoke-mac.el`（`cargo xtask test-emacs`）: module の読み込み・起動・キー・日本語と eaw・画面の保存・分割で 2 ペイン・後始末の **9 項目 OK**
+  - **画面に実際に出ている見た目は未確認**（画面収録の許可が要る）。利用者が `emacs -Q -l test/smoke-mac.el` で見るのが残り
 - ⬜ **T-127**（段階 3）IME・マウス・選択 / コピー・Kitty graphics・OSC・通知・シェル統合
+  - T-126 で置いていったもの: マウス（クリック・ドラッグ・ホイール・アプリへの報告）、copy モード、リンク（OSC 8）、
+    カーソルと文字の点滅、プロンプト間の移動（OSC 133）、クリップボードの読み取り、画像
   - **IME**: 端末のバッファでは `ns-put-working-text`（`ns-insert-working-text` / `ns-echo-working-text`、変数 `ns-working-text`）を奪い、
     変換中の文字列を module に渡して端末のカーソル位置に自前で描く。候補ウィンドウの位置は `-[EmacsView firstRectForCharacterRange:]` 次第で、
     ポイントの移動か method swizzling のどちらか（macos-port.md §5-2）

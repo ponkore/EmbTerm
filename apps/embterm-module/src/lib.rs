@@ -11,12 +11,19 @@
 //!   user-ptr の `Drop` は自分で `catch_unwind` する（T-031。term.rs）
 //! - **`SetProcessDpiAwareness` 系は呼ばない**（Emacs のプロセスの設定を変えてしまう）
 //!
-//! **Emacs module（子 HWND）は今のところ Windows だけ**（T-124）。ほかの OS ではクレートごと空にしてある
-//! （`cargo test --workspace` を通すため）。macOS 版は T-126（NSView の埋め込み）。
+//! **OS で中身が違う**（T-126）: Windows は端末ごとの UI スレッドと子 HWND（[`term`]）、
+//! macOS は Emacs のビューのレイヤーに重ねる CAMetalLayer と描画スレッド（`term_mac`）。
+//! Lisp から見える関数（ここ）は同じ。
 
-#![cfg(windows)]
-
+#[cfg(windows)]
 mod notify;
+#[cfg(target_os = "macos")]
+#[path = "notify_mac.rs"]
+mod notify;
+#[cfg(windows)]
+mod term;
+#[cfg(target_os = "macos")]
+#[path = "term_mac.rs"]
 mod term;
 
 use std::cell::RefCell;
@@ -186,7 +193,11 @@ fn parse_env_change(e: &str) -> std::result::Result<(std::ffi::OsString, Option<
 /// ペインが無ければ作り、フレームが変わったら付け替え、子 HWND が消えていれば作り直す
 #[defun]
 fn place(term: &RefCell<Term>, pane: i64, window_id_: String, x: i64, y: i64, w: i64, h: i64) -> Result<()> {
+    // Windows は親フレームの HWND、macOS は「z 順の番号 : フレームの幅 : 高さ」（T-126）
+    #[cfg(windows)]
     let parent = window_id(&window_id_)?;
+    #[cfg(not(windows))]
+    let parent = window_id_;
     term.borrow().request(Request::Place { pane, parent, x: x as i32, y: y as i32, w: w as i32, h: h as i32 });
     Ok(())
 }
@@ -477,7 +488,12 @@ fn perf(term: &RefCell<Term>, reset: Value<'_>) -> Result<Option<String>> {
 /// いま生きている GPU デバイスの数（プロセス全体。T-054 / T-067 の確認用）
 #[defun]
 fn gpu_devices() -> Result<i64> {
-    Ok(et_render::live_devices() as i64)
+    // macOS は Metal のデバイスをプロセスで 1 つ分け合う（数えていない。T-126）
+    #[cfg(windows)]
+    let n = et_render::live_devices() as i64;
+    #[cfg(not(windows))]
+    let n = 1;
+    Ok(n)
 }
 
 /// Emacs を終えるとき（`kill-emacs-hook'）に全部の端末を閉じる（T-076）。**最大 GRACE-MS + 300 ミリ秒待つ。**
@@ -663,12 +679,16 @@ fn key_protocol<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
     let t = term.borrow();
     let Some(s) = t.shared().session() else { return ().into_lisp(env) };
     let term = s.lock();
+    let flags = term.kitty_keyboard_flags() as i64;
+    // macOS には win32-input-mode が無い（ConPTY のためのもの。T-126）
+    #[cfg(windows)]
     let proto = match s.key_protocol(&term) {
         et_session::keys::KeyProtocol::Kitty => "kitty",
         et_session::keys::KeyProtocol::Win32 => "win32",
         et_session::keys::KeyProtocol::Legacy => "legacy",
     };
-    let flags = term.kitty_keyboard_flags() as i64;
+    #[cfg(not(windows))]
+    let proto = if flags != 0 { "kitty" } else { "legacy" };
     drop(term);
     env.cons(proto, flags)
 }

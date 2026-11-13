@@ -218,6 +218,12 @@ struct EmacsTest {
     default: bool,
 }
 
+/// macOS の試験（T-126。Windows の試験は cmd / pwsh / ConPTY を前提にしているので動かない）
+#[cfg(not(windows))]
+const EMACS_TESTS: &[EmacsTest] =
+    &[EmacsTest { name: "smoke-mac", file: "smoke-mac.el", log: "target/t126/smoke-mac.log", default: true }];
+
+#[cfg(windows)]
 const EMACS_TESTS: &[EmacsTest] = &[
     EmacsTest { name: "smoke", file: "smoke.el", log: "target/t028/smoke.log", default: true },
     EmacsTest { name: "integration", file: "integration.el", log: "target/t034/integration.log", default: true },
@@ -261,7 +267,8 @@ fn git_bash() -> PathBuf {
 }
 
 fn emacs_exe() -> PathBuf {
-    std::env::var_os("EMACS").map_or_else(|| PathBuf::from("C:/Apps/emacs/emacs-31.1/bin/emacs.exe"), PathBuf::from)
+    let default = if cfg!(windows) { "C:/Apps/emacs/emacs-31.1/bin/emacs.exe" } else { "emacs" };
+    std::env::var_os("EMACS").map_or_else(|| PathBuf::from(default), PathBuf::from)
 }
 
 /// ログの失敗の行（`[時刻] NG 名前` と時間切れ）
@@ -300,7 +307,9 @@ pub fn test_emacs(args: &[String]) -> Result<(), String> {
             c
         } else {
             let mut c = Command::new(&emacs);
-            c.args(["-Q", "-l"]).arg(format!("test/{}", t.file));
+            // GUI の Emacs では default-directory が当てにならないので、絶対パスと EMBTERM_ROOT で渡す（T-124）
+            c.args(["-Q", "-l"]).arg(root.join("test").join(t.file));
+            c.env("EMBTERM_ROOT", &root);
             c
         };
         cmd.current_dir(&root).stdout(Stdio::null()).stderr(Stdio::null());

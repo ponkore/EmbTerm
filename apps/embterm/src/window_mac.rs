@@ -10,8 +10,9 @@
 use std::time::{Duration, Instant};
 
 use et_render::{Frame, Renderer, Theme};
+use et_session::keys_mac;
 use et_session::{CLOSE_TIMEOUT, Colors, Event, Session, SessionOptions};
-use et_vt::RenderState;
+use et_vt::{KeyEncoder, RenderState};
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2::rc::Retained;
 use objc2_app_kit::{
@@ -115,6 +116,7 @@ pub fn run(args: Args) -> Result<(), String> {
     // 4. 見回しながら描く
     let mut rs = RenderState::new().map_err(|e| e.to_string())?;
     let mut frame = Frame::default();
+    let mut encoder = KeyEncoder::new().map_err(|e| e.to_string())?;
     let start = Instant::now();
     let at = |ms: u32| start + Duration::from_millis(ms as u64);
     let mut inputs: Vec<(Instant, Vec<u8>)> = args
@@ -141,7 +143,7 @@ pub fn run(args: Args) -> Result<(), String> {
                 true,
             )
         } {
-            let handled = ev.r#type() == NSEventType::KeyDown && send_key(&session, &ev);
+            let handled = ev.r#type() == NSEventType::KeyDown && send_key(&session, &mut encoder, &ev);
             if !handled {
                 app.sendEvent(&ev);
             }
@@ -228,54 +230,53 @@ fn view_size_px(view: &Retained<NSView>, scale: f32) -> (u32, u32) {
     (((b.size.width as f32) * scale).round().max(1.0) as u32, ((b.size.height as f32) * scale).round().max(1.0) as u32)
 }
 
-/// キーを端末に送る（**最小限**。T-126 で `et_session::keys` 相当に置き換える）。送ったら true
-fn send_key(session: &Session, ev: &NSEvent) -> bool {
+/// キーを端末に送る（`et_session::keys_mac` に渡す。KKP とレガシーの作り分けはそちら。T-126）。送ったら true
+fn send_key(session: &Session, encoder: &mut KeyEncoder, ev: &NSEvent) -> bool {
     let mods = ev.modifierFlags();
     // Command は OS のメニューに渡す
     if mods.contains(NSEventModifierFlags::Command) {
         return false;
     }
-    let chars = ev.characters();
-    let Some(chars) = chars else { return false };
-    let s = chars.to_string();
-    if s.is_empty() {
+    let Some(base) = ev.charactersIgnoringModifiers() else { return false };
+    let base = base.to_string();
+    let Some(ch) = base.chars().next() else { return false };
+
+    // Emacs のキーの名前に合わせる（私用領域の符号は矢印などの特殊キー）
+    let name: String = match ch as u32 {
+        0xF700 => "up".into(),
+        0xF701 => "down".into(),
+        0xF702 => "left".into(),
+        0xF703 => "right".into(),
+        0xF728 => "delete".into(),
+        0xF729 => "home".into(),
+        0xF72B => "end".into(),
+        0xF72C => "prior".into(),
+        0xF72D => "next".into(),
+        n @ 0xF704..=0xF71B => format!("f{}", n - 0xF704 + 1),
+        0x0D | 0x03 => "return".into(),
+        0x09 => "tab".into(),
+        0x1B => "escape".into(),
+        0x7F | 0x08 => "backspace".into(),
+        _ => ch.to_string(),
+    };
+    let mut m = String::new();
+    if mods.contains(NSEventModifierFlags::Control) {
+        m.push('C');
+    }
+    if mods.contains(NSEventModifierFlags::Option) {
+        m.push('M');
+    }
+    // 文字は Shift を使って作られている（`A` など）ので、Shift は特殊キーのときだけ渡す
+    if mods.contains(NSEventModifierFlags::Shift) && name.chars().count() > 1 {
+        m.push('S');
+    }
+    let bytes = {
+        let term = session.lock();
+        keys_mac::encode_emacs_key(&term, encoder, &name, &m)
+    };
+    if bytes.is_empty() {
         return false;
     }
-    let alt = mods.contains(NSEventModifierFlags::Option);
-    let mut out: Vec<u8> = Vec::new();
-    for ch in s.chars() {
-        // 矢印・Home / End などは私用領域の符号で来る（NSUpArrowFunctionKey = 0xF700）
-        let seq: Option<&[u8]> = match ch as u32 {
-            0xF700 => Some(b"\x1b[A"),
-            0xF701 => Some(b"\x1b[B"),
-            0xF702 => Some(b"\x1b[D"),
-            0xF703 => Some(b"\x1b[C"),
-            0xF728 => Some(b"\x1b[3~"),
-            0xF729 => Some(b"\x1b[H"),
-            0xF72B => Some(b"\x1b[F"),
-            0xF72C => Some(b"\x1b[5~"),
-            0xF72D => Some(b"\x1b[6~"),
-            _ => None,
-        };
-        match seq {
-            Some(bytes) => out.extend_from_slice(bytes),
-            None => {
-                let ch = match ch {
-                    '\r' | '\n' => '\r',
-                    '\u{3}' => '\u{3}', // Ctrl+C はそのまま
-                    c => c,
-                };
-                if alt {
-                    out.push(0x1b); // Option を Meta として送る
-                }
-                let mut buf = [0u8; 4];
-                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-            }
-        }
-    }
-    if out.is_empty() {
-        return false;
-    }
-    session.write(&out);
+    session.write(&bytes);
     true
 }

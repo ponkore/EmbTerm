@@ -323,8 +323,7 @@ pub fn dist_exe() -> &'static str {
 fn build_release() -> Result<Vec<(PathBuf, &'static str)>, String> {
     let root = root();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    // module と描画はまだ Windows だけ（macOS は T-125 / T-126）
-    let packages: &[&str] = if cfg!(windows) { &["embterm", "embterm-module"] } else { &["embterm"] };
+    let packages: &[&str] = &["embterm", "embterm-module"];
     let mut build = Command::new(&cargo);
     build.args(["build", "--release"]);
     for p in packages {
@@ -333,8 +332,9 @@ fn build_release() -> Result<Vec<(PathBuf, &'static str)>, String> {
     run(build.current_dir(&root))?;
     let release = root.join("target/release");
     if !cfg!(windows) {
-        // T-124（段階 0）の配布物: ヘッドレスの embterm と embterm.el、シェル統合（bash）
+        // macOS の配布物（T-126）: module（.dylib）・embterm・embterm.el・シェル統合（bash）
         return Ok(vec![
+            (release.join("libembterm_module.dylib"), "embterm_module.dylib"),
             (release.join("embterm"), "embterm"),
             (root.join("lisp/embterm.el"), "embterm.el"),
             (root.join("etc/embterm.bash"), "etc/embterm.bash"),

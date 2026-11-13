@@ -46,7 +46,7 @@ embterm.el                          端末 1 つにつき:
 
 | 項目 | 内容 |
 |---|---|
-| OS | Windows（11 で使う）【確定】。**macOS は移植中**（T-124 で VT と PTY、T-125 で描画と窓まで通った。残りは module = T-126）。Linux は対象外【案】 |
+| OS | Windows（11 で使う）【確定】。**macOS は移植中**（T-124 で VT と PTY、T-125 で描画と窓、T-126 で Emacs の中の端末まで通った。残りは T-127 = IME・マウス・画像など）。Linux は対象外【案】 |
 | Emacs | GNU 公式の Windows ビルド、31.1 以降（`x86_64-w64-mingw32`）【案: GenPreview と同じ】。ソース `C:/Apps/emacs/src/emacs-31.1/` |
 | フレーム | GUI フレームだけ。`emacs -nw` は対象外【案】 |
 | アーキテクチャ | x86_64。arm64 は後回し【案】 |
@@ -82,6 +82,7 @@ GenPreview の設計と HWND 埋め込みのプローブ（`~/.emacs.d/docs/embe
 
 - `(frame-parameter nil 'window-id)` のフレームを親に `WS_CHILD` のウィンドウを作り、
   `window-inside-pixel-edges` に合わせて置く
+  （**macOS は `EmacsView` のレイヤーに CAMetalLayer を足す**。決定 T-126。マウスの当たり判定に出ないので Emacs の操作をそのまま残せる）
 - 位置の追従は `window-size-change-functions` と `window-buffer-change-functions` で行う
   （分割・リサイズ・タブ・バッファの切り替え）
 - 子ウィンドウは `HWND_BOTTOM` に置き、上げない（corfu などの子フレームを隠さないため）

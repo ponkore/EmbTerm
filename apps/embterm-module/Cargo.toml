@@ -14,8 +14,19 @@ crate-type = ["cdylib"]
 [dependencies]
 emacs.workspace = true
 et-vt = { path = "../../crates/vt" }
-et-render = { path = "../../crates/render" }
 et-session = { path = "../../crates/session" }
+
+[target.'cfg(windows)'.dependencies]
+et-render = { path = "../../crates/render" }
+
+# macOS: ビューのレイヤーに重ねる（T-126）
+[target.'cfg(target_os = "macos")'.dependencies]
+et-render = { path = "../../crates/render" }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSView", "NSResponder", "NSGraphics"] }
+objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer", "CALayer", "objc2-metal"] }
+objc2-core-foundation = "0.3"
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true

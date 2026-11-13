@@ -115,7 +115,9 @@ nil なら `embterm-module-directory'。見つからなければ OS 同梱の Co
   :type '(choice (const :tag "module と同じ" nil) directory))
 
 (defcustom embterm-shell
-  (if (executable-find "pwsh") '("pwsh" "-NoLogo") '("cmd.exe"))
+  (cond ((eq system-type 'windows-nt)
+         (if (executable-find "pwsh") '("pwsh" "-NoLogo") '("cmd.exe")))
+        (t (list (or (getenv "SHELL") "/bin/sh"))))
   "端末で起動するコマンド。文字列のリスト（コマンドと引数）か、1 本の文字列。"
   :type '(choice (repeat string) string))
 
@@ -127,7 +129,8 @@ nil なら `embterm-module-directory'。見つからなければ OS 同梱の Co
 
 (defcustom embterm-font-family nil
   "端末のフォント。ファミリ名か、ファミリ名のリスト（前から順に、見つかったものを使う）。
-どれも無ければ module の既定（HackGen Console NF → Cascadia Mono → Consolas）。nil なら既定だけ。
+どれも無ければ module の既定（Windows は HackGen Console NF → Cascadia Mono → Consolas、
+macOS は HackGen Console NF → Menlo → Monaco）。nil なら既定だけ。
 セルの大きさはこのフォントの `M' の幅と行の高さで決まるので、等幅のフォントを指定する。"
   :type '(choice (const :tag "既定" nil) string (repeat string))
   :set #'embterm--set-and-apply)
@@ -398,14 +401,18 @@ nil なら `embterm-poll-interval' ごとに読む（何もしていなくても
   "読み込んだ module の版。nil ならまだ読み込んでいない。")
 
 (defun embterm--native-path (dir)
-  "DIR を `\\' 区切りの絶対パスにする（Windows の API に渡すため）。ドライブレターは大文字にする。
-Emacs は `~' の展開や `directory-file-name' でドライブレターを小文字に落とすが、子の作業
-ディレクトリはほかの端末と同じ大文字にそろえる（プロンプトの表示や、claude が cwd を
-プロジェクトの名前に使うため）。"
-  (let ((path (subst-char-in-string ?/ ?\\ (directory-file-name (expand-file-name dir)))))
-    (if (string-match-p "\\`[a-z]:" path)
-        (concat (upcase (substring path 0 1)) (substring path 1))
-      path)))
+  "DIR を OS のネイティブな絶対パスにする。
+Windows では `\\' 区切りにし、ドライブレターを大文字にする（Emacs は `~' の展開や
+`directory-file-name' で小文字に落とすが、子の作業ディレクトリはほかの端末と同じ大文字に
+そろえる。プロンプトの表示や、claude が cwd をプロジェクトの名前に使うため）。
+Windows 以外はそのまま。"
+  (let ((path (directory-file-name (expand-file-name dir))))
+    (if (not (eq system-type 'windows-nt))
+        path
+      (let ((path (subst-char-in-string ?/ ?\\ path)))
+        (if (string-match-p "\\`[a-z]:" path)
+            (concat (upcase (substring path 0 1)) (substring path 1))
+          path)))))
 
 (defun embterm--load-module ()
   "module を読み込む（一度だけ）。
@@ -413,18 +420,21 @@ Emacs は module をアンロードできず、読み込み中の DLL はロッ�
 名前に入れて一時ディレクトリにコピーしてから読む（GenPreview と同じ）。こうすれば元の DLL を
 ビルドし直して上書きできる。conpty.dll と OpenConsole.exe は元の場所のものを使う。"
   (unless embterm--module-loaded
-    (unless (and (eq system-type 'windows-nt) module-file-suffix)
-      (user-error "embterm: Windows の、module に対応した Emacs が要ります"))
-    (let ((src (expand-file-name "embterm_module.dll" embterm-module-directory)))
+    (unless (and (memq system-type '(windows-nt darwin)) module-file-suffix)
+      (user-error "embterm: Windows か macOS の、module に対応した Emacs が要ります"))
+    (let* ((name (concat "embterm_module" module-file-suffix))
+           (src (expand-file-name name embterm-module-directory)))
       (unless (file-exists-p src)
         (user-error "embterm: module が見つかりません: %s（`embterm-module-directory' を設定してください）" src))
       (let* ((attrs (file-attributes src))
              (stamp (format "%s-%d"
                             (format-time-string "%Y%m%d%H%M%S" (file-attribute-modification-time attrs))
                             (file-attribute-size attrs)))
-             (copy (expand-file-name (format "embterm_module-%s.dll" stamp) temporary-file-directory)))
+             (copy (expand-file-name (format "embterm_module-%s%s" stamp module-file-suffix)
+                                     temporary-file-directory)))
         ;; 以前の版のコピーを片付ける（読み込み中のものは消せないので無視する）
-        (dolist (old (directory-files temporary-file-directory t "\\`embterm_module-.*\\.dll\\'"))
+        (dolist (old (directory-files temporary-file-directory t
+                                      (format "\\`embterm_module-.*%s\\'" (regexp-quote module-file-suffix))))
           (unless (equal old copy)
             (ignore-errors (delete-file old))))
         (unless (file-exists-p copy)
@@ -842,10 +852,21 @@ tr-ime advanced が無い（フックの変数が無い）ときは何もしな�
   "番号 ID のペイン。"
   (seq-find (lambda (p) (eql (embterm--pane-id p) id)) embterm--panes))
 
+(defun embterm--frame-key (frame)
+  "FRAME を module に伝えるための文字列。
+Windows はフレームの HWND（`window-id\=')。macOS は `window-id\=' が NSWindow の番号ではないので
+（docs/research/macos-port.md §3.7）、\"z 順の番号:幅:高さ\" にする。module は z 順と大きさで
+`EmacsView\=' を引く。"
+  (if (eq system-type 'windows-nt)
+      (frame-parameter frame 'window-id)
+    (let* ((z (and (fboundp 'ns-frame-list-z-order) (ns-frame-list-z-order)))
+           (idx (or (seq-position z frame) 0)))
+      (format "%d:%d:%d" idx (frame-pixel-width frame) (frame-pixel-height frame)))))
+
 (defun embterm--place-pane (pane)
   "ペイン PANE を、そのウィンドウの本文の位置に置く（同じ位置なら送らない）。"
   (let* ((win (embterm--pane-window pane))
-         (id (frame-parameter (window-frame win) 'window-id))
+         (id (embterm--frame-key (window-frame win)))
          (edges (window-inside-pixel-edges win))
          (key (list id edges)))
     (unless (equal key (embterm--pane-placed pane))

@@ -15,10 +15,14 @@
 //! - OSC 52 / 9 / 777 / 9;4（T-039）は [`Event`] に中身を載せて知らせる。クリップボードの書き込み・読み取りを
 //!   許すかは [`Session::set_clipboard_policy`]（読みのスレッドで、ロックを持ったまま判断するので `AtomicBool`）
 
-/// キーの変換は Windows の仮想キー・スキャンコードに作り込んである（T-069）。
-/// macOS 版は T-126（段階 2）で作る
+/// キーの変換のうち OS に依らない部分（T-126）
+pub mod keys_common;
+/// キーの変換は Windows の仮想キー・スキャンコードに作り込んである（T-069）
 #[cfg(windows)]
 pub mod keys;
+/// macOS のキーの変換（Emacs のキーの名前から。T-126）
+#[cfg(target_os = "macos")]
+pub mod keys_mac;
 pub mod perf;
 
 use std::ffi::OsString;
