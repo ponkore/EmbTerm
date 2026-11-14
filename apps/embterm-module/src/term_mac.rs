@@ -34,7 +34,7 @@ use et_vt::{KeyEncoder, RenderState, Rgb, Scroll};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplication, NSView, NSWindow};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_quartz_core::{CALayer, CAMetalLayer};
+use objc2_quartz_core::{CALayer, CAMetalLayer, CATransaction};
 
 use crate::log;
 
@@ -178,6 +178,8 @@ pub struct DebugInfo {
     pub animation_playing: bool,
     pub images_converted: u64,
     pub images_pending: usize,
+    /// 選んでいるペインのレイヤーで今動いているアニメーションの数（T-132。0 でないと置き場所がぬるっと動く）
+    pub layer_animations: usize,
 }
 
 /// Lisp に渡す知らせ
@@ -722,29 +724,34 @@ impl MacApp {
             }
         }
         let Some(pane) = self.pane(id) else { return };
-        // 親が違えば付け替える（別のフレームへ移った）
-        let same_host = pane.host.as_ref().is_some_and(|v| *v == host);
-        if !same_host {
-            pane.layer.removeFromSuperlayer();
-            if let Some(layer) = host.layer() {
-                layer.addSublayer(&pane.layer);
-                log(&format!(
-                    "ペイン {id} を {} のレイヤー（{}、{}x{}、geometryFlipped {}）に足した。置き場所 {x},{y} {w}x{h}",
-                    host.class().name().to_string_lossy(),
-                    layer.class().name().to_string_lossy(),
-                    layer.bounds().size.width,
-                    layer.bounds().size.height,
-                    layer.isGeometryFlipped(),
-                ));
-            } else {
-                log(&format!("ペイン {id}: 親のビューにレイヤーがありません（layer-backed でない？）"));
+        {
+            // 置き場所はアニメーション無しで即時に変える（T-132）。ミニバッファが伸び縮みするたび
+            // 端末がぬるっと動くと、反応が鈍く見える
+            let _no_anim = NoAnimation::begin();
+            // 親が違えば付け替える（別のフレームへ移った）
+            let same_host = pane.host.as_ref().is_some_and(|v| *v == host);
+            if !same_host {
+                pane.layer.removeFromSuperlayer();
+                if let Some(layer) = host.layer() {
+                    layer.addSublayer(&pane.layer);
+                    log(&format!(
+                        "ペイン {id} を {} のレイヤー（{}、{}x{}、geometryFlipped {}）に足した。置き場所 {x},{y} {w}x{h}",
+                        host.class().name().to_string_lossy(),
+                        layer.class().name().to_string_lossy(),
+                        layer.bounds().size.width,
+                        layer.bounds().size.height,
+                        layer.isGeometryFlipped(),
+                    ));
+                } else {
+                    log(&format!("ペイン {id}: 親のビューにレイヤーがありません（layer-backed でない？）"));
+                }
+                pane.host = Some(host.clone());
             }
-            pane.host = Some(host.clone());
+            let rect = CGRect::new(CGPoint::new(x as f64, y as f64), CGSize::new(w as f64, h as f64));
+            pane.layer.setFrame(rect);
+            pane.layer.setHidden(false);
+            pane.layer.setContentsScale(scale as f64);
         }
-        let rect = CGRect::new(CGPoint::new(x as f64, y as f64), CGSize::new(w as f64, h as f64));
-        pane.layer.setFrame(rect);
-        pane.layer.setHidden(false);
-        pane.layer.setContentsScale(scale as f64);
 
         let host_ptr = Retained::as_ptr(&host) as usize;
         let px = ((w as f32 * scale).round() as u32, (h as f32 * scale).round() as u32);
@@ -806,9 +813,13 @@ impl MacApp {
     }
 
     fn hide(&mut self, id: Option<i64>) {
-        for p in self.panes.iter_mut().filter(|p| id.is_none_or(|i| i == p.id)) {
-            p.layer.setHidden(true);
-            p.render.lock().unwrap_or_else(|e| e.into_inner()).visible = false;
+        {
+            // 隠すのもアニメーション無しで（既定では 0.25 秒かけて薄くなる。T-132）
+            let _no_anim = NoAnimation::begin();
+            for p in self.panes.iter_mut().filter(|p| id.is_none_or(|i| i == p.id)) {
+                p.layer.setHidden(true);
+                p.render.lock().unwrap_or_else(|e| e.into_inner()).visible = false;
+            }
         }
         self.publish_panes();
     }
@@ -816,7 +827,10 @@ impl MacApp {
     fn remove(&mut self, id: i64) {
         if let Some(i) = self.panes.iter().position(|p| p.id == id) {
             let p = self.panes.remove(i);
-            p.layer.removeFromSuperlayer();
+            {
+                let _no_anim = NoAnimation::begin();
+                p.layer.removeFromSuperlayer();
+            }
             if self.selected == Some(id) {
                 self.selected = self.panes.first().map(|p| p.id);
                 crate::ime_mac::clear();
@@ -1337,6 +1351,8 @@ impl MacApp {
             ..DebugInfo::default()
         };
         if let Some(p) = self.current_pane() {
+            // 暗黙のアニメーションが入っていないか（T-132）。入っていると置き場所が 0.25 秒かけて動く
+            info.layer_animations = p.layer.animationKeys().map(|k| k.len()).unwrap_or(0);
             let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
             info.cell = r.renderer.cell_size();
             info.padding = r.renderer.padding();
@@ -1505,6 +1521,29 @@ fn on_session_event(shared: &Arc<Shared>, e: SessionEvent) {
 fn screen_row(term: &et_vt::Terminal, rows: u16, scroll: i64, cy: u16) -> u32 {
     let total = term.total_rows() as i64;
     (total - rows as i64 - scroll + cy as i64).clamp(0, total.saturating_sub(1)).max(0) as u32
+}
+
+/// 暗黙のアニメーションを止めている間だけ生きる番人（T-132）。
+///
+/// ペインの `CAMetalLayer` は `EmacsView` のレイヤーに**自分で足した子レイヤー**なので、
+/// `setFrame:` / `setHidden:` が既定で 0.25 秒のアニメーションになる（ビューの裏付けの
+/// レイヤーなら AppKit が止めてくれるが、子レイヤーは止まらない）。ウィンドウの大きさが
+/// 変わるたびに端末がぬるっと動いて遅く見えるので、明示的なトランザクションでアクションを切る。
+/// 落ちても `Drop` で必ず commit する
+struct NoAnimation;
+
+impl NoAnimation {
+    fn begin() -> Self {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        NoAnimation
+    }
+}
+
+impl Drop for NoAnimation {
+    fn drop(&mut self) {
+        CATransaction::commit();
+    }
 }
 
 /// ペインのスクロール位置に合わせた描き方

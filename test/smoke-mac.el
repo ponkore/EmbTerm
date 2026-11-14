@@ -160,6 +160,21 @@
            (embterm-module-set-preedit embterm--term ""))
          (smoke-next))
        (lambda ()
+         ;; 8c. 置き場所が変わってもアニメーションが入らない（T-132）。
+         ;; ウィンドウの高さを変えた直後に見る（暗黙のアニメーションは 0.25 秒で終わるので後では分からない）
+         (with-current-buffer smoke-buf
+           (let ((win (get-buffer-window smoke-buf)))
+             (window-resize win -3)
+             (redisplay t)
+             (let ((i (embterm-module-debug-info embterm--term)))
+               (smoke-log "高さを変えた直後の debug-info: %S" i)
+               (smoke-check (eql 0 (plist-get i :layer-animations))
+                            "置き場所を変えてもレイヤーのアニメーションが入らない（%s 本）"
+                            (plist-get i :layer-animations)))
+             (window-resize win 3)
+             (redisplay t)))
+         (smoke-next))
+       (lambda ()
          ;; 9. 分割して 2 つ目のペイン
          (with-current-buffer smoke-buf
            (split-window-below)

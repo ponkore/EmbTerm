@@ -241,6 +241,8 @@ pub struct DebugInfo {
     /// 別のスレッドでの画像の変換が終わった回数と、変換中の数（T-105）
     pub images_converted: u64,
     pub images_pending: usize,
+    /// macOS だけ（CALayer のアニメーションの数。T-132）
+    pub layer_animations: usize,
 }
 
 /// Lisp に渡す知らせ

@@ -353,7 +353,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 
 この一式は複数の節（描画・PTY・入力・IME・試験・配布）にまたがるので、§8 ではなくここにまとめる。
 前提と見積もりは [research/macos-port.md](research/macos-port.md)。段階 0〜4（T-124〜T-128）と
-残り（T-129 / T-130 / T-131）は 2026-11-13 に通した。**ghostel との比べ（T-122）の結論**: mac の ghostel も Emacs を固めないので、
+残り（T-129 / T-130 / T-131）は 2026-11-13 に通した。普段使って出てきたものは T-132 以降（2026-11-14）。**ghostel との比べ（T-122）の結論**: mac の ghostel も Emacs を固めないので、
 この移植の値打ちは「速さ」より**文字幅とグリフの自由（eaw・全角・画像）と、Windows と同じ設定を使えること**（docs/notes/t128-macos-perf.md §2）。
 
 - ✅ **T-122**（判断）mac の ghostel の遅さの出どころを測る（2026-11-13。T-128 と一緒に）→ **mac の ghostel は Emacs を固めない。**
@@ -446,3 +446,14 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - 配布物に入れる（`xtask`。macOS は zsh / bash、Windows は ps1 / bash / zsh / lua）。確認は `zsh -i` に流して `cat -v`
     （133;A/B/C/D・終了コード 42・OSC 7 の `%` と空白・引数の逃がし方・zim + starship との共存）。
     **端末の中での実動は未確認**（利用者が `~/.zshrc` に 1 行足して使うところから）
+
+### 普段使ってみて出てきたもの（T-129 の「残り: 普段の設定での使い心地」）
+
+**共通の原因**: どれも画面に出るものなのに、自動確認が**撮るとき専用の描画経路**
+（`embterm-module-screenshot`。毎回必ず描く）しか見ていなかったため、T-127 / T-129 ではすり抜けた。
+
+- ✅ **T-132** ウィンドウの大きさが変わると端末がぬるっと動く（2026-11-14。[notes/t132-macos-animation.md](notes/t132-macos-animation.md)）→ **`CAMetalLayer` は自分で足した子レイヤーなので
+  `setFrame:` が既定で 0.25 秒のアニメーションになる**（ビューの裏付けのレイヤーなら AppKit が止めるが、子レイヤーは止まらない）。
+  置き場所・表示を変える間だけ `CATransaction` でアクションを切る（`NoAnimation`。`place` / `hide` / `remove`）
+  - 確認: `embterm-module-debug-info` の `:layer-animations`（`-[CALayer animationKeys]` の数）を高さを変えた**直後**に読む。
+    直す前は 1 本（`position`）、直した後は 0。`test/smoke-mac.el`。**直す前に戻すと落ちることも確かめた**
