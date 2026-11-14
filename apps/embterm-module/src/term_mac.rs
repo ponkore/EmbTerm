@@ -178,6 +178,8 @@ pub struct DebugInfo {
     pub animation_playing: bool,
     pub images_converted: u64,
     pub images_pending: usize,
+    /// 端末のバッファにフォーカスがあるか（T-134）
+    pub focused: bool,
     /// IME の変換中の文字列（T-133）
     pub preedit: Option<String>,
     /// 選んでいるペインのレイヤーで今動いているアニメーションの数（T-132。0 でないと置き場所がぬるっと動く）
@@ -323,6 +325,8 @@ pub struct Shared {
     dirty: Mutex<bool>,
     /// 端末の中身が変わっていなくても描き直す（フォーカス・変換中の文字列・配置・テーマなど。T-133）
     redraw: AtomicBool,
+    /// 端末のバッファにフォーカスがある（描画スレッドが読む。T-134）
+    focused: AtomicBool,
     wake: Condvar,
     stop: AtomicBool,
     /// 描いた回数（デバッグ用）
@@ -555,6 +559,7 @@ pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
         panes: Mutex::new(Vec::new()),
         dirty: Mutex::new(false),
         redraw: AtomicBool::new(false),
+        focused: AtomicBool::new(false),
         wake: Condvar::new(),
         stop: AtomicBool::new(false),
         draws: AtomicU64::new(0),
@@ -647,6 +652,8 @@ impl MacApp {
             }
             Request::Focus(on) => {
                 self.focused = on;
+                // 描画スレッドが読む（フォーカスが無ければカーソルを枠だけで描く。T-134）
+                self.shared.focused.store(on, Ordering::Release);
                 if !on {
                     crate::ime_mac::clear();
                 }
@@ -1336,7 +1343,9 @@ impl MacApp {
         frame.update(&mut rs);
         let mut r = p.render.lock().unwrap_or_else(|e| e.into_inner());
         let view = pane_view(&r, &frame);
-        match r.renderer.draw_view(&frame, &view, true, Some(path)) {
+        // 画面に出ているものと同じになるよう、フォーカスの有無も写す（T-134）
+        let focused = self.focused && r.selected;
+        match r.renderer.draw_view(&frame, &view, focused, Some(path)) {
             Ok(()) => {
                 drop(r);
                 self.shared.emit(Event::Screenshot(path.display().to_string()));
@@ -1371,6 +1380,7 @@ impl MacApp {
             animation_playing: self.shared.animation.load(Ordering::Relaxed) > 0,
             ..DebugInfo::default()
         };
+        info.focused = self.focused;
         if let Some(p) = self.current_pane() {
             // 暗黙のアニメーションが入っていないか（T-132）。入っていると置き場所が 0.25 秒かけて動く
             info.layer_animations = p.layer.animationKeys().map(|k| k.len()).unwrap_or(0);
@@ -1643,6 +1653,7 @@ fn render_main(shared: Arc<Shared>) {
         let changed = frame.update(&mut rs);
         // 端末の中身が変わっていなくても描き直す指示（フォーカス・変換中の文字列・配置など。T-133）
         let forced = shared.redraw.swap(false, Ordering::AcqRel);
+        let focused_term = shared.focused.load(Ordering::Acquire);
         // 点滅（カーソル・SGR 5）。見えているものがあるときだけ切り替える
         let blinking = frame.cursor.blinking && frame.cursor.visible;
         let text_blink = frame.has_blink();
@@ -1671,9 +1682,12 @@ fn render_main(shared: Arc<Shared>) {
             if !r.visible {
                 continue;
             }
+            // フォーカスは「端末のバッファを選んでいるウィンドウのペイン」だけ（Windows の term.rs と同じ）
+            let focused = focused_term && r.selected;
             let mut view = pane_view(&r, &frame);
             view.blink_off = text_blink && !blink_on;
-            view.show_cursor = view.show_cursor && (!blinking || blink_on);
+            // 点滅で消えるのはフォーカスがあるときだけ。フォーカスが無いカーソルは枠だけで出しっぱなし
+            view.show_cursor = view.show_cursor && (!blinking || blink_on || !focused);
             if r.selected || cursor.is_none() {
                 cursor = cursor_rect(&r, &frame, &view);
                 // IME の候補ウィンドウの位置（ビュー座標 = ペインの置き場所 + カーソル。T-129）
@@ -1687,7 +1701,7 @@ fn render_main(shared: Arc<Shared>) {
                     )
                 });
             }
-            if let Err(e) = r.renderer.draw_view(&frame, &view, true, None) {
+            if let Err(e) = r.renderer.draw_view(&frame, &view, focused, None) {
                 log(&format!("描画に失敗: {e}"));
             }
         }

@@ -241,6 +241,8 @@ pub struct DebugInfo {
     /// 別のスレッドでの画像の変換が終わった回数と、変換中の数（T-105）
     pub images_converted: u64,
     pub images_pending: usize,
+    /// 端末のバッファにフォーカスがあるか（T-134）
+    pub focused: bool,
     /// IME の変換中の文字列（macOS だけ。Windows では IME 自身のウィンドウが描く。T-133）
     pub preedit: Option<String>,
     /// macOS だけ（CALayer のアニメーションの数。T-132）
@@ -1198,6 +1200,7 @@ impl App {
                     animation_ticks: self.animation_ticks,
                     animation_playing: self.animation_next.is_some(),
                     images_converted: self.image_ready_count,
+                    focused: self.focused,
                     ..Default::default()
                 };
                 for p in &self.panes {

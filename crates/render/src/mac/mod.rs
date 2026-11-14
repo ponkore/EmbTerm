@@ -818,6 +818,32 @@ mod tests {
     }
 
     #[test]
+    fn フォーカスが無いカーソルは枠だけ() {
+        let frame_no = frame_with("ab", Rgb { r: 0xd0, g: 0xd0, b: 0xd0 }, Rgb { r: 0x10, g: 0x10, b: 0x10 });
+        let mut frame = frame_no.clone();
+        frame.cursor = Cursor { pos: Some((2, 0)), wide_tail: false, visible: true, blinking: false, shape: CursorShape::Block };
+        let mut r = renderer_for(&frame);
+        let theme = r.theme().clone();
+        let (w, _h, data) = r.read_pixels(&frame, &FrameView::whole(&frame), false).expect("描画");
+        let (cw, ch) = r.cell_size();
+        let pad = r.padding();
+        let cur = (theme.cursor.r, theme.cursor.g, theme.cursor.b);
+        // 真ん中は塗られていない（フレームの背景のまま）
+        let p = px(&data, w, pad + cw * 2 + cw / 2, pad + ch / 2);
+        assert_eq!(p, (0x10, 0x10, 0x10), "フォーカスが無いのに塗りつぶしている: {p:?}");
+        // 上下左右の枠はカーソルの色
+        for (x, y, where_) in [
+            (pad + cw * 2 + cw / 2, pad, "上"),
+            (pad + cw * 2 + cw / 2, pad + ch - 1, "下"),
+            (pad + cw * 2, pad + ch / 2, "左"),
+            (pad + cw * 2 + cw - 1, pad + ch / 2, "右"),
+        ] {
+            let p = px(&data, w, x, y);
+            assert_eq!(p, cur, "{where_}の枠が描かれていない: {p:?}");
+        }
+    }
+
+    #[test]
     fn 変換中の文字列はカーソルが隠れていても描く() {
         // アプリがカーソルを隠している（DECTCEM off。claude のような TUI）状態
         let mut frame = frame_with("abcdef", Rgb { r: 0xd0, g: 0xd0, b: 0xd0 }, Rgb { r: 0x10, g: 0x10, b: 0x10 });

@@ -470,7 +470,7 @@ fn link_at(term: &RefCell<Term>, pane: i64, x: i64, y: i64) -> Result<Option<Str
 /// 描画とカーソルの状態の plist（UI スレッドに頼んで最大 2 秒待つ。デバッグ・自動確認用）。
 /// `(:blink-timer :blink-on :blink-ticks :full-draws :partial-draws :cursor-shape :cursor-blinking :cursor-visible
 /// :foreground :background :palette1 :cell :padding :text-blink-timer :text-blink-on :animation-ticks :animation-playing
-/// :images-converted :images-pending :hover :preedit :layer-animations)`
+/// :images-converted :images-pending :hover :focused :preedit :layer-animations)`
 #[defun]
 fn debug_info<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -521,6 +521,8 @@ fn debug_info<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
             Some((r, s, e)) => env.list((r as i64, s as i64, e as i64))?,
             None => ().into_lisp(env)?,
         },
+        env.intern(":focused")?,
+        b(i.focused)?,
         env.intern(":preedit")?,
         i.preedit.clone().into_lisp(env)?,
         env.intern(":layer-animations")?,

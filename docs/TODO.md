@@ -472,3 +472,10 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - 確認: `:preedit` を `debug-info` に足し、`set-preedit` と **advice の経路（`ns-put-working-text`）**の両方で届くこと・
     `:full-draws` が増えることを見る。レンダラの単体テストで「カーソルが隠れていても描く」を画素で確かめる。
     **実機の IME での見え方は利用者が確認（2026-11-14 に OK）**。`embterm-module-set-log` を入れるとログに変換中の文字列が出る
+- ✅ **T-134** フォーカスが無いときもカーソルが塗りつぶしのまま（2026-11-14。[notes/t134-macos-cursor-focus.md](notes/t134-macos-cursor-focus.md)）→ **描画スレッドが `focused` に定数 `true` を渡していた。**
+  レンダラは最初から枠だけで描ける（`CursorShape::Block if focused => {}`）が、描画スレッドから `MacApp` のフォーカスを見る道が無かった。
+  `Shared.focused`（`AtomicBool`）を足し、ペインごとに `focused && r.selected` を渡す（Windows の `term.rs` と同じ判断）。
+  **フォーカスが無いときは点滅させない**（枠だけを出しっぱなし）。`embterm-module-screenshot` も同じ判断で撮る
+  - 単体の `embterm`（デバッグ用の exe）はそのまま塗りつぶし（`test-screens` の PNG が走らせ方で変わらないように）
+  - 確認: `:focused` を `debug-info` に足して `test/smoke-mac.el` で出入りを見る +
+    レンダラの単体テストで「真ん中は塗られていない・上下左右の枠はカーソルの色」を画素で確かめる

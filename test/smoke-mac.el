@@ -187,6 +187,30 @@
                         "ns-unput-working-text で変換中の文字列が消えた"))
          (smoke-next))
        (lambda ()
+         ;; 8b. フォーカスが無いときのカーソル（T-134）
+         (with-current-buffer smoke-buf
+           (setq smoke-draws (plist-get (embterm-module-debug-info embterm--term) :full-draws))
+           (embterm-module-focus embterm--term nil))
+         (smoke-next))
+       (lambda ()
+         (with-current-buffer smoke-buf
+           (let ((i (embterm-module-debug-info embterm--term)))
+             (smoke-check (null (plist-get i :focused)) "フォーカスが外れたことが module に届いた")
+             (smoke-check (> (plist-get i :full-draws) smoke-draws)
+                          "フォーカスが外れただけで描き直した（%d → %d）"
+                          smoke-draws (plist-get i :full-draws)))
+           (embterm-module-screenshot embterm--term (smoke-out "unfocused.png") nil))
+         (smoke-next))
+       (lambda ()
+         (smoke-check (file-exists-p (smoke-out "unfocused.png")) "フォーカスが無い画面を保存した（カーソルは枠だけ）")
+         ;; 戻すのと確かめるのは同じ手順で（ポーリングの `embterm--update-focus' が、
+         ;; 自動確認の Emacs には OS のフォーカスが無いので nil に戻してしまう）
+         (with-current-buffer smoke-buf
+           (embterm-module-focus embterm--term t)
+           (smoke-check (plist-get (embterm-module-debug-info embterm--term) :focused)
+                        "フォーカスが戻ったことが module に届いた"))
+         (smoke-next))
+       (lambda ()
          ;; 8c. 置き場所が変わってもアニメーションが入らない（T-132）。
          ;; ウィンドウの高さを変えた直後に見る（暗黙のアニメーションは 0.25 秒で終わるので後では分からない）
          (with-current-buffer smoke-buf
