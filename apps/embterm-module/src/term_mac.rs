@@ -980,23 +980,77 @@ impl MacApp {
 
     fn scroll(&mut self, id: i64, amount: ScrollAmount) {
         let Some(s) = self.shared.session() else { return };
-        let rows = self.panes.iter().find(|p| p.id == id).map(|p| {
+        // ホイールをアプリへ報告するのに、ペインの大きさ（デバイス画素）も要る
+        let info = self.panes.iter().find(|p| p.id == id).map(|p| {
             let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
-            r.rows as i64
+            (r.rows as i64, r.scroll, r.size, r.renderer.cell_size(), r.renderer.padding())
         });
-        let Some(rows) = rows else { return };
-        let mouse = { s.lock().mouse_tracking() };
+        let Some((rows, pane_scroll, size, cell, pad)) = info else { return };
         let delta = match amount {
             ScrollAmount::Lines(n) => -n,
             ScrollAmount::Pages(n) => -n * (rows - 1).max(1),
             ScrollAmount::Wheel(n) => {
                 // ノッチは**上（遡る）が正**（`embterm-wheel` が `wheel-up` に 1 を渡す。Windows の `wheel_pane` と同じ向き）。
                 // `Lines` / `Pages` は「行の番号を動かす向き」なので符号が逆になる（T-135）
-                if mouse {
-                    // アプリがマウスを見ているなら、スクロールはアプリへ送る（T-038 と同じ考え）
-                    let seq: &[u8] = if n > 0 { b"\x1b[A" } else { b"\x1b[B" };
-                    for _ in 0..n.unsigned_abs().min(10) {
-                        s.write(seq);
+                let (tracking, alt, alt_scroll) = {
+                    let t = s.lock();
+                    (t.mouse_tracking(), t.is_alternate_screen(), t.mode(et_vt::Mode::MOUSE_ALTERNATE_SCROLL))
+                };
+                // アプリがマウスを見ていて、そのペインがいちばん下を追っているなら、**ホイールはアプリへ報告する**
+                // （claude / vim / yazi は自分でスクロールする。Windows の `should_report` と同じ判断。T-136）。
+                // Shift を押している間は Lisp が `lines` に振り替えるので、ここには来ない
+                if tracking && pane_scroll == 0 {
+                    let button = if n > 0 { et_vt::MouseButton::WheelUp } else { et_vt::MouseButton::WheelDown };
+                    let geometry = et_vt::MouseGeometry {
+                        screen_width: size.0,
+                        screen_height: size.1,
+                        cell_width: cell.0,
+                        cell_height: cell.1,
+                        padding: pad,
+                    };
+                    // Lisp から来るホイールには位置が無いので、ペインの真ん中に来たものとして扱う（Windows と同じ）
+                    let center = (size.0 as f32 / 2.0, size.1 as f32 / 2.0);
+                    let bytes = {
+                        let term = s.lock();
+                        let mut bytes = Vec::new();
+                        if let Some(enc) = self.mouse.as_mut() {
+                            for _ in 0..n.unsigned_abs().min(10) {
+                                let b = enc.encode(
+                                    &term,
+                                    geometry,
+                                    et_vt::MouseAction::Press,
+                                    Some(button),
+                                    false,
+                                    center,
+                                    keys_mac::parse_mods(""),
+                                );
+                                bytes.extend(b);
+                            }
+                        }
+                        bytes
+                    };
+                    if !bytes.is_empty() {
+                        s.write(&bytes);
+                    }
+                    return;
+                }
+                if alt {
+                    // 代替画面にスクロールバックは無い。DEC 1007（alternate scroll。既定で有効）なら矢印にする（Ghostty と同じ）
+                    if alt_scroll {
+                        let key = if n > 0 { et_vt::Key::Up } else { et_vt::Key::Down };
+                        let bytes = {
+                            let term = s.lock();
+                            let mut bytes = Vec::new();
+                            if let Some(enc) = self.encoder.as_mut() {
+                                for _ in 0..(n.unsigned_abs() as i64 * WHEEL_LINES).min(30) {
+                                    bytes.extend(enc.encode(&term, key, et_vt::Mods::default()));
+                                }
+                            }
+                            bytes
+                        };
+                        if !bytes.is_empty() {
+                            s.write(&bytes);
+                        }
                     }
                     return;
                 }

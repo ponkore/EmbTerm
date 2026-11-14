@@ -47,6 +47,7 @@
 
 (defvar sb-buf nil)
 (defvar sb-steps nil)
+(defvar sb-got-before nil)
 
 (defun sb-state ()
   (when (buffer-live-p sb-buf)
@@ -88,6 +89,13 @@
 
 (defun sb-line-visible-p (text n)
   (string-match-p (format "^%d$" n) text))
+
+(defun sb-last-got (text)
+  "子プロセス（test/mouse-child.py）が最後に受け取ったものの行。"
+  (car (last (seq-filter (lambda (l) (string-prefix-p "GOT " l)) (split-string text "\n")))))
+
+(defun sb-child (mode)
+  (sb-send (format "python3 %s %s\r" (expand-file-name "test/mouse-child.py" sb-root) mode)))
 
 (defun sb-next ()
   (if-let* ((step (pop sb-steps)))
@@ -180,6 +188,51 @@
          (sb-next))
        (lambda ()
          (sb-check (sb-line-visible-p (sb-text) 200) "wheel-down でいちばん下へ戻った")
+         ;; 7. マウスを見るアプリ（claude / vim / yazi）の上では、ホイールは**アプリへ報告**する（T-136）
+         (sb-child "mouse")
+         (sb-next))
+       (lambda ()
+         (sb-check (string-match-p "READY mouse" (sb-text)) "マウスを見る子プロセスが動いた")
+         (sb-wheel 'wheel-up 1)
+         (sb-next))
+       (lambda ()
+         (let ((text (sb-text)))
+           (sb-log "wheel-up をアプリへ: %s" (sb-last-got text))
+           ;; SGR（DEC 1006）のホイールは上が 64、下が 65
+           (sb-check (string-match-p "GOT .*\\[<64;" text) "wheel-up がマウスの報告としてアプリに届いた"))
+         (sb-wheel 'wheel-down 1)
+         (sb-next))
+       (lambda ()
+         (let ((text (sb-text)))
+           (sb-log "wheel-down をアプリへ: %s" (sb-last-got text))
+           (sb-check (string-match-p "GOT .*\\[<65;" text) "wheel-down がマウスの報告としてアプリに届いた")
+           ;; 8. Shift を足すと、アプリに見せずに端末のスクロールバックを動かす
+           (setq sb-got-before (sb-last-got text)))
+         (sb-wheel 'S-wheel-up 1)
+         (sb-next))
+       (lambda ()
+         (sb-scroll "bottom")
+         (sb-next))
+       (lambda ()
+         (let ((text (sb-text)))
+           (sb-check (equal (sb-last-got text) sb-got-before)
+                     "S-wheel-up はアプリに届かない（最後の報告が %s のまま）" sb-got-before))
+         ;; 子プロセスを終わらせて、代替画面のアプリを動かす
+         (sb-send "q")
+         (sb-next))
+       (lambda ()
+         (sb-child "alt")
+         (sb-next))
+       (lambda ()
+         (sb-check (string-match-p "READY alt" (sb-text)) "代替画面の子プロセスが動いた")
+         (sb-wheel 'wheel-up 1)
+         (sb-next))
+       (lambda ()
+         (let ((text (sb-text)))
+           (sb-log "代替画面でのホイール: %s" (sb-last-got text))
+           ;; 代替画面にスクロールバックは無いので、DEC 1007 で矢印にする（Ghostty と同じ）
+           (sb-check (string-match-p "GOT .*x1b\\[A" text) "代替画面では wheel-up が上矢印になってアプリに届いた"))
+         (sb-send "q")
          (sb-next))
        (lambda ()
          (with-current-buffer sb-buf
@@ -189,4 +242,4 @@
          (sb-next))))
 
 (run-at-time 1.0 nil #'sb-next)
-(run-at-time 60 nil (lambda () (sb-check nil "時間切れ") (sb-finish)))
+(run-at-time 90 nil (lambda () (sb-check nil "時間切れ") (sb-finish)))

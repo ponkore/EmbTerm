@@ -1618,9 +1618,16 @@ KKP を求めたアプリが戻さずに終わり、そのアプリの子孫が�
           (message "embterm: 選択をコピーしました（%d 文字）" (length text)))
       (embterm--send-event))))
 
+(defconst embterm-wheel-lines 3
+  "ホイール 1 ノッチで動かす行数（module の `WHEEL_LINES' と同じ値）。
+Shift を押しながらのホイールを、module に頼らず行数で送るのに使う。")
+
 (defun embterm-wheel (event)
   "ホイールを Emacs が受けたとき（`MouseWheelRouting' の設定による）、そのウィンドウのペインを動かす。
-マウスの報告が有効なアプリならアプリへ送る（module が判断する）。"
+マウスの報告が有効なアプリならアプリへ送る（module が判断する）。
+
+\\[embterm-wheel] に Shift を足したときは**アプリに見せず**、端末のスクロールバックを動かす
+（端末の慣習。claude や vim のようにマウスを見るアプリの上でも遡れるように）。"
   (interactive "e")
   (let* ((win (posn-window (event-start event)))
          (buf (if (windowp win) (window-buffer win) (current-buffer))))
@@ -1629,9 +1636,14 @@ KKP を求めたアプリが戻さずに終わり、そのアプリの子孫が�
         (let ((pane (or (embterm--pane-of win) (car embterm--panes)))
               (notches (pcase (event-basic-type event)
                          ((or 'wheel-up 'mouse-4) 1)
-                         ((or 'wheel-down 'mouse-5) -1))))
+                         ((or 'wheel-down 'mouse-5) -1)))
+              (shift (memq 'shift (event-modifiers event))))
           (when (and pane notches)
-            (embterm-module-scroll embterm--term (embterm--pane-id pane) "wheel" notches)))))))
+            (if shift
+                ;; `lines' は行の番号を動かす向きなので、遡るほうが負
+                (embterm-module-scroll embterm--term (embterm--pane-id pane) "lines"
+                                       (- (* notches embterm-wheel-lines)))
+              (embterm-module-scroll embterm--term (embterm--pane-id pane) "wheel" notches))))))))
 
 (defun embterm--scroll-selected (kind &optional n)
   "選んでいるウィンドウのペインをスクロールする。KIND と N は `embterm-module-scroll' と同じ。"

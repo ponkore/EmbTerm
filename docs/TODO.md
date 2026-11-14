@@ -488,3 +488,11 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - 確認: `test/scrollback-mac.el`（`cargo xtask test-emacs scrollback`）の 15 項目。
     描けているかは **PNG を gzip した大きさ**で見る（`png.rs` は圧縮しない PNG なのでファイルの大きさは中身によらず同じ）。
     いちばん上まで遡った画面が **3,413 → 15,673**（空の画面は 5,047）
+- ✅ **T-136** macOS で claude のホイールが入力履歴の切り替えになる（2026-11-15。[notes/t136-macos-wheel-report.md](notes/t136-macos-wheel-report.md)）→ **マウスを見るアプリにホイールを「上下の矢印」として送っていた。**
+  claude の TUI は**プロジェクトの中では代替画面（1049）に入り、マウスの報告（1000 / 1002 / 1003 / 1006）を立てる**（PTY で実測）ので、
+  矢印は「入力履歴を遡る」キーになってしまう。Windows と同じ 3 分岐に直した: ①報告が有効（Shift なし）で下を追っていれば**マウスの報告**、
+  ②代替画面 + 報告なし + DEC 1007 なら矢印（`KeyEncoder` で作る。生の `\x1b[A` は DECCKM を無視する）、③それ以外は端末のスクロールバック
+  - **`S-wheel-up` / `S-wheel-down` はアプリに見せず端末のスクロールバックを動かす**（端末の慣習）。Emacs から来るホイールには修飾キーが
+    乗らないので、`embterm-wheel`（Lisp）が `wheel` ではなく `lines` に振り替える。Windows でも同じに効く
+  - 確認: `test/mouse-child.py`（受け取ったバイト列を画面に出す子プロセス）を足し、`scrollback` の試験を 21 項目に。
+    `wheel-up` → `\x1b[<64;43;13M`、代替画面 → `\x1b[A` ×3、`S-wheel-up` → 届かない。`mouse_tracking()` が真になるモードも単体テストに

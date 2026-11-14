@@ -1218,3 +1218,24 @@ fn two_line_prompt_marks() {
     let rows: Vec<RowPrompt> = (0..5).map(|y| t.row_prompt(y)).collect();
     assert_eq!(rows, vec![RowPrompt::Prompt, RowPrompt::Continuation, RowPrompt::None, RowPrompt::Prompt, RowPrompt::Continuation]);
 }
+
+#[test]
+fn mouse_tracking_only_for_report_modes() {
+    // ホイールをアプリへ報告するかの判断に使う（T-136）。報告のモード（X10 / 通常 / ボタン / すべて）
+    // だけが真で、SGR の符号化（1006）やフォーカス（1004）・括弧付き貼り付け（2004）では真にならない
+    for seq in ["\x1b[?1000h", "\x1b[?1002h", "\x1b[?1003h"] {
+        let (mut t, _) = terminal(40, 10);
+        t.vt_write(seq.as_bytes());
+        assert!(t.mouse_tracking(), "{seq:?}");
+    }
+    for seq in ["", "\x1b[?1006h", "\x1b[?1004h", "\x1b[?2004h", "\x1b[?1049h"] {
+        let (mut t, _) = terminal(40, 10);
+        t.vt_write(seq.as_bytes());
+        assert!(!t.mouse_tracking(), "{seq:?}");
+    }
+    // 代替画面に入ってもスクロールバックは見えない（ホイールは矢印にする側へ回す）
+    let (mut t, _) = terminal(40, 10);
+    t.vt_write(b"\x1b[?1049h");
+    assert!(t.is_alternate_screen());
+    assert!(t.mode(Mode::MOUSE_ALTERNATE_SCROLL), "DEC 1007 は既定で有効");
+}
