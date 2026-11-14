@@ -479,3 +479,12 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - 単体の `embterm`（デバッグ用の exe）はそのまま塗りつぶし（`test-screens` の PNG が走らせ方で変わらないように）
   - 確認: `:focused` を `debug-info` に足して `test/smoke-mac.el` で出入りを見る +
     レンダラの単体テストで「真ん中は塗られていない・上下左右の枠はカーソルの色」を画素で確かめる
+- ✅ **T-135** macOS で遡ってもスクロールバックが出ない（2026-11-14。[notes/t135-macos-scrollback.md](notes/t135-macos-scrollback.md)）→ **描画スレッドがビューポートの行しか写していなかった。**
+  遡っているペインはフレームの外（負の行）を指すので空きになり、深く遡ると画面が真っ暗になる。
+  Windows の `refresh` と同じく、**ビューポートをペインの位置へ動かして別の render state に写す**（`capture_scrolled`）。
+  写し直すのは条件が変わったときだけ、フレームへの写しはロックの外で。`embterm-module-screenshot` も同じ経路に揃えた
+  - **ついでに 2 つ**: `pane_text`（`embterm-module-pane-text`）が画面の座標の 0 行目（= スクロールバックのいちばん古い行）を返していた。
+    ホイールの向きが逆だった（`embterm-wheel` は上が正。Windows の `wheel_pane` と同じ向きに直した）
+  - 確認: `test/scrollback-mac.el`（`cargo xtask test-emacs scrollback`）の 15 項目。
+    描けているかは **PNG を gzip した大きさ**で見る（`png.rs` は圧縮しない PNG なのでファイルの大きさは中身によらず同じ）。
+    いちばん上まで遡った画面が **3,413 → 15,673**（空の画面は 5,047）

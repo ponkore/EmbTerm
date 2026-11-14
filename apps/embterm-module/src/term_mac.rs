@@ -990,15 +990,17 @@ impl MacApp {
             ScrollAmount::Lines(n) => -n,
             ScrollAmount::Pages(n) => -n * (rows - 1).max(1),
             ScrollAmount::Wheel(n) => {
+                // ノッチは**上（遡る）が正**（`embterm-wheel` が `wheel-up` に 1 を渡す。Windows の `wheel_pane` と同じ向き）。
+                // `Lines` / `Pages` は「行の番号を動かす向き」なので符号が逆になる（T-135）
                 if mouse {
                     // アプリがマウスを見ているなら、スクロールはアプリへ送る（T-038 と同じ考え）
-                    let seq: &[u8] = if n < 0 { b"\x1b[A" } else { b"\x1b[B" };
+                    let seq: &[u8] = if n > 0 { b"\x1b[A" } else { b"\x1b[B" };
                     for _ in 0..n.unsigned_abs().min(10) {
                         s.write(seq);
                     }
                     return;
                 }
-                -(n as i64) * WHEEL_LINES
+                (n as i64) * WHEEL_LINES
             }
             ScrollAmount::Top => i64::MAX,
             ScrollAmount::Bottom => i64::MIN,
@@ -1327,22 +1329,39 @@ impl MacApp {
             self.shared.emit(Event::Error("ペインがありません".into()));
             return;
         };
-        let mut rs = match RenderState::new() {
-            Ok(rs) => rs,
-            Err(e) => {
-                self.shared.emit(Event::Error(e.to_string()));
-                return;
-            }
+        let (scroll, cols, rows, hover) = {
+            let r = p.render.lock().unwrap_or_else(|e| e.into_inner());
+            (r.scroll, r.cols, r.rows, r.hover)
         };
         let mut frame = Frame::default();
-        {
-            let term = s.lock();
-            let _ = rs.update(&term);
-            frame.capture_images(&mut rs, &term);
-        }
-        frame.update(&mut rs);
+        // 遡っているペインは、描画スレッドと同じようにビューポートを動かして写す（T-135）
+        let back = {
+            let mut term = s.lock();
+            if scroll > 0 { capture_scrolled(&mut term, &mut frame, scroll, rows) } else { None }
+        };
+        let view = match back {
+            Some((mut rs, top)) => {
+                frame.update(&mut rs);
+                FrameView { top, cols, rows, show_cursor: false, cursor_row: false, hover, blink_off: false }
+            }
+            None => {
+                let mut rs = match RenderState::new() {
+                    Ok(rs) => rs,
+                    Err(e) => {
+                        self.shared.emit(Event::Error(e.to_string()));
+                        return;
+                    }
+                };
+                {
+                    let term = s.lock();
+                    let _ = rs.update(&term);
+                    frame.capture_images(&mut rs, &term);
+                }
+                frame.update(&mut rs);
+                pane_view(&p.render.lock().unwrap_or_else(|e| e.into_inner()), &frame)
+            }
+        };
         let mut r = p.render.lock().unwrap_or_else(|e| e.into_inner());
-        let view = pane_view(&r, &frame);
         // 画面に出ているものと同じになるよう、フォーカスの有無も写す（T-134）
         let focused = self.focused && r.selected;
         match r.renderer.draw_view(&frame, &view, focused, Some(path)) {
@@ -1365,10 +1384,11 @@ impl MacApp {
             (r.rows, r.scroll)
         };
         let term = s.lock();
-        let (_, trows) = term.size();
-        let first = -(scroll as i64);
-        let _ = trows;
-        term.text_rows(first.max(0) as u32, (first.max(0) as u32) + rows.saturating_sub(1) as u32, false)
+        // ペインのいちばん上の行（画面の座標 = スクロールバックを含む行番号。`screen_row` と同じ決め方。T-135）
+        let total = term.total_rows() as i64;
+        let first = (total - rows as i64 - scroll).max(0);
+        let last = (first + rows as i64 - 1).clamp(first, (total - 1).max(first));
+        term.text_rows(first as u32, last as u32, false)
     }
 
     fn debug_info(&self) -> DebugInfo {
@@ -1578,6 +1598,44 @@ impl Drop for NoAnimation {
     }
 }
 
+/// 遡っているペインに描くフレーム（T-135）
+struct ScrolledFrame {
+    frame: Frame,
+    /// ペインのいちばん上の行が `frame` の何行目か（負なら上に足りない分は空き）
+    top: i32,
+    /// 写したときの条件（遡っている行数・桁・行・端末の全部の行数）。変わらなければ写し直さない
+    key: (i64, u16, u16, i64),
+}
+
+/// 遡っているペインが見る行を写す（T-135）。**端末のロックを持っている間に呼ぶ。**
+///
+/// いちばん下を追うペインのフレームには**ビューポートの行しか入っていない**ので、遡っているペインは
+/// ビューポートをその位置へ動かして別に写す（Windows の [`crate::term`] の `refresh` と同じ）。
+/// 戻り値は写した render state と、「ペインのいちばん上の行がフレームの何行目か」
+fn capture_scrolled(term: &mut et_vt::Terminal, frame: &mut Frame, scroll: i64, rows: u16) -> Option<(RenderState, i32)> {
+    let total = term.total_rows() as i64;
+    let (_, trows) = term.size();
+    let active_top = (total - trows as i64).max(0);
+    // ペインのいちばん上の行（画面の座標）。`screen_row` と同じ決め方
+    let top = total - rows as i64 - scroll;
+    let v = top.clamp(0, active_top);
+    term.scroll_viewport(Scroll::Row(v as u64));
+    // ペインが端末より下まで見るなら、その分を余分に写す
+    let below = (top + rows as i64 - (v + trows as i64)).clamp(0, u16::MAX as i64) as u16;
+    let mut captured = None;
+    if let Ok(mut rs) = RenderState::new() {
+        let ready = below == 0 || rs.set_overscan(0, below).is_ok();
+        if ready && rs.update(term).is_ok() {
+            // 画像の画素は render state に無いので、ビューポートを動かしたこのときに写す（T-088）
+            frame.capture_images(&mut rs, term);
+            captured = Some(rs);
+        }
+    }
+    // ビューポートの決まりは「いちばん下」（読みのスレッドが動く前に戻す）
+    term.scroll_viewport(Scroll::Bottom);
+    captured.map(|rs| (rs, (top - v) as i32))
+}
+
 /// ペインのスクロール位置に合わせた描き方
 fn pane_view(r: &PaneRender, frame: &Frame) -> FrameView {
     FrameView {
@@ -1601,6 +1659,8 @@ fn render_main(shared: Arc<Shared>) {
         }
     };
     let mut frame = Frame::default();
+    // 遡っているペインのフレーム（ペインごと。T-135）
+    let mut scrolled: HashMap<i64, ScrolledFrame> = HashMap::new();
     // 点滅（カーソルと SGR 5）。見せている side と、最後に切り替えた時刻
     let mut blink_on = true;
     let mut blink_at = Instant::now();
@@ -1654,6 +1714,50 @@ fn render_main(shared: Arc<Shared>) {
         // 端末の中身が変わっていなくても描き直す指示（フォーカス・変換中の文字列・配置など。T-133）
         let forced = shared.redraw.swap(false, Ordering::AcqRel);
         let focused_term = shared.focused.load(Ordering::Acquire);
+        // 遡っているペインは、ビューポートをその位置へ動かして別に写す（T-135）。
+        // いちばん下を追うペインのフレーム（`frame`）にはビューポートの行しか入っていない
+        let mut want: Vec<(i64, i64, u16, u16)> = Vec::new();
+        for (id, render) in &panes {
+            let r = render.lock().unwrap_or_else(|e| e.into_inner());
+            if r.visible && r.scroll > 0 {
+                want.push((*id, r.scroll, r.cols, r.rows));
+            }
+        }
+        scrolled.retain(|id, _| want.iter().any(|(i, ..)| i == id));
+        let mut scrolled_changed = false;
+        if !want.is_empty() && hold.is_none() {
+            let mut captured: Vec<(i64, RenderState)> = Vec::new();
+            {
+                let mut term = session.lock();
+                let total = term.total_rows() as i64;
+                let (_, trows) = term.size();
+                let active_top = (total - trows as i64).max(0);
+                for (id, scroll, cols, rows) in &want {
+                    let key = (*scroll, *cols, *rows, total);
+                    // ペインに見える範囲がアクティブ領域にかかるときだけ、出力で中身が変わる
+                    let overlaps = total - *scroll > active_top;
+                    let need = match scrolled.get(id) {
+                        None => true,
+                        Some(s) => s.key != key || forced || (changed && overlaps),
+                    };
+                    if !need {
+                        continue;
+                    }
+                    let e = scrolled.entry(*id).or_insert_with(|| ScrolledFrame { frame: Frame::default(), top: 0, key });
+                    if let Some((rs2, top)) = capture_scrolled(&mut term, &mut e.frame, *scroll, *rows) {
+                        e.top = top;
+                        e.key = key;
+                        captured.push((*id, rs2));
+                    }
+                }
+            }
+            // フレームへの写しは端末のロックの外で（読みのスレッドを止めない）
+            for (id, mut rs2) in captured {
+                if let Some(e) = scrolled.get_mut(&id) {
+                    scrolled_changed |= e.frame.update(&mut rs2);
+                }
+            }
+        }
         // 点滅（カーソル・SGR 5）。見えているものがあるときだけ切り替える
         let blinking = frame.cursor.blinking && frame.cursor.visible;
         let text_blink = frame.has_blink();
@@ -1667,7 +1771,7 @@ fn render_main(shared: Arc<Shared>) {
             blink_on = true;
             blinked = true;
         }
-        if !changed && !blinked && !forced && animation_next.is_none() && hold.is_none() {
+        if !changed && !blinked && !forced && !scrolled_changed && animation_next.is_none() && hold.is_none() {
             // 点滅があるときは次の切り替えのために起こし直す
             if blinking || text_blink {
                 shared.mark_dirty();
@@ -1677,19 +1781,33 @@ fn render_main(shared: Arc<Shared>) {
         }
         let mut cursor = None;
         let mut ime: Option<(usize, objc2_core_foundation::CGRect)> = None;
-        for (_, render) in &panes {
+        for (id, render) in &panes {
             let mut r = render.lock().unwrap_or_else(|e| e.into_inner());
             if !r.visible {
                 continue;
             }
             // フォーカスは「端末のバッファを選んでいるウィンドウのペイン」だけ（Windows の term.rs と同じ）
             let focused = focused_term && r.selected;
-            let mut view = pane_view(&r, &frame);
+            // 遡っているペインは自分のフレームから描く（T-135）
+            let sf = if r.scroll > 0 { scrolled.get(id) } else { None };
+            let f = sf.map_or(&frame, |s| &s.frame);
+            let mut view = match sf {
+                Some(s) => FrameView {
+                    top: s.top,
+                    cols: r.cols,
+                    rows: r.rows,
+                    show_cursor: false,
+                    cursor_row: false,
+                    hover: r.hover,
+                    blink_off: false,
+                },
+                None => pane_view(&r, &frame),
+            };
             view.blink_off = text_blink && !blink_on;
             // 点滅で消えるのはフォーカスがあるときだけ。フォーカスが無いカーソルは枠だけで出しっぱなし
             view.show_cursor = view.show_cursor && (!blinking || blink_on || !focused);
             if r.selected || cursor.is_none() {
-                cursor = cursor_rect(&r, &frame, &view);
+                cursor = cursor_rect(&r, f, &view);
                 // IME の候補ウィンドウの位置（ビュー座標 = ペインの置き場所 + カーソル。T-129）
                 ime = cursor.filter(|_| r.selected || panes.len() == 1).map(|(x, y, w, h)| {
                     (
@@ -1701,7 +1819,7 @@ fn render_main(shared: Arc<Shared>) {
                     )
                 });
             }
-            if let Err(e) = r.renderer.draw_view(&frame, &view, focused, None) {
+            if let Err(e) = r.renderer.draw_view(f, &view, focused, None) {
                 log(&format!("描画に失敗: {e}"));
             }
         }
