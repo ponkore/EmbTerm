@@ -14,8 +14,11 @@ pub struct FrameView {
     pub cols: u16,
     /// ペインの行数
     pub rows: u16,
-    /// カーソルを描くか（スクロールバックを遡っているペインでは false）
+    /// カーソルを描くか（スクロールバックを遡っているペインでは false。点滅で消えている間も false）
     pub show_cursor: bool,
+    /// このペインがカーソルの行を写しているか（遡っていない）。点滅やアプリの civis では false にしない。
+    /// IME の変換中の文字列は、カーソルが見えていなくてもこの位置に描く（T-133）
+    pub cursor_row: bool,
     /// マウスの下にあるハイパーリンク（OSC 8）の範囲。ペインの (行, 始めの桁, 終わりの桁（含まない）)。下線を引く（T-101）
     pub hover: Option<(u16, u16, u16)>,
     /// 点滅（SGR 5）の文字を消している（点滅の「消え」の側。T-112）
@@ -25,6 +28,6 @@ pub struct FrameView {
 impl FrameView {
     /// フレーム全体を描く（embterm.exe 用）
     pub fn whole(frame: &Frame) -> Self {
-        Self { top: 0, cols: frame.cols, rows: frame.rows, show_cursor: true, hover: None, blink_off: false }
+        Self { top: 0, cols: frame.cols, rows: frame.rows, show_cursor: true, cursor_row: true, hover: None, blink_off: false }
     }
 }

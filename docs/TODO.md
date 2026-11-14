@@ -457,3 +457,18 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   置き場所・表示を変える間だけ `CATransaction` でアクションを切る（`NoAnimation`。`place` / `hide` / `remove`）
   - 確認: `embterm-module-debug-info` の `:layer-animations`（`-[CALayer animationKeys]` の数）を高さを変えた**直後**に読む。
     直す前は 1 本（`position`）、直した後は 0。`test/smoke-mac.el`。**直す前に戻すと落ちることも確かめた**
+- ✅ **T-133** 日本語の変換中の文字列（preedit）が画面に出ない（2026-11-14。[notes/t133-macos-preedit.md](notes/t133-macos-preedit.md)）→ **原因は 2 つ重なっていた。**
+  - ① 描画スレッドは `Frame::update` の「端末の中身が変わったか」で描くかを決めていた。変換中の文字列は端末の中身ではないので、
+    `mark_dirty` で起こしても描かずに寝ていた（点滅していれば最大 600 ms 遅れて半分の時間だけ出る、点滅していなければ永遠に出ない）。
+    → `Shared.redraw` + `mark_redraw()`「中身が変わっていなくても描く」を足し、**Lisp からの頼みごとはすべてこちらにした**。
+    同じ理屈で**フォーカス・置き場所・テーマ・リンクの下線・スクロール位置**も直った（出力の追従と点滅は今までどおり `mark_dirty`）
+  - ② 置く場所を `layout::cursor_cell`（`visible` を見る）で引いていたので、**アプリがカーソルを隠していると（`civis`。claude のような TUI）
+    まったく出ず**、点滅の「消え」の側でも消えた。→ `cursor_cell_any` と `FrameView.cursor_row` を足し、
+    遡っているペイン以外では必ず置く。**IME の候補ウィンドウの位置（T-129）も同じく `visible` と点滅を見ないようにした**
+  - 本物の IME からの経路は調べて裏付けた: `setMarkedText:` → キーの列 → **`special-event-map` の `ns-put-working-text`** →
+    `Fcommand_execute`（シンボル経由なので advice が効く）。`emulation-mode-map-alists` の端末のキーマップとは別の層なので邪魔されない
+  - advice が端末に渡すのは **semi-char モードの間だけ**（copy モードは端末を隠して Emacs のバッファを見ているので Emacs に描かせる）。
+    フォーカスが外れたら変換中の文字列を消す（IME が `ns-unput-working-text` を送らずに終わる場合の備え）
+  - 確認: `:preedit` を `debug-info` に足し、`set-preedit` と **advice の経路（`ns-put-working-text`）**の両方で届くこと・
+    `:full-draws` が増えることを見る。レンダラの単体テストで「カーソルが隠れていても描く」を画素で確かめる。
+    **実機の IME での見え方は利用者が確認（2026-11-14 に OK）**。`embterm-module-set-log` を入れるとログに変換中の文字列が出る

@@ -48,6 +48,7 @@
 (setq embterm-poll-interval 0.05)
 
 (defvar smoke-buf nil)
+(defvar smoke-draws 0 "手順の前に数えた描画の回数（T-133 / T-134 の確かめに使う）。")
 (defvar smoke-ime-before nil)
 (defvar smoke-steps nil)
 
@@ -138,26 +139,52 @@
                             "マウスのドラッグで選択できた"))))
          (smoke-next))
        (lambda ()
-         ;; 8. IME の変換中の文字列（T-127）
+         ;; 8. IME の変換中の文字列（T-127 / T-133）
          (with-current-buffer smoke-buf
-           (embterm-module-clear-selection embterm--term)
+           (embterm-module-clear-selection embterm--term))
+         (smoke-next))
+       (lambda ()
+         ;; 描画の回数を数えるのは、前の手順の描き直しが終わってから（この手順では
+         ;; 変換中の文字列しか変わらない。ポーリングは変わったときだけ module に頼む）
+         (with-current-buffer smoke-buf
+           (setq smoke-draws (plist-get (embterm-module-debug-info embterm--term) :full-draws))
            (embterm-module-set-preedit embterm--term "にほんご")
            (redisplay t))
          (smoke-next))
        (lambda ()
          (with-current-buffer smoke-buf
+           (let ((i (embterm-module-debug-info embterm--term)))
+             (smoke-log "preedit の debug-info: %S" i)
+             (smoke-check (equal (plist-get i :preedit) "にほんご") "変換中の文字列が端末に届いた")
+             ;; 端末の中身が変わっていなくても描き直す（これが無いと点滅待ちになる）
+             (smoke-check (> (plist-get i :full-draws) smoke-draws)
+                          "変換中の文字列だけで描き直した（%d → %d）"
+                          smoke-draws (plist-get i :full-draws)))
            (embterm-module-screenshot embterm--term (smoke-out "preedit.png") nil))
          (smoke-next))
        (lambda ()
          (smoke-check (file-exists-p (smoke-out "preedit.png")) "変換中の文字列を描いた画面を保存した")
+         ;; 本物の IME は `ns-put-working-text' を special-event-map 経由で呼ぶ（nsterm.m が
+         ;; setMarkedText: でキーの列に積む）。その束縛が生きているかと、advice の経路を確かめる
+         (smoke-check (eq (lookup-key special-event-map [ns-put-working-text]) 'ns-put-working-text)
+                      "ns-put-working-text が special-event-map にある（IME の経路）")
          (with-current-buffer smoke-buf
-           ;; NS の経路（advice）も通ることを確かめる
+           (embterm-module-set-preedit embterm--term "")
            (setq-local ns-working-text "かんじ")
            (if (fboundp 'ns-put-working-text)
-               (progn (ns-put-working-text)
-                      (smoke-check t "ns-put-working-text を端末が受け取った"))
-             (smoke-check nil "ns-put-working-text が無い"))
-           (embterm-module-set-preedit embterm--term ""))
+               (ns-put-working-text)
+             (smoke-check nil "ns-put-working-text が無い")))
+         (smoke-next))
+       (lambda ()
+         (with-current-buffer smoke-buf
+           (smoke-check (equal (plist-get (embterm-module-debug-info embterm--term) :preedit) "かんじ")
+                        "ns-put-working-text の advice で変換中の文字列が端末に届いた")
+           (ns-unput-working-text))
+         (smoke-next))
+       (lambda ()
+         (with-current-buffer smoke-buf
+           (smoke-check (null (plist-get (embterm-module-debug-info embterm--term) :preedit))
+                        "ns-unput-working-text で変換中の文字列が消えた"))
          (smoke-next))
        (lambda ()
          ;; 8c. 置き場所が変わってもアニメーションが入らない（T-132）。

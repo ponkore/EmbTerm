@@ -178,6 +178,8 @@ pub struct DebugInfo {
     pub animation_playing: bool,
     pub images_converted: u64,
     pub images_pending: usize,
+    /// IME の変換中の文字列（T-133）
+    pub preedit: Option<String>,
     /// 選んでいるペインのレイヤーで今動いているアニメーションの数（T-132。0 でないと置き場所がぬるっと動く）
     pub layer_animations: usize,
 }
@@ -319,6 +321,8 @@ pub struct Shared {
     panes: Mutex<Vec<(i64, Arc<Mutex<PaneRender>>)>>,
     /// 描き直しが要る
     dirty: Mutex<bool>,
+    /// 端末の中身が変わっていなくても描き直す（フォーカス・変換中の文字列・配置・テーマなど。T-133）
+    redraw: AtomicBool,
     wake: Condvar,
     stop: AtomicBool,
     /// 描いた回数（デバッグ用）
@@ -354,6 +358,16 @@ impl Shared {
     fn mark_dirty(&self) {
         *self.dirty.lock().unwrap_or_else(|e| e.into_inner()) = true;
         self.wake.notify_all();
+    }
+
+    /// 端末の中身が変わっていなくても描き直させる（T-133）。
+    ///
+    /// 描画スレッドは render state の dirty で描くかを決めるので、端末の外の見た目
+    /// （フォーカス・IME の変換中の文字列・ペインの置き場所・テーマ・スクロール位置・
+    /// マウスの下のリンク）が変わっただけでは描き直さない。それらはこちらで知らせる
+    fn mark_redraw(&self) {
+        self.redraw.store(true, Ordering::Release);
+        self.mark_dirty();
     }
 
     pub fn state(&self) -> State {
@@ -540,6 +554,7 @@ pub fn spawn(opts: SpawnOptions) -> Result<Term, String> {
         copy: Mutex::new(None),
         panes: Mutex::new(Vec::new()),
         dirty: Mutex::new(false),
+        redraw: AtomicBool::new(false),
         wake: Condvar::new(),
         stop: AtomicBool::new(false),
         draws: AtomicU64::new(0),
@@ -617,7 +632,7 @@ impl MacApp {
                     let _ = s.lock().set_selection(None);
                 }
                 *self.shared.selection.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                self.shared.mark_dirty();
+                self.shared.mark_redraw();
             }
             Request::SetScrollback(lines) => {
                 self.scrollback = lines;
@@ -643,7 +658,7 @@ impl MacApp {
                 {
                     s.write(if on { b"\x1b[I" } else { b"\x1b[O" });
                 }
-                self.shared.mark_dirty();
+                self.shared.mark_redraw();
             }
             Request::SetColors(c) => {
                 self.colors = c;
@@ -658,7 +673,7 @@ impl MacApp {
                 if let Some(s) = self.shared.session() {
                     s.set_cursor_default(c);
                 }
-                self.shared.mark_dirty();
+                self.shared.mark_redraw();
             }
             Request::SetClipboardPolicy { write, read } => {
                 self.clipboard = (write, read);
@@ -782,7 +797,7 @@ impl MacApp {
             self.resize_session(cols, rows);
         }
         self.publish_panes();
-        self.shared.mark_dirty();
+        self.shared.mark_redraw();
     }
 
     fn create_pane(&mut self, id: i64, scale: f32) -> Result<MacPane, String> {
@@ -859,7 +874,7 @@ impl MacApp {
             };
             self.resize_session(c, r);
         }
-        self.shared.mark_dirty();
+        self.shared.mark_redraw();
     }
 
     /// 子プロセスを起こす
@@ -904,7 +919,7 @@ impl MacApp {
             s.rows = rows;
             s.cell = cell;
         });
-        self.shared.mark_dirty();
+        self.shared.mark_redraw();
     }
 
     fn resize_session(&self, cols: u16, rows: u16) {
@@ -1003,7 +1018,7 @@ impl MacApp {
                     p.render.lock().unwrap_or_else(|e| e.into_inner()).scroll = (max - row).clamp(0, max);
                 }
                 self.publish_panes();
-                self.shared.mark_dirty();
+                self.shared.mark_redraw();
                 return;
             }
         };
@@ -1022,7 +1037,7 @@ impl MacApp {
             };
         }
         self.publish_panes();
-        self.shared.mark_dirty();
+        self.shared.mark_redraw();
     }
 
     fn pane_scroll(&self, id: i64) -> i64 {
@@ -1122,7 +1137,7 @@ impl MacApp {
             self.shared.emit(Event::Hover(uri));
         }
         if changed {
-            self.shared.mark_dirty();
+            self.shared.mark_redraw();
         }
     }
 
@@ -1238,19 +1253,25 @@ impl MacApp {
                 }
             }
             // 負の位置は「ペインから外れた」の印（Lisp がそう送る）
-            MouseKind::Move => self.update_hover(id, (x >= 0 && y >= 0).then_some((x, y))),
+            MouseKind::Move => {
+                // 下線の範囲が変わったときだけ `update_hover` が描き直しを頼む。
+                // マウスが動いている間ずっと描き直さないため（T-133）
+                self.update_hover(id, (x >= 0 && y >= 0).then_some((x, y)));
+                return;
+            }
         }
-        self.shared.mark_dirty();
+        self.shared.mark_redraw();
     }
 
     /// IME の変換中の文字列（T-127）
     fn set_preedit(&mut self, text: String) {
         let text = if text.is_empty() { None } else { Some(text) };
+        log(&format!("IME の変換中の文字列: {text:?}"));
         for p in &self.panes {
             let mut r = p.render.lock().unwrap_or_else(|e| e.into_inner());
             r.renderer.set_preedit(text.clone());
         }
-        self.shared.mark_dirty();
+        self.shared.mark_redraw();
     }
 
     fn set_font(&mut self, spec: FontSpec) {
@@ -1273,14 +1294,14 @@ impl MacApp {
             };
             self.resize_session(c, r);
         }
-        self.shared.mark_dirty();
+        self.shared.mark_redraw();
     }
 
     fn apply_theme(&self) {
         for p in &self.panes {
             p.render.lock().unwrap_or_else(|e| e.into_inner()).renderer.set_theme(self.theme.clone());
         }
-        self.shared.mark_dirty();
+        self.shared.mark_redraw();
     }
 
     fn font_name(&self) -> String {
@@ -1357,6 +1378,7 @@ impl MacApp {
             info.cell = r.renderer.cell_size();
             info.padding = r.renderer.padding();
             info.hover = r.hover;
+            info.preedit = r.renderer.preedit().map(str::to_string);
         }
         let (visible, blinking, shape) = *self.shared.cursor_dbg.lock().unwrap_or_else(|e| e.into_inner());
         info.cursor_visible = visible;
@@ -1553,6 +1575,7 @@ fn pane_view(r: &PaneRender, frame: &Frame) -> FrameView {
         cols: r.cols,
         rows: r.rows,
         show_cursor: r.scroll == 0,
+        cursor_row: r.scroll == 0,
         hover: r.hover,
         blink_off: false,
     }
@@ -1618,6 +1641,8 @@ fn render_main(shared: Arc<Shared>) {
             hold
         };
         let changed = frame.update(&mut rs);
+        // 端末の中身が変わっていなくても描き直す指示（フォーカス・変換中の文字列・配置など。T-133）
+        let forced = shared.redraw.swap(false, Ordering::AcqRel);
         // 点滅（カーソル・SGR 5）。見えているものがあるときだけ切り替える
         let blinking = frame.cursor.blinking && frame.cursor.visible;
         let text_blink = frame.has_blink();
@@ -1631,7 +1656,7 @@ fn render_main(shared: Arc<Shared>) {
             blink_on = true;
             blinked = true;
         }
-        if !changed && !blinked && animation_next.is_none() && hold.is_none() {
+        if !changed && !blinked && !forced && animation_next.is_none() && hold.is_none() {
             // 点滅があるときは次の切り替えのために起こし直す
             if blinking || text_blink {
                 shared.mark_dirty();
@@ -1717,7 +1742,9 @@ fn render_main(shared: Arc<Shared>) {
 
 /// カーソルの矩形（ペインの中の画素。論理ポイント）
 fn cursor_rect(r: &PaneRender, frame: &Frame, view: &FrameView) -> Option<(i32, i32, i32, i32)> {
-    let (x, y) = frame.cursor.pos.filter(|_| frame.cursor.visible && view.show_cursor)?;
+    // 点滅で消えている間も、アプリがカーソルを隠していても（claude のような TUI）位置は返す。
+    // IME の候補ウィンドウの置き場所に使うので、消えるたびに元の位置へ戻ってしまうと使えない（T-133）
+    let (x, y) = frame.cursor.pos.filter(|_| view.cursor_row)?;
     let fy = frame.viewport_top as i32 + y as i32 - view.top;
     if !(0..view.rows as i32).contains(&fy) {
         return None;

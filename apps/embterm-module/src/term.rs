@@ -241,6 +241,8 @@ pub struct DebugInfo {
     /// 別のスレッドでの画像の変換が終わった回数と、変換中の数（T-105）
     pub images_converted: u64,
     pub images_pending: usize,
+    /// IME の変換中の文字列（macOS だけ。Windows では IME 自身のウィンドウが描く。T-133）
+    pub preedit: Option<String>,
     /// macOS だけ（CALayer のアニメーションの数。T-132）
     pub layer_animations: usize,
 }
@@ -1974,7 +1976,15 @@ impl App {
         let focused = self.focused && self.selected == Some(p.id);
         // 点滅で消えているときはカーソルを描かない（フォーカスの無いペインは枠のまま点滅しない）
         let show_cursor = !(focused && self.blink_timer && !self.blink_on);
-        FrameView { top: self.master.rows as i32 - rows as i32, cols, rows, show_cursor, hover: p.hover, blink_off: !self.text_blink_on }
+        FrameView {
+            top: self.master.rows as i32 - rows as i32,
+            cols,
+            rows,
+            show_cursor,
+            cursor_row: true,
+            hover: p.hover,
+            blink_off: !self.text_blink_on,
+        }
     }
 
     /// ペインの今の中身を描く
@@ -2006,12 +2016,14 @@ impl App {
                     cols,
                     rows,
                     show_cursor,
+                    cursor_row: true,
                     hover: pane.hover,
                     blink_off: !text_blink_on,
                 };
                 v.renderer.draw_view(&self.master, &view, focused, capture)
             } else if let Some(s) = &pane.scrolled {
-                let view = FrameView { top: s.top, cols, rows, show_cursor: false, hover: pane.hover, blink_off: !text_blink_on };
+                let view =
+                    FrameView { top: s.top, cols, rows, show_cursor: false, cursor_row: false, hover: pane.hover, blink_off: !text_blink_on };
                 v.renderer.draw_view(&s.frame, &view, focused, capture)
             } else {
                 Ok(())

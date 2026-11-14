@@ -44,6 +44,9 @@
 ;;   シェル側の関数は etc/embterm.{ps1,bash,lua}（`embterm_cmd'・`embterm_find_file'・`embterm_dired'）
 ;; - プロンプトの境界（T-119。OSC 133）: `C-c C-p' / `C-c C-n' で前後のプロンプトへ、`C-c C-o' で直前の出力をコピー、
 ;;   終了コードをモードラインに。シェル側は同じ etc/embterm.* が印を出す
+;; - macOS の IME（T-127 / T-133）: 変換中の文字列は `ns-put-working-text' / `ns-unput-working-text' に掛けた
+;;   advice で受け、バッファの overlay ではなく module に渡して端末のカーソルの位置に描かせる
+;;   （この 2 つは `special-event-map' で引かれるので、端末のキーマップには邪魔されない）
 
 ;;; Code:
 
@@ -806,17 +809,22 @@ Windows では子 HWND が直に受けるので要らない。"
   (when (and embterm--term (fboundp 'embterm-module-set-preedit))
     (embterm-module-set-preedit embterm--term (or text ""))))
 
+(defun embterm--ns-preedit-here-p ()
+  "このバッファの変換中の文字列を、端末に描かせるか。
+copy モードの間は端末を隠していて Emacs のバッファを直に見ているので、Emacs に描かせる。"
+  (and embterm--term (eq embterm--input-mode 'semi-char)))
+
 (defun embterm--ns-put-working-text (orig &rest args)
   "端末のバッファでは、変換中の文字列をバッファに入れず端末に描く（T-127）。
 NS 版の Emacs は変換中の文字列（`ns-working-text\='）をバッファの overlay で描くが、
 端末のレイヤーの下になって見えないので、module に渡してカーソルの位置に描く。"
-  (if (not embterm--term)
+  (if (not (embterm--ns-preedit-here-p))
       (apply orig args)
     (embterm--ns-preedit (and (boundp 'ns-working-text) ns-working-text))))
 
 (defun embterm--ns-unput-working-text (orig &rest args)
   "変換が終わったら、端末に描いている変換中の文字列を消す。"
-  (if (not embterm--term)
+  (if (not (embterm--ns-preedit-here-p))
       (apply orig args)
     (embterm--ns-preedit nil)))
 
@@ -1066,6 +1074,9 @@ Windows はフレームの HWND（`window-id\=')。macOS は `window-id\=' が N
         (let ((f (and focus-ok (eq selected-buf buf) (eq embterm--input-mode 'semi-char))))
           (unless (eq f embterm--focused)
             (setq embterm--focused f)
+            ;; フォーカスが外れたら、描きかけの変換中の文字列を残さない（T-133。
+            ;; ふつうは IME が `ns-unput-working-text' を送るが、送らずに終わる場合の備え）
+            (unless f (embterm--ns-preedit nil))
             (ignore-errors (embterm-module-focus embterm--term f))))))))
 
 ;;;; IME の変換ウィンドウの位置（T-010。docs/research/emacs-ime.md の A-2）

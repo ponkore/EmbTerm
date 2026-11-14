@@ -43,7 +43,15 @@ pub fn frame_row(frame: &Frame, view: &FrameView, y: u16) -> Option<u16> {
 
 /// カーソルのセル（ビューの中の桁・行と幅）。`view.show_cursor` は見ない。見えなければ `None`
 pub fn cursor_cell(frame: &Frame, view: &FrameView, cols: usize) -> Option<(u16, u16, usize)> {
-    let (x, y) = frame.cursor.pos.filter(|_| frame.cursor.visible)?;
+    cursor_cell_any(frame, view, cols).filter(|_| frame.cursor.visible)
+}
+
+/// カーソルのセル。端末のモード（DECTCEM）で**見えなくても**返す（T-133）。
+///
+/// IME の変換中の文字列は、アプリがカーソルを隠していても（TUI が自分でカーソルを描く claude など）
+/// その位置に出したいので、こちらを使う
+pub fn cursor_cell_any(frame: &Frame, view: &FrameView, cols: usize) -> Option<(u16, u16, usize)> {
+    let (x, y) = frame.cursor.pos?;
     let fy = frame.viewport_top as i32 + y as i32;
     let py = fy - view.top;
     if !(0..view.rows as i32).contains(&py) {

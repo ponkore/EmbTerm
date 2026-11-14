@@ -167,6 +167,11 @@ impl Renderer {
         self.preedit = text.filter(|t| !t.is_empty());
     }
 
+    /// IME の変換中の文字列（無ければ `None`。自動確認用。T-133）
+    pub fn preedit(&self) -> Option<&str> {
+        self.preedit.as_deref()
+    }
+
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
     }
@@ -560,9 +565,11 @@ impl Renderer {
             }
         }
 
-        // 6. IME の変換中の文字列（あればカーソルより先に描く。カーソルは文字列の終わりに出る）
+        // 6. IME の変換中の文字列（あればカーソルより先に描く。カーソルは文字列の終わりに出る）。
+        // 点滅で消えている間も、アプリがカーソルを隠していても（claude のような TUI）出す（T-133）
         if self.preedit.is_some() {
-            self.push_preedit(frame, view, cols, cursor);
+            let at = layout::cursor_cell_any(frame, view, cols).filter(|_| view.cursor_row);
+            self.push_preedit(frame, view, cols, at);
             return;
         }
 
@@ -808,6 +815,40 @@ mod tests {
         // 3 つ目のセルの真ん中がカーソルの色で塗られている
         let p = px(&data, w, pad + cw * 2 + cw / 2, pad + ch / 2);
         assert_eq!(p, (theme.cursor.r, theme.cursor.g, theme.cursor.b), "カーソルが塗られていない: {p:?}");
+    }
+
+    #[test]
+    fn 変換中の文字列はカーソルが隠れていても描く() {
+        // アプリがカーソルを隠している（DECTCEM off。claude のような TUI）状態
+        let mut frame = frame_with("abcdef", Rgb { r: 0xd0, g: 0xd0, b: 0xd0 }, Rgb { r: 0x10, g: 0x10, b: 0x10 });
+        frame.cursor = Cursor { pos: Some((6, 0)), wide_tail: false, visible: false, blinking: false, shape: CursorShape::Block };
+        let mut r = renderer_for(&frame);
+        let theme = r.theme().clone();
+        let sel = (theme.selection_bg.r, theme.selection_bg.g, theme.selection_bg.b);
+        let (cw, ch) = r.cell_size();
+        let pad = r.padding();
+        // セル (cx, 0) の中にある「選択と同じ背景」の画素の数（枠の 2 画素は数えない）
+        let count = |data: &[u8], w: u32, cx: u32| {
+            let mut n = 0;
+            for y in pad + 2..pad + ch - 2 {
+                for x in pad + cw * cx + 2..pad + cw * (cx + 1) - 2 {
+                    if px(data, w, x, y) == sel {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        // 変換中の文字列を入れる前は、カーソルの位置に何も出ていない
+        let (w, _h, data) = r.read_pixels(&frame, &FrameView::whole(&frame), true).expect("描画");
+        assert_eq!(count(&data, w, 6), 0, "カーソルを隠しているのに何か描いている");
+        // 入れると、カーソルの桁から選択と同じ背景で出る（「あ」は全角なので 6・7 桁目）
+        r.set_preedit(Some("あ".into()));
+        assert_eq!(r.preedit(), Some("あ"));
+        let (w, _h, data) = r.read_pixels(&frame, &FrameView::whole(&frame), true).expect("描画");
+        assert!(count(&data, w, 6) > 0, "変換中の文字列の背景が出ていない");
+        assert!(count(&data, w, 7) > 0, "全角 1 文字の 2 セル目が出ていない");
+        assert_eq!(count(&data, w, 5), 0, "カーソルより前の桁に描いている");
     }
 
     #[test]
