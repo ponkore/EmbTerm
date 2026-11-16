@@ -720,6 +720,18 @@ fn cursor<'e>(env: &'e Env, term: &RefCell<Term>) -> Result<Value<'e>> {
     }
 }
 
+/// tr-ime に覚えさせた変換ウィンドウの位置を、いま IME に反映させる（T-137。Windows だけ）。
+/// HWND はフレームの `window-id'（`WM_IME_STARTCOMPOSITION' を投げる）。投げられたら t。
+///
+/// tr-ime は `WM_IME_STARTCOMPOSITION' を受けたときだけ位置を IME に渡す（emacs-ime.md §3.4）。
+/// Emacs はカーソルを描き直すたびに自分で投げるが、端末は子 HWND に描いていて Emacs の再表示が
+/// 起きないので、位置を入れ直したら Lisp から呼んで反映させる
+#[cfg(windows)]
+#[defun]
+fn ime_refresh(hwnd: i64) -> Result<bool> {
+    Ok(term::post_ime_start_composition(hwnd as isize))
+}
+
 /// ペイン PANE の見えている行のテキスト（UI スレッドに頼んで最大 2 秒待つ。デバッグ・自動確認用）
 #[defun]
 fn pane_text(term: &RefCell<Term>, pane: i64) -> Result<Option<String>> {

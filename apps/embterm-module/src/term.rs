@@ -534,6 +534,19 @@ fn post(hwnd: isize, msg: u32, wparam: usize) -> bool {
     hwnd != 0 && unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(wparam), LPARAM(0)) }.is_ok()
 }
 
+/// Emacs のフレームの HWND に `WM_IME_STARTCOMPOSITION` を投げる（T-137）。
+///
+/// tr-ime のサブクラスが `ImmSetCompositionWindow (compform_)` を呼ぶのは、このメッセージを受けたときだけ
+/// （docs/research/emacs-ime.md §3.4）。Emacs は**カーソルを描き直すたびに**自分でこれを投げている
+/// （§2.3 の 2、`w32term.c:6685`）が、EmbTerm の端末は子 HWND に描くので Emacs の再表示が起きず、
+/// `tr-ime-modadv--set-composition-window` で位置を入れ直しても IME に届かない。そこで同じ手を自分で行う。
+///
+/// Emacs と同じく **Lisp のスレッドから `PostMessage`**（受けるのはフレームを持つウィンドウのスレッド）。
+/// 変換を始めていないときに投げても、Emacs 自身が毎回そうしているので害は無い。
+pub fn post_ime_start_composition(hwnd: isize) -> bool {
+    hwnd != 0 && unsafe { IsWindow(Some(HWND(hwnd as *mut _))) }.as_bool() && post(hwnd, WM_IME_STARTCOMPOSITION, 0)
+}
+
 /// 端末の取っ手（Lisp の user-ptr の中身）。落とす（GC で回収される）と端末を閉じる
 pub struct Term {
     shared: Arc<Shared>,

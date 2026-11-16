@@ -1086,11 +1086,61 @@ Windows はフレームの HWND（`window-id\=')。macOS は `window-id\=' が N
 (declare-function tr-ime-modadv--set-composition-window "tr-ime-modadv"
                   (arg1 arg2 arg3 arg4 arg5 arg6 arg7 arg8))
 
+(declare-function embterm-module-ime-refresh "embterm-module" (hwnd))
+
 (defvar embterm--ime-last nil
   "最後に tr-ime に渡した位置の引数。nil なら上書きしていない。同じなら呼び直さない。")
 
+(defvar embterm--ime-ahead nil
+  "確定した文字を端末に送った直後の先読み（T-137）。(RECT DX TIME) か nil。
+
+RECT は送る前に module が返していたカーソルの矩形、DX は送った文字の表示幅ぶんの画素、
+TIME は送った時刻。アプリ（claude など）がエコーを返して本物のカーソルが動いたら（RECT が変わったら）
+捨てる。エコーを返さないアプリのために `embterm--ime-ahead-timeout' で時間切れにもする。")
+
+(defconst embterm--ime-ahead-timeout 1.0
+  "先読み（`embterm--ime-ahead'）を信じる秒数。")
+
 (defun embterm--ime-available-p ()
   (and embterm-ime-position (fboundp 'tr-ime-modadv--set-composition-window)))
+
+(defun embterm--ime-cursor (&optional width)
+  "IME の位置合わせに使うカーソルの矩形 (X Y W H)。端末が無ければ nil。
+確定した文字を送った直後は本物のカーソルがまだ動いていないので、先読み（`embterm--ime-ahead'）の
+ぶんだけ X を進める（T-137）。WIDTH（ウィンドウの本文の幅・画素）を越える先読みは、
+アプリが折り返して行が変わるので信じない。"
+  (let ((rect (ignore-errors (embterm-module-cursor embterm--term))))
+    (pcase embterm--ime-ahead
+      (`(,base ,dx ,time)
+       (cond
+        ;; エコーが返って本物のカーソルが動いた（または端末が替わった・時間切れ）
+        ((not (and rect (equal base rect) (< (- (float-time) time) embterm--ime-ahead-timeout)))
+         (setq embterm--ime-ahead nil))
+        ;; 折り返す手前までなら進める
+        ((or (null width) (< (+ (car rect) dx) width))
+         (setq rect (cons (+ (car rect) dx) (cdr rect)))))))
+    rect))
+
+(defun embterm--ime-advance (ch)
+  "確定した文字 CH を端末に送ったので、変換ウィンドウを CH の表示幅ぶん先に進める（T-137）。
+
+IME は確定と同じ打鍵の中で次の変換を始めるので、アプリのエコーを待っていると
+変換ウィンドウが確定前の位置に出る。エコーが返ったら `embterm--ime-cursor' が本物の位置に戻す。"
+  (when (and (embterm--ime-available-p)
+             embterm--term
+             (eq embterm--input-mode 'semi-char)
+             ;; 画面に出ない文字（制御文字・DEL）は幅が読めない
+             (characterp ch)
+             (>= ch ?\s)
+             (/= ch ?\C-?))
+    (pcase (ignore-errors (embterm-module-cursor embterm--term))
+      ((and `(,_x ,_y ,w ,_h) rect)
+       (let ((kept (pcase embterm--ime-ahead
+                     (`(,base ,dx ,_time) (if (equal base rect) dx 0))
+                     (_ 0))))
+         (setq embterm--ime-ahead
+               (list rect (+ kept (* (max 0 (string-width (string ch))) w)) (float-time))))
+       (embterm--update-ime)))))
 
 (defun embterm--update-ime ()
   "選んでいるウィンドウが端末なら、変換ウィンドウを端末のカーソルに合わせる。
@@ -1103,9 +1153,9 @@ Windows はフレームの HWND（`window-id\=')。macOS は `window-id\=' が N
               (when (and embterm--term
                          (embterm--pane-of win)
                          (eq embterm--input-mode 'semi-char))
-                (pcase (ignore-errors (embterm-module-cursor embterm--term))
-                  (`(,x ,y ,_w ,_h)
-                   (pcase-let ((`(,l ,tp ,r ,b) (window-inside-pixel-edges win)))
+                (pcase-let ((`(,l ,tp ,r ,b) (window-inside-pixel-edges win)))
+                  (pcase (embterm--ime-cursor (- r l))
+                    (`(,x ,y ,_w ,_h)
                      (list (string-to-number (frame-parameter (window-frame win) 'window-id))
                            1 (+ l x) (+ tp y) l tp r b))))))))
       (cond
@@ -1113,15 +1163,27 @@ Windows はフレームの HWND（`window-id\=')。macOS は `window-id\=' が N
         (unless (equal args embterm--ime-last)
           (setq embterm--ime-last args)
           (add-hook 'isearch-mode-end-hook #'embterm--ime-forget)
-          (apply #'tr-ime-modadv--set-composition-window args)))
+          (apply #'tr-ime-modadv--set-composition-window args)
+          (embterm--ime-apply (car args))))
        (embterm--ime-last (embterm--ime-reset))))))
+
+(defun embterm--ime-apply (hwnd)
+  "tr-ime に覚えさせた位置を、いま IME に反映させる（T-137）。
+
+tr-ime は `WM_IME_STARTCOMPOSITION' を受けたときだけ `ImmSetCompositionWindow' を呼ぶ
+（docs/research/emacs-ime.md §3.4）。Emacs はカーソルを描き直すたびに自分でこれを投げるが（§2.3 の 2）、
+端末は子 HWND に描いていて Emacs の再表示が起きないので、module から同じものを投げてもらう。
+これが無いと、変換を始めた後に入れ直した位置が変換が終わるまで反映されない。"
+  (when (fboundp 'embterm-module-ime-refresh)
+    (ignore-errors (embterm-module-ime-refresh hwnd))))
 
 (defun embterm--ime-reset ()
   "変換ウィンドウの位置の上書きをやめる（Emacs のポイントの位置に戻す）。"
   (when (and embterm--ime-last (fboundp 'tr-ime-modadv--set-composition-window))
     (ignore-errors
-      (tr-ime-modadv--set-composition-window (car embterm--ime-last) 0 0 0 0 0 0 0)))
-  (setq embterm--ime-last nil))
+      (tr-ime-modadv--set-composition-window (car embterm--ime-last) 0 0 0 0 0 0 0))
+    (embterm--ime-apply (car embterm--ime-last)))
+  (setq embterm--ime-last nil embterm--ime-ahead nil))
 
 (defun embterm--ime-forget (&rest _)
   "tr-ime が isearch の終わりに上書きを戻すので、次のポーリングで入れ直させる。"
@@ -1571,8 +1633,11 @@ KEY は基本のキー（文字かファンクションキーの名前）、MODS
   (embterm--require-term)
   (let ((ev last-command-event))
     (if (characterp ev)
-        ;; 文字もキーとして送る（win32-input-mode なら 1 文字ずつ Vk = 0 + Uc の形になる）
-        (embterm-module-send-key embterm--term (string ev) "")
+        (progn
+          ;; 文字もキーとして送る（win32-input-mode なら 1 文字ずつ Vk = 0 + Uc の形になる）
+          (embterm-module-send-key embterm--term (string ev) "")
+          ;; IME は確定と同じ打鍵で次の変換を始めている。アプリのエコーを待たずに位置を進める（T-137）
+          (embterm--ime-advance ev))
       (embterm--send-event))))
 
 (defun embterm-send-string (string)
