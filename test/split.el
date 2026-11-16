@@ -83,6 +83,42 @@
 
 (defun split-lines (text) (seq-remove #'string-empty-p (split-string (or text "") "\n")))
 
+(defun split-rows (text)
+  "TEXT をペインの行の並びにする（空行も残す。行の番号を数えるのに使う）。"
+  (let ((lines (split-string (or text "") "\n")))
+    (if (and lines (string-empty-p (car (last lines)))) (butlast lines) lines)))
+
+;; クリックの座標は画素で決め打ちせず、**そのときのセルの大きさと余白から計算する**（Issue #9）。
+;; セルの高さはフォントと DPI で変わり、ペインの行数は Emacs のフレームの画素の高さで変わるので、
+;; 画素を決め打ちすると環境が変わっただけで別の行を指してしまう。
+(defun split-cell (&optional buf)
+  "端末のセルの大きさと余白 (幅 高さ 余白)（画素）。BUF は端末のバッファ（既定は `split-buf'）。"
+  (with-current-buffer (or buf split-buf)
+    (let* ((info (embterm-module-debug-info embterm--term))
+           (cell (plist-get info :cell))
+           (pad (or (plist-get info :padding) 0)))
+      (unless (and (consp cell) (> (car cell) 0) (> (cdr cell) 0))
+        (error "セルの大きさが取れない: %S" cell))
+      (list (car cell) (cdr cell) pad))))
+
+(defun split-point (col row &optional cell)
+  "ペインの COL 桁 ROW 行（0 始まり）のセルの中央を指す画素 (X . Y)。
+CELL は `split-cell' の値（省略時は引き直す）。"
+  (pcase-let ((`(,w ,h ,pad) (or cell (split-cell))))
+    (cons (+ pad (* col w) (/ w 2)) (+ pad (* row h) (/ h 2)))))
+
+(defun split-clicks (point n)
+  "POINT を N 回クリックする `post-mouse.ps1' の指定。"
+  (string-join (make-list n (format "down:%d:%d,up:%d:%d" (car point) (cdr point) (car point) (cdr point))) ","))
+
+(defconst split-click-row 2
+  "クリックして選ぶペインの行（上から 0 始まり）。ペインが何行でも見える位置にする。")
+(defconst split-click-col 3
+  "クリックする桁（`line363' のような語の途中）。")
+
+(defvar split-click-point nil "クリックした画素。")
+(defvar split-click-line nil "クリックした行のテキスト（選択の期待値）。")
+
 (defvar split-top-text nil "遡ったペインのテキスト。")
 
 (defun split-run (steps)
@@ -169,30 +205,45 @@
     (0.2 "ダブルクリック（単語）"
          . ,(lambda ()
               (with-current-buffer split-buf (setq kill-ring nil))
-              (let* ((p (split-panes)) (top (nth 0 p)))
-                (split-post (split-pane-hwnd top) "down:30:24,up:30:24,down:30:24,up:30:24"))))
+              (let* ((p (split-panes)) (top (nth 0 p))
+                     (cell (split-cell))
+                     (rows (split-rows (split-pane-text top))))
+                (setq split-click-point (split-point split-click-col split-click-row cell)
+                      split-click-line (nth split-click-row rows))
+                (split-log "セル（幅 高さ 余白）: %S / %d 行目 %S を %S でクリックする"
+                           cell split-click-row split-click-line split-click-point)
+                (split-check "クリックする行が `line<数字>'"
+                             (string-match-p "\\`line[0-9]+\\'" (or split-click-line ""))
+                             (format "%S" split-click-line))
+                (split-post (split-pane-hwnd top) (split-clicks split-click-point 2)))))
     (1.0 "ダブルクリックの結果 → トリプルクリック（行）"
          . ,(lambda ()
-              (split-check "ダブルクリックで単語" (equal (car kill-ring) "line363") (format "%S" kill-ring))
+              (split-check "ダブルクリックで単語" (equal (car kill-ring) split-click-line) (format "%S" kill-ring))
               (with-current-buffer split-buf (setq kill-ring nil))
               (let* ((p (split-panes)) (top (nth 0 p)))
-                (split-post (split-pane-hwnd top) "down:30:24,up:30:24,down:30:24,up:30:24,down:30:24,up:30:24"))))
+                (split-post (split-pane-hwnd top) (split-clicks split-click-point 3)))))
     (1.0 "トリプルクリックの結果 → M-w で選択をコピーして消す"
          . ,(lambda ()
-              (split-check "トリプルクリックで行" (equal (car kill-ring) "line363") (format "%S" kill-ring))
+              (split-check "トリプルクリックで行" (equal (car kill-ring) split-click-line) (format "%S" kill-ring))
               (with-current-buffer split-buf (setq kill-ring nil))
               (split-type "" ?\M-w)))
     (0.8 "M-w の結果"
          . ,(lambda ()
-              (split-check "M-w で選択がコピーされた" (equal (car kill-ring) "line363") (format "%S" kill-ring))
+              (split-check "M-w で選択がコピーされた" (equal (car kill-ring) split-click-line) (format "%S" kill-ring))
               (split-check "M-w で選択が消えた"
                            (null (with-current-buffer split-buf (embterm-module-selection embterm--term))))))
     (0.2 "ドラッグで選択（上のペインの 2 行目から 3 行目）"
          . ,(lambda ()
               (with-current-buffer split-buf (setq kill-ring nil))
-              (let* ((p (split-panes)) (top (nth 0 p)))
+              (let* ((p (split-panes)) (top (nth 0 p))
+                     (cell (split-cell))
+                     (from (split-point 1 1 cell))
+                     (mid (split-point 7 1 cell))
+                     (to (split-point 12 2 cell)))
                 (split-post (split-pane-hwnd top)
-                            "down:12:24,move:60:24,move:100:42,up:100:42"))))
+                            (format "down:%d:%d,move:%d:%d,move:%d:%d,up:%d:%d"
+                                    (car from) (cdr from) (car mid) (cdr mid)
+                                    (car to) (cdr to) (car to) (cdr to))))))
     (1.0 "選択の確認（kill-ring に入る）"
          . ,(lambda ()
               (split-log "kill-ring: %S" kill-ring)
@@ -348,8 +399,14 @@
                                  (split-check "遡らない（アプリへ送った）" (not (nth 4 info2)) (format "%S" info2))
                                  ;; マウスの報告が有効でも Shift+ドラッグは選択になる
                                  (setq kill-ring nil)
-                                 (split-post (nth 1 info2)
-                                             "sdown:12:24,smove:60:24,smove:100:24,sup:100:24")
+                                 (let* ((cell (split-cell split-buf2))
+                                        (from (split-point 1 1 cell))
+                                        (mid (split-point 7 1 cell))
+                                        (to (split-point 12 1 cell)))
+                                   (split-post (nth 1 info2)
+                                               (format "sdown:%d:%d,smove:%d:%d,smove:%d:%d,sup:%d:%d"
+                                                       (car from) (cdr from) (car mid) (cdr mid)
+                                                       (car to) (cdr to) (car to) (cdr to))))
                                  (run-at-time 0.7 nil
                                               (lambda ()
                                                 (split-check "Shift+ドラッグは選択になる"
@@ -390,7 +447,11 @@
          . ,(lambda ()
               (let* ((p (split-panes)) (top (nth 0 p)))
                 (split-check "自動スクロールの前は下を追っている" (not (split-pane-scrolled top)))
-                (split-post (split-pane-hwnd top) "down:30:60,move:30:-40,sleep:800,move:30:-40,up:30:-40"))))
+                ;; 4 行目から押して、ペインの**上の外**（負の y）へ出したまま止める
+                (let ((from (split-point split-click-col 3)))
+                  (split-post (split-pane-hwnd top)
+                              (format "down:%d:%d,move:%d:-40,sleep:800,move:%d:-40,up:%d:-40"
+                                      (car from) (cdr from) (car from) (car from) (car from)))))))
     (1.0 "自動スクロールで遡った"
          . ,(lambda ()
               (let* ((p (split-panes)) (top (nth 0 p))
