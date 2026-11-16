@@ -20,14 +20,37 @@
 Emacs の dynamic module として読み込み、Emacs のウィンドウの本文領域に module が作った
 子ウィンドウ（HWND）を重ね、そこに端末の画面を直接描く。
 
-```text
-Emacs (Lisp)                       embterm module (Rust)                     子プロセス
-─────────────                      ──────────────────────                    ──────────
-embterm.el                          端末 1 つにつき:
-  位置合わせ・キー・設定  ──────▶     子 HWND（描画）
-                         ◀──────     VT の解釈（libghostty-vt）  ◀── ConPTY ──▶  pwsh / claude / vim …
-  （状態はポーリングで読む）          PTY の読み書き
+主な流れは次のとおり。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 利用者
+    participant E as Emacs（Lisp）<br/>embterm.el
+    participant M as embterm module（Rust）
+    participant V as libghostty-vt
+    participant P as PTY
+    participant C as 子プロセス<br/>pwsh / claude / vim …
+
+    Note over E,M: 置き場所: ウィンドウの分割・大きさが変わるたびに Emacs のウィンドウの<br/>画素の範囲を module に送り、その上に端末の画面を重ねる
+
+    U->>E: キー入力（IME で確定した文字を含む）
+    E->>M: キーを送る（頼みごとを積むだけで待たない）
+    M->>P: アプリに合わせた形に直して書く
+    P->>C: 入力
+    C->>P: 出力（VT のバイト列）
+    P->>M: 読む
+    M->>V: 端末をロックして渡す（vt_write）
+    V-->>M: 変わった行（render state）
+    M-->>M: 端末の画面を描く
+    M-->>E: 変化を知らせる（タイトル・cwd・ベル・子の終了…）
+    E->>M: 状態を読む（poll）
+    M-->>E: 状態とイベント
+    E-->>U: バッファ名・default-directory・通知・モードライン
 ```
+
+やり取りの順番は OS で変わらない。**中身は変わる**: PTY は Windows が ConPTY、macOS が `openpty`（§5.4）。
+描く先は Windows が子 HWND に Direct2D、macOS が `EmacsView` のレイヤーに Metal（§5.2・§5.6）。
 
 ## 2. 背景と目的
 

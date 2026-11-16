@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="636" viewBox="0 0 820 636" role="img" aria-labelledby="t d">
+  <title id="t">EmbTerm の全体像（macOS）</title>
+  <desc id="d">macOS では UI スレッドを作らず、Lisp の main スレッドが AppKit のビューとレイヤーをその場で触る。描画だけが端末ごとの描画スレッドで動き、Shared を介して main スレッドとやり取りする。et-session のスレッドと libghostty-vt は Windows と同じで、PTY は openpty になる。</desc>
+
+  <style>
+    :root {
+      --bg:    #ffffff;
+      --fg:    #1f2328;
+      --muted: #57606a;
+      --line:  #8c959f;
+      --outer-fill:   #f6f8fa;
+      --outer-stroke: #afb8c1;
+      --lisp-fill:    #eaf2fb;
+      --lisp-stroke:  #9ab6d8;
+      --inner-fill:   #ffffff;
+      --inner-stroke: #c6cdd5;
+      --shared-fill:  #f1eefb;
+      --shared-stroke:#b3a7d9;
+      --child-fill:   #fdf4e3;
+      --child-stroke: #d9b974;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:    #0d1117;
+        --fg:    #e6edf3;
+        --muted: #9198a1;
+        --line:  #6e7681;
+        --outer-fill:   #161b22;
+        --outer-stroke: #3d444d;
+        --lisp-fill:    #152233;
+        --lisp-stroke:  #3f648c;
+        --inner-fill:   #0d1117;
+        --inner-stroke: #3d444d;
+        --shared-fill:  #1d1930;
+        --shared-stroke:#564a84;
+        --child-fill:   #241e12;
+        --child-stroke: #7a6433;
+      }
+    }
+    text {
+      font-family: system-ui, -apple-system, "Segoe UI", "Yu Gothic UI", Meiryo, sans-serif;
+      font-size: 13px;
+      fill: var(--fg);
+    }
+    .h     { font-size: 14px; font-weight: 600; }
+    .mono  { font-family: ui-monospace, Consolas, "Cascadia Mono", "SF Mono", monospace; }
+    .muted { fill: var(--muted); }
+    .small { font-size: 12px; }
+    .badge { font-size: 11px; fill: var(--muted); }
+    .arrow { stroke: var(--line); stroke-width: 1.6; fill: none; }
+  </style>
+
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--line)"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="820" height="636" fill="var(--bg)"/>
+
+  <!-- Emacs のプロセス -->
+  <rect x="20" y="20" width="780" height="484" rx="10" fill="var(--outer-fill)" stroke="var(--outer-stroke)"/>
+  <text class="h" x="38" y="44">Emacs のプロセス（macOS）</text>
+
+  <!-- main スレッド -->
+  <rect x="44" y="58" width="732" height="134" rx="8" fill="var(--lisp-fill)" stroke="var(--lisp-stroke)"/>
+  <text class="h" x="62" y="82">Lisp のスレッド ＝ main スレッド</text>
+  <text class="badge" x="758" y="80" text-anchor="end">≠ Windows 版</text>
+  <text class="mono muted small" x="62" y="102">lisp/embterm.el</text>
+  <text x="74" y="124">・キー・ペインの置き場所・設定を送ると、<tspan font-weight="600">その場で片づける</tspan>（列も PostMessage も無い）</text>
+  <text x="74" y="146">・<tspan class="mono">MacApp</tspan>（<tspan class="mono">thread_local</tspan>）が <tspan class="mono">EmacsView</tspan> のレイヤーに <tspan class="mono">CAMetalLayer</tspan> を足す</text>
+  <text x="74" y="168">・module の知らせを受けて <tspan class="mono">embterm-module-poll</tspan> で読む</text>
+
+  <path class="arrow" d="M 130 198 L 130 230" marker-end="url(#head)" marker-start="url(#head)"/>
+  <text class="small muted" x="150" y="218">AppKit のビューは main スレッドからしか触れないので、UI スレッドを作らない</text>
+
+  <!-- Shared -->
+  <rect x="64" y="236" width="692" height="40" rx="6" fill="var(--shared-fill)" stroke="var(--shared-stroke)"/>
+  <text x="82" y="261"><tspan class="h mono">Shared</tspan>　端末の状態・ペインの描くもの・知らせ（<tspan class="mono">Mutex</tspan> + <tspan class="mono">Condvar</tspan>）</text>
+
+  <path class="arrow" d="M 130 282 L 130 314" marker-end="url(#head)" marker-start="url(#head)"/>
+  <text class="small muted" x="150" y="294">↓ 描くものを渡して起こす（<tspan class="mono">Condvar</tspan>）</text>
+  <text class="small muted" x="150" y="312">↑ 描き終えたら世代を上げる</text>
+
+  <!-- 描画スレッド -->
+  <rect x="64" y="320" width="692" height="76" rx="6" fill="var(--inner-fill)" stroke="var(--inner-stroke)"/>
+  <text class="h" x="82" y="342">描画スレッド（端末ごとに 1 本）</text>
+  <text class="badge" x="738" y="340" text-anchor="end">≠ Windows 版</text>
+  <text x="94" y="362">・<tspan class="mono">Condvar</tspan> で起きる。何も起きなくても 50 ms ごとに見回る</text>
+  <text x="94" y="382">・フレームを写して Metal + CoreText のアトラスで <tspan class="mono">CAMetalLayer</tspan> に描く</text>
+
+  <path class="arrow" d="M 130 422 L 130 402" marker-end="url(#head)"/>
+  <text class="small muted" x="150" y="418">出力の知らせ</text>
+
+  <!-- et-session -->
+  <rect x="64" y="424" width="692" height="56" rx="6" fill="var(--inner-fill)" stroke="var(--inner-stroke)"/>
+  <text class="h" x="82" y="446">et-session のスレッド（読み / 書き）</text>
+  <text class="badge" x="738" y="444" text-anchor="end">＝ Windows 版と同じ</text>
+  <text x="94" y="468">・読む → 端末をロックして libghostty-vt に渡す　・応答とキーを PTY に書く</text>
+
+  <!-- PTY -->
+  <path class="arrow" d="M 130 506 L 130 548" marker-end="url(#head)" marker-start="url(#head)"/>
+  <text x="150" y="530"><tspan class="mono">openpty</tspan> + <tspan class="mono">setsid</tspan> + <tspan class="mono">TIOCSCTTY</tspan>（ConPTY ではない）</text>
+
+  <!-- 子プロセス -->
+  <rect x="44" y="552" width="732" height="56" rx="8" fill="var(--child-fill)" stroke="var(--child-stroke)"/>
+  <text class="h" x="62" y="574">子プロセス（プロセスグループ。Job Object ではない）</text>
+  <text x="74" y="594">zsh / bash / fish / claude / vim / yazi …</text>
+</svg>

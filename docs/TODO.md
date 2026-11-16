@@ -1,5 +1,12 @@
 # EmbTerm TODO（課題・検討事項）
 
+> **この一覧は T-138 で凍結しました（2026-11-16）。いま残っている課題は GitHub Issues にあります。**
+>
+> - **新しい課題はここに足さず、Issue を起こしてください**（`gh issue create`）
+> - 凍結のときに未完了だったものは Issue に移しました。該当する行に Issue 番号を書き添えてあります
+> - この文書は**決定の経緯の記録**として残します。requirements.md・[notes/](notes/)・[adr/](adr/)・
+>   過去のコミットが T-番号で参照しているので、番号は付け直しません
+
 要件は [requirements.md](requirements.md)。ここは「やること・決めること・調べること」の一覧。
 
 ## 書き方
@@ -11,11 +18,12 @@
 | ✅ | 完了 |
 | ⏸ | 保留（理由を書く） |
 | ❌ | やらない（理由を書く） |
+| ➡️ | GitHub Issue に移した（番号を併記） |
 
 - 終わったら印を ✅ にして、行末に **日付と結論を 1 行**、詳しい記録があればその場所を書く
   - 例: `- ✅ **T-020** libghostty-vt を Windows でビルドする（2026-11-12）→ 静的ライブラリで通った。docs/spikes/libghostty-build.md`
 - 番号は通し番号。**付け直さない**（requirements.md や記録から参照するため）
-- 新しい課題は、合う節の末尾に次の番号で足す。どこにも合わなければ「§8 発生した課題」に足す
+- ~~新しい課題は、合う節の末尾に次の番号で足す~~ → **凍結後は GitHub Issues に起こす**
 - 決定したことが requirements.md の【案】に関わるなら、requirements.md も直す
 
 ---
@@ -240,7 +248,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-048** nyagos（2026-11-11）→ 4.4.20 で Powerline のプロンプト・Nerd Font・履歴・色付き `ls`・eaw の表示 OK（`M-x shell` では使えなかったもの）（入力は PTY へ直接送ったので、キーのエンコードは T-091 / test/keys.el の確認に任せる）
 - ✅ **T-049** wsl bash（2026-11-11）→ Ubuntu で `TERM=xterm-256color` / `COLORTERM=truecolor`、日本語、`Ctrl+C`（終了コード 130）、less の検索 OK（入力は PTY へ直接送ったので、キーのエンコードは T-091 / test/keys.el の確認に任せる）
 - ✅ **T-050** git bash（2026-11-11）→ `--login -i`（UCRT64）で日本語、履歴と Backspace、`Ctrl+C`、less、true color・波線の下線・太字斜体 OK（入力は PTY へ直接送ったので、キーのエンコードは T-091 / test/keys.el の確認に任せる）
-- 🔄 **T-051** claude（2026-11-11: 桁ずれ・日本語入力・`Shift+Enter`・`C-c C-c` はユーザーが確認。長い出力と通知が残り）
+- ➡️ **T-051**（→ [#1](https://github.com/ponkore/EmbTerm/issues/1)） claude（2026-11-11: 桁ずれ・日本語入力・`Shift+Enter`・`C-c C-c` はユーザーが確認。長い出力と通知が残り）
 - ✅ **T-052** yazi（画像のプレビュー、マウス）（2026-11-11）→ embterm.exe と別起動の `emacs -Q` で、プレビュー・`j` での切り替え・`q` で画面が戻る・クリック・ホイールを確認。`Drivers.matches: Kgp`。手元での確認は T-091
 - ✅ **T-053** vim（2026-11-11）→ 日本語入力の表示・`:set number`・`Esc`（T-069 の `:set mouse=a` のクリックも確認済み）OK。`-u NONE` の MSYS 版 vim は encoding が latin1 になり化けるが vim の設定の問題
 - ✅ **T-054** 性能を測る（大量の出力、入力の遅れ、端末を何個も開いたとき）（2026-11-11）→ Emacs の 10 ms タイマーの p99 はどの場面でも 17〜22 ms（止まらない）。`cat` 10 MB は 5.3 秒で Windows Terminal と同じ（ConPTY が律速）。入力から `Present` まで 1〜2 ms。端末 15 個でプライベート 123 MB。docs/notes/t054-performance.md、`test/perf.el`
@@ -249,8 +257,8 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 ## 6. ghostel からの移行
 
 - ✅ **T-056** ghostel で使っている機能とキー割り当てを洗い出す（`C-c s s` / `n` / `p` / `b`、`my-ghostel.el`）（2026-11-11）→ 4 つのコマンド・pwsh の起動・module の置き場はすべて EmbTerm にある。足りなかった `setenv` の受け渡し（T-109）と `embterm-run`（T-110）を足した。docs/notes/t056-ghostel-migration.md
-- 🔄 **T-057** `~/.emacs.d` に `my-embterm.el` を作り、ghostel と並べて使ってみる（2026-11-11: `my-embterm.el` と関連の変更をパッチにした（`~/.emacs.d` への書き込みは権限の判定で止まった）。`emacs -Q` で動作を確認済み。利用者がパッチを当て、~/.emacs.d の e2abb3e としてコミット・プッシュした。普段の Emacs で ghostel（C-c S）と並べて使う段階）
-- ⏸ **T-058** ghostel をやめる判断と撤去（`my-ghostel.el`、`~/.emacs.d/ghostel/`、ドキュメント）（2026-11-11: 利用者は EmbTerm を常用すると決めた。ghostel の機能に EmbTerm へ移せて有用なものが無いかを利用者が調べる間、`C-c S` に残す）
+- ➡️ **T-057**（→ [#2](https://github.com/ponkore/EmbTerm/issues/2)） `~/.emacs.d` に `my-embterm.el` を作り、ghostel と並べて使ってみる（2026-11-11: `my-embterm.el` と関連の変更をパッチにした（`~/.emacs.d` への書き込みは権限の判定で止まった）。`emacs -Q` で動作を確認済み。利用者がパッチを当て、~/.emacs.d の e2abb3e としてコミット・プッシュした。普段の Emacs で ghostel（C-c S）と並べて使う段階）
+- ➡️ **T-058**（→ [#3](https://github.com/ponkore/EmbTerm/issues/3)） ghostel をやめる判断と撤去（`my-ghostel.el`、`~/.emacs.d/ghostel/`、ドキュメント）（2026-11-11: 利用者は EmbTerm を常用すると決めた。ghostel の機能に EmbTerm へ移せて有用なものが無いかを利用者が調べる間、`C-c S` に残す）
 - ✅ **T-059** `my-pty`（ptyd + eat）も一緒にやめられるか判断する（2026-11-11）→ やめた。依存していたのは init.el だけで、eat も my-pty だけが使っていた。`my-pty.el`・`ptyd/` を消し、ドキュメントは経緯として残した（~/.emacs.d の 5175707）。`M-x my:claude-term` も無くなった（`embterm-run` で作り直せる）
 - ✅ **T-118** シェルから Emacs の関数を呼ぶ（ghostel の `ghostel_cmd` / `ghostel-eval-cmds` 相当。例: シェルで `ef foo.txt` → Emacs で `find-file-other-window`、`ed .` → `dired-other-window`）
   - 形式は **OSC 51;E**（vterm と同じ。`ESC ] 51;E "関数名" "引数" … ESC \`）。ghostel の OSC 52;e は libghostty-vt がクリップボードとして消費するので横取りできない
@@ -268,9 +276,16 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 
 ## 7. ドキュメント（ある程度進んでから）
 
-- ⬜ **T-060** 設計が固まり始めたら `docs/architecture.md` と `docs/adr/` を作る（GenPreview と同じ形）
-- ⬜ **T-061** CLAUDE.md を作る
-- ⬜ **T-062** README.md を作る
+- ✅ **T-060** 設計が固まり始めたら `docs/architecture.md` と `docs/adr/` を作る（GenPreview と同じ形）（2026-11-16）→
+  **検討の文書ではなく「実装済みの構造」**として書いた（[architecture.md](architecture.md) の 16 節: 全体像・構成・スレッド・
+  Lisp と module の境界・表示・入力・端末の状態・PTY・文字幅・OSC・設定・OS 差・配布・試験）。決定の理由は [adr/](adr/) に 8 枚:
+  0001 libghostty-vt / 0002 子 HWND と直接描画 / 0003 ConPTY / 0004 キー（案 A）/ 0005 IME / 0006 eaw / 0007 スレッドとポーリング / 0008 ペイン
+- ✅ **T-061** CLAUDE.md を作る（2026-11-16）→ 言語・作業の進め方・TODO と記録（notes）の運用・確認の目安・コミット・
+  コードの約束・しないこと。**README.md と architecture.md にあることは書かず参照する**（利用者の指示）
+- ✅ **T-062** README.md を作る（2026-11-16）→ 概要と機能一覧、ビルドから Emacs の設定まで（**バイナリ配布はしない前提**）、
+  使い方（キー・シェルごと・claude・yazi の画像プレビューと `find-file-other-window`）、開発、ライセンス。
+  あわせて「**ウィンドウハンドルを取って直接描く理由**」と「**キー入力の流れ**」を簡潔に入れた（architecture.md と重複するが、
+  README だけ読む人に要る。利用者の指示）
 
 ## 8. 発生した課題（随時追加）
 
@@ -321,7 +336,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-094** 画像を含む行のコピーに placeholder の文字（`U+10EEEE`）が混じるので除く（2026-11-12）→ `format_plain` で placeholder と後ろの結合文字を除く。docs/notes/t078-tests.md
 - ✅ **T-095** 親の端末の環境変数（`WEZTERM_*`、`TERM_PROGRAM_VERSION`）が子に伝わる件。`et_pty` で落とすか決める（yazi の判定は XTVERSION で上書きされるので害は無い）（2026-11-12）→ 落とす（`WEZTERM_*`・`WT_SESSION`・`VSCODE_*` など。`setenv` したものは残る）。`TERM_PROGRAM_VERSION` は EmbTerm の版。docs/notes/t078-tests.md
 - ✅ **T-096** 大きな画像の PNG のデコードが端末のロックの中で走る時間を測る（T-054）（2026-11-11）→ 4000x4000 でデコード 33〜38 ms・`vt_write` 58〜65 ms がロックの中。Emacs には響かない。ロックの外に出す方法は libghostty-vt の API に無いので記録で終える。重いのは UI スレッドで GPU に載せるところ → T-105
-- ⏸ **T-097** embterm.exe のウィンドウが一瞬画面いっぱい（`319x75`）にリサイズされて戻るログが数回あった。原因を調べる（2026-11-11: 26 回で再現せず。大きさの変化・`showCmd`・`WM_SYSCOMMAND` をログに出すようにしたので、次に起きたらそれで原因を分ける）
+- ➡️ **T-097**（→ [#4](https://github.com/ponkore/EmbTerm/issues/4)） embterm.exe のウィンドウが一瞬画面いっぱい（`319x75`）にリサイズされて戻るログが数回あった。原因を調べる（2026-11-11: 26 回で再現せず。大きさの変化・`showCmd`・`WM_SYSCOMMAND` をログに出すようにしたので、次に起きたらそれで原因を分ける）
 - ✅ **T-098** 他のアプリが前面のとき、端末のペインをクリックしても Emacs にフォーカスが入らない（2026-11-11）→ フレームが前面でなければ `WM_MOUSEACTIVATE` に `MA_ACTIVATE` を返すようにした。本物のクリックでの動作をユーザーが確認した
 - ✅ **T-099** 通知を Windows のトースト通知にする（いまは `message`）（2026-11-12）→ 既定 `embterm-notification-default`: Emacs が裏ならトースト（10 秒で消す）、前なら `message`。本物のトーストの見え方は手で確かめる。docs/notes/t078-tests.md
 - ✅ **T-100** 進捗（OSC 9;4）をモードラインに出す（2026-11-12）→ ` [42%]` などを出す（`embterm-show-progress`）。docs/notes/t078-tests.md
@@ -330,14 +345,14 @@ requirements.md §4 の「とくに確かめること」を見ながら。
 - ✅ **T-103** `embterm-project` のバッファ名にプロジェクト名を入れる（2026-11-12）→ `*embterm: EmbTerm: pwsh*`。docs/notes/t078-tests.md
 - ✅ **T-104** 何もしていないときの Lisp のポーリングの CPU（端末 15 個で 4〜5%）。隠れている端末の巡回を軽くする、何も変わらない間は間隔を延ばす（t054 §7-1）（2026-11-12）→ module が `open_channel` のパイプで変化を知らせ、Lisp はそれを受けて読む。見回りは 0.5 秒ごと。15 個で 6.1% → 0.3〜1.6%、クリックの反応 12 → 1 ms。docs/notes/t078-tests.md、`test/idle.el`
 - ✅ **T-105** 大きな画像を GPU に載せる UI スレッドの仕事（4000x4000 で 60〜140 ms）。表示の大きさに縮めてから載せる、変換をワーカーでする、ロックの中の画素の写しを `Arc` の共有にする（T-096 の続き）（2026-11-12）→ 表示の大きさまで縮め、大きな画像は別のスレッドで変換する。UI スレッドの描画の最大 3.75 ms。ロックの中の写し（27 ms）は libghostty-vt の API の範囲では減らせない。docs/notes/t078-tests.md、`test/bigimage.el`
-- ⏸ **T-106** 入力から画面に出るまでを DWM の合成込みで実測し、Windows Terminal と比べる（カメラ・フォトセンサ）（2026-11-12: カメラ・フォトセンサが要るので保留）
-- ⏸ **T-107** 本物のデバイスの消失（TDR、ドライバの更新）での作り直しを確かめる（`dxcap -forcetdr` など）（2026-11-12: 実機の GPU をリセットし作業中の全アプリが一瞬止まるので、利用者が都合のよいときに。擬似的な消失は T-067 で確認済み）
+- ➡️ **T-106**（→ [#5](https://github.com/ponkore/EmbTerm/issues/5)） 入力から画面に出るまでを DWM の合成込みで実測し、Windows Terminal と比べる（カメラ・フォトセンサ）（2026-11-12: カメラ・フォトセンサが要るので保留）
+- ➡️ **T-107**（→ [#6](https://github.com/ponkore/EmbTerm/issues/6)） 本物のデバイスの消失（TDR、ドライバの更新）での作り直しを確かめる（`dxcap -forcetdr` など）（2026-11-12: 実機の GPU をリセットし作業中の全アプリが一瞬止まるので、利用者が都合のよいときに。擬似的な消失は T-067 で確認済み）
 - ❌ **T-108** `box: ┌──┬──┐` の `─` が描かれていないように見える（SGR の確かめの画面。T-054 の変更の前後で同じ）。overlap の既知の見え方（T-013）か別の問題かを調べる（2026-11-11 → 不具合ではない。30pt で撮ると `┌──┬──┐`・`x─x`・`━`・`═`・`╭─╮` はすべて描かれていた。12pt では角と横線がつながって見分けにくいだけ）
 - ✅ **T-109** 子の環境変数を Emacs の `process-environment` から作る（2026-11-11）→ 起動時の環境からの差分（設定・削除）を module に渡す。`setenv` が子に届く（`make-process` と同じ）。`setenv` のユニバイトの値は `locale-coding-system` で戻す。`test/env.el`
 - ✅ **T-110** コマンド・作業ディレクトリ・環境・バッファ名を指定して開く `embterm-run`（2026-11-11）→ `(embterm-run COMMAND &key DIRECTORY ENVIRONMENT NAME DISPLAY)`。`my:claude-term` の置き換え（T-059）に使う
 - ❌ **T-111**（2026-11-12 に廃止 → T-120）普段使いの置き場に入れる `cargo xtask install [DIR]`（2026-11-11）→ 既定 `C:\Apps\embterm`。使用中の conpty.dll / OpenConsole.exe / exe は `.old-<時刻>` に退避して入れ替える。`target/dist` を普段の Emacs に読ませると dist と試験が上書きに失敗するため
 - ✅ **T-112** 文字の点滅（SGR 5）を描く。カーソルの点滅（T-035）と同じタイマーで（T-055 で見つけた。低）（2026-11-12）→ 点滅の文字が見えているときだけ 600 ms ごとに切り替える（カーソルとは別のタイマー）。docs/notes/t078-tests.md
-- ⏸ **T-113** `CSI 0 S` / `CSI 0 T` を libghostty-vt が 1 行として扱わない（何もしない）件を上流に知らせるか決める（T-055）（2026-11-12: 送るかは利用者が決める。下書き docs/notes/t113-upstream-draft.md）
+- ➡️ **T-113**（→ [#7](https://github.com/ponkore/EmbTerm/issues/7)） `CSI 0 S` / `CSI 0 T` を libghostty-vt が 1 行として扱わない（何もしない）件を上流に知らせるか決める（T-055）（2026-11-12: 送るかは利用者が決める。下書き docs/notes/t113-upstream-draft.md）
 - ✅ **T-114** vttest の自動確認を回帰テストにする（T-078 と合わせる。T-055 の道具はリポジトリに入れていない）（2026-11-12）→ T-055 で合格した 38 画面を `cargo xtask test-screens` のケースにした。期待値は T-055 で見て確かめた画面と一致。docs/notes/t078-tests.md
 - ✅ **T-120** 普段の Emacs への入れ方を、~/.emacs.d の側から写す形にする（2026-11-12）→ `~/.emacs.d` の `M-x my:embterm-update`（`my-embterm.el`）が
   このリポジトリの `target/dist/` を `~/.emacs.d/embterm/`（git の管理外）に写す（`C-u` で先に `cargo xtask dist`）。中身が同じものは写さず、
@@ -345,7 +360,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   `target/dist` を直接読ませない理由は変わらない（使用中のファイルがロックされ dist と試験が失敗する）。手順は `~/.emacs.d` の README の「EmbTerm の端末」。
   `~/.emacs.d/etc/pwsh-emacs-shell.ps1` がシェル統合（`embterm/etc/embterm.ps1`）を読み込む。写す処理は、写した先の embterm.exe を動かして
   conpty.dll と OpenConsole.exe を使用中にした状態で確かめた
-- ⏸ **T-115** Windows Terminal と vttest を手で見比べる（DECCOLM・倍幅の行。T-055 では自動の比較を省いた）（2026-11-12: 手で見る作業なので利用者に。合格した画面は T-114 の回帰テストにした）
+- ➡️ **T-115**（→ [#8](https://github.com/ponkore/EmbTerm/issues/8)） Windows Terminal と vttest を手で見比べる（DECCOLM・倍幅の行。T-055 では自動の比較を省いた）（2026-11-12: 手で見る作業なので利用者に。合格した画面は T-114 の回帰テストにした）
 - ✅ **T-116** 子の作業ディレクトリのドライブレターを大文字にする（2026-11-11）→ Emacs は `~` の展開や `directory-file-name` で小文字に落とす。claude は cwd を `.claude.json` のプロジェクトのキーに使うので、Emacs から開いたものと端末から開いたものでプロジェクトが割れる。プロンプトもほかの端末と同じ `C:\` になる
 - ✅ **T-117** 子に `PWD` / `OLDPWD` を渡さない（2026-11-11）→ Git Bash などから起動した Emacs の `PWD` が残り、starship（nyagos・pwsh のプロンプト）と yazi が実際の作業ディレクトリより `PWD` を信じて、Emacs を起動したディレクトリで開いたように見えた。`~/.emacs.d` の `M-x nyagos` / `yazi` を作っていて見つけた
 - ✅ **T-137** Windows で、確定した直後に始めた変換の未確定文字列が前の位置に出る（2026-11-16。[notes/t137-ime-position.md](notes/t137-ime-position.md)）→ **遅れが 2 つ重なっていた。**
@@ -370,7 +385,7 @@ requirements.md §4 の「とくに確かめること」を見ながら。
   - 確認: `test/ime.el`（`cargo xtask test-emacs ime`）の **18 項目**。tr-ime は `emacs -Q` に無いので
     `tr-ime-modadv--set-composition-window` の代わりを置いて引数を見る。端末は `key-child.py` の vt モード（エコーしない）。
     **実機の IME での見え方は利用者が確認（2026-11-16 に OK。見つけたときの手順で再現しなくなった）**
-- ⬜ **T-138** `cargo xtask test-emacs split` のクリックの選択が 1 行ずれる（T-137 の作業中に見つけた。**T-137 とは無関係**で、
+- ➡️ **T-138**（→ [#9](https://github.com/ponkore/EmbTerm/issues/9)） `cargo xtask test-emacs split` のクリックの選択が 1 行ずれる（T-137 の作業中に見つけた。**T-137 とは無関係**で、
   変更を stash して走らせても同じように落ちる）
   - `down:30:24` のダブルクリック・トリプルクリックが `line363` ではなく **`line362`** を取る（3 項目）。選択そのものは効いている
   - いつから落ちているかは未調査。クリックの画素 → セルの行の対応がずれているので、**フォントの高さ・DPI・ペインの置き場所**の
