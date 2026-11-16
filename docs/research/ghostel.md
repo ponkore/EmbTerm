@@ -3,7 +3,7 @@
 - 日付: 2026-11-11
 - **TODO T-019 の記録**
 - 対象: ghostel 0.62.0（commit `91c86d2`、2026-11-09）、依存は libghostty-vt 1.0.0（`build.zig.zon`）
-- ソースの場所: `C:\Users\masao\.emacs.d\straight\repos\ghostel`。以下の `src/…` `lisp/…` はここからの相対パス
+- ソースの場所: `~\.emacs.d\straight\repos\ghostel`。以下の `src/…` `lisp/…` はここからの相対パス
 - 導入時の実測（ビルド済み module の配布、ConPTY の経路の概略、eaw の桁ずれが起きないこと、既知の制限）は
   `~/.emacs.d/docs/pty/ghostel.md` にある。**ここでは繰り返さず、参照だけする**
 

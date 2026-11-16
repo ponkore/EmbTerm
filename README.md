@@ -382,7 +382,8 @@ requirements.md や記録はこの T-番号で参照しています。
 
 ## 7. ライセンス
 
-このリポジトリのコードは、MIT または Apache-2.0 のどちらかを選べます（`Cargo.toml` の `license`）。
+このリポジトリのコードは、**MIT**（[LICENSE-MIT](LICENSE-MIT)）または
+**Apache-2.0**（[LICENSE-APACHE](LICENSE-APACHE)）のどちらかを選べます。
 
 同梱・リンクするものは次のとおりです。
 

@@ -22,7 +22,16 @@
 (defconst close-log-file (expand-file-name "close.log" close-out))
 (defconst close-pids-file (expand-file-name "close-pids.txt" close-out))
 (defconst close-work (expand-file-name "target/t054/closework/" close-root))
-(defconst close-vim "C:/Users/masao/scoop/apps/vim/current/vim.exe")
+(defconst close-vim
+  (or (getenv "VIM_EXE")
+      (executable-find "vim")
+      (seq-find #'file-executable-p
+                (list (expand-file-name "scoop/shims/vim.exe" (getenv "USERPROFILE"))
+                      (expand-file-name "scoop/apps/vim/current/vim.exe" (getenv "USERPROFILE"))
+                      "C:/Program Files/Vim/vim91/vim.exe"
+                      "C:/Program Files (x86)/Vim/vim91/vim.exe"))
+      "vim")
+  "vim の実行ファイル。環境変数 VIM_EXE → PATH → よくある置き場 の順に探す。")
 
 (make-directory close-out t)
 (make-directory close-work t)

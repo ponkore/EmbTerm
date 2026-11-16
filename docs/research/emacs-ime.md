@@ -6,9 +6,9 @@
 
 - 根拠は `file:line` で示す。パスの略記は次のとおり。
   - `w32fns.c` などの `src/...` → `C:\Apps\emacs\src\emacs-31.1\src\...`
-  - `tr-ime/...` → `C:\Users\masao\.emacs.d\straight\repos\tr-emacs-ime-module\...`
-  - `w32-ime.el` → `C:\Users\masao\.emacs.d\straight\repos\w32-ime.el\w32-ime.el`
-  - `my-japanese.el` → `C:\Users\masao\.emacs.d\user-lisp\my-japanese.el`
+  - `tr-ime/...` → `~\.emacs.d\straight\repos\tr-emacs-ime-module\...`
+  - `w32-ime.el` → `~\.emacs.d\straight\repos\w32-ime.el\w32-ime.el`
+  - `my-japanese.el` → `~\.emacs.d\user-lisp\my-japanese.el`
 - **【読】** はソースから読んで確かめたこと、**【推】** は推測（Win32 / IME の一般知識や読みからの見込み）で、実測が要るもの。
 - Emacs は起動していない。ここに書いた挙動はすべて未実測である。
 

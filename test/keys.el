@@ -220,7 +220,12 @@
 
 (defun keys-vim-steps ()
   "vim（`:set mouse=a'）: クリックで位置が動くこと。VT の代替画面の表示。"
-  (let ((vim (or (executable-find "C:/Users/masao/scoop/shims/vim.exe") "vim")))
+  (let ((vim (or (getenv "VIM_EXE")
+                 (executable-find "vim")
+                 (seq-find #'file-executable-p
+                           (list (expand-file-name "scoop/shims/vim.exe" (getenv "USERPROFILE"))
+                                 (expand-file-name "scoop/apps/vim/current/vim.exe" (getenv "USERPROFILE"))))
+                 "vim")))
     (list
      `(1.0 "vim: 起動"
            . ,(lambda ()
