@@ -79,5 +79,76 @@ Issue の案 A（既定を変える）を採った。前身の ghostel は `C-y`
 - 実機（利用者が 2026-11-19 に macOS で確認、**OK**）: zsh と claude で `C-k` → `C-y` が戻ること、
   `C-c C-y` と `S-<insert>` が `kill-ring` からの貼り付けのままであること、
   `M-w` でコピーして `C-c C-y` で貼れること（T-036）
-- **Windows の `cargo xtask test-emacs split` は未確認**（macOS では回せない）。
-  貼り付けの確認を `C-y` → `C-c C-y` に差し替えたので、次に Windows で回すときに見る
+- Windows の `cargo xtask test-emacs split`（貼り付けの確認を `C-y` → `C-c C-y` に差し替えた分）も、
+  利用者が 2026-11-19 に回して **OK**
+
+## 5. 端末の側から OSC 52 で出せるか（2026-11-19 の調べもの）
+
+この件は「アプリが切り取ったものを OSC 52 で出さない」のが発端なので、**シェルの側で出す設定が
+書けるか**を調べた。対応するかは決めていない（Issue は立てていない）。
+
+### 5.1 zsh: できる【読・実測】
+
+ZLE の `kill-line` を自前のウィジェットで包み、`$CUTBUFFER` を base64 にして OSC 52 で出すだけ。
+EmbTerm で実際に動かし、`kill-ring` に入るところまで確かめた。
+
+```zsh
+_osc52_kill_line() { zle .kill-line; printf '\033]52;c;%s\a' "$(printf '%s' "$CUTBUFFER" | base64 | tr -d '\n')" }
+zle -N kill-line _osc52_kill_line
+```
+
+「あいうえおかきくけこ」の「お」と「か」の間で `C-k` → 画面は「あいうえお」、
+Emacs 側は `kill-ring: ("かきくけこ")`。
+
+実用にするなら kill 系をまとめて包む。zsh 5.9.2 の emacs のキーマップでは
+`^K kill-line` `^U kill-whole-line` `^W backward-kill-word` `^[d kill-word`
+`^[w copy-region-as-kill`（`bindkey -M emacs` で確かめた）。
+
+```zsh
+_osc52_copy() { printf '\033]52;c;%s\a' "$(printf '%s' "$1" | base64 | tr -d '\n')" }
+for w in kill-line backward-kill-line kill-whole-line kill-word backward-kill-word kill-region copy-region-as-kill; do
+  eval "_osc52_$w() { zle .$w; zle -f kill; _osc52_copy \"\$CUTBUFFER\" }"
+  zle -N $w "_osc52_$w"
+done
+```
+
+`zle -f kill` は、`C-k` を続けて押したときに `$CUTBUFFER` へ追記される挙動を保つために要る
+（[zsh-workers 2015](https://www.zsh.org/mla/workers/2015/msg02627.html) の指摘。**こちらは未確認**。
+上の試しは単発の `C-k` だけ）。
+
+macOS だけでよければ `pbcopy` でも足りる。ただし入るのはシステムのクリップボードで、
+`kill-ring` には `C-c C-y`（`current-kill` → `interprogram-paste-function`）が拾う形になる。
+既製の `zsh-system-clipboard` は pbcopy / tmux / wl-clipboard / Termux で、OSC 52 は持っていない。
+
+### 5.2 受け取る側（EmbTerm）の長さ【実測】
+
+`embterm-allow-clipboard-write` は既定 t なので設定は要らない。長さは
+**1,000 / 4,000 / 16,000 / 64,000 / 256,000 文字で欠けなく届いた**（`a` の繰り返しを
+OSC 52 で送って `kill-ring` の長さを見た）。
+
+ghostty の `src/terminal/osc.zig` は `MAX_BUF` が 2048 だが、OSC 52 など長くなりうるものは
+アロケータで超えられる作り（第三者のミラーで読んだもの。**公式の現行のコードは未確認**）。
+実測はこれと矛盾しない。
+
+### 5.3 nyagos: たぶんできるが、書き方が違う
+
+【読】（[doc/07-LuaFunctions_en.md](https://github.com/nyaosorg/nyagos/blob/master/doc/07-LuaFunctions_en.md)）:
+
+- **Lua の関数をキーに割り当てられる** — `nyagos.key.C_K = function(this) ... end`
+- 引数 `this` から `this.text`（行全体）、`this.pos`（カーソル位置。バイト単位、行頭が 1）が読め、
+  `this:replacefrom(POS,"TEXT")` で置換、`this:call("FUNCNAME")` で組み込みを呼べる
+- `nyagos.write("TEXT")` で標準出力に書ける
+
+【読】見つからなかったもの: **キルバッファを読む API がドキュメントに無い**。
+`this:call("KILL_LINE")` で切った内容は Lua 側で受け取れそうにない。
+
+【推】回避: `this.text` と `this.pos` からカーソル以降を自分で取り出し、
+`this:replacefrom(this.pos, "")` で消して、取り出した文字列を OSC 52 で出せば `C-k` 相当を
+自前で書ける。残る未確認は 2 つ — 行編集の最中に `nyagos.write` でエスケープシーケンスを
+そのまま端末へ出せるか、base64 を Lua 側でどう作るか。
+ConPTY を OSC 52 が素通りすること自体は [../research/conpty.md](../research/conpty.md) で確認済み
+（再配布版 1.22 以降）。
+
+### 5.4 claude: 設定では無理【推】
+
+自前の TUI で行編集していて、切り取った内容を OSC 52 で出す設定は見当たらない。
