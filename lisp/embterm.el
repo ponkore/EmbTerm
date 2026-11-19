@@ -1804,9 +1804,11 @@ Shift を押しながらのホイールを、module に頼らず行数で送る�
     (define-key map (kbd "S-<next>") #'embterm-scroll-page-down)
     (define-key map (kbd "S-<home>") #'embterm-scroll-top)
     (define-key map (kbd "S-<end>") #'embterm-scroll-bottom)
-    ;; C-<英字>（C-i = TAB、C-m = RET は上。C-y は貼り付け）、C-M-<英字>、C-S-<英字>（`C-S-a' は C-a と別のキーとして送れる）
+    ;; C-<英字>（C-i = TAB、C-m = RET は上）、C-M-<英字>、C-S-<英字>（`C-S-a' は C-a と別のキーとして送れる）
+    ;; C-y も端末へ送る（#11）。端末の中のアプリ（zsh の ZLE・claude など）は C-k で切り取ったものを
+    ;; 自分の中のバッファに持ち、OSC 52 では出さないので、C-y が届かないと取り出せない
     (dolist (c (number-sequence ?a ?z))
-      (unless (memq c '(?i ?m ?y))
+      (unless (memq c '(?i ?m))
         (funcall bind map (format "C-%c" c)))
       (funcall bind map (format "C-S-%c" c))
       (funcall bind map (format "C-M-%c" c))
@@ -1827,9 +1829,9 @@ Shift を押しながらのホイールを、module に頼らず行数で送る�
     ;; 選択があれば M-w はコピー（T-036）
     (unless (member "M-w" embterm-keymap-exceptions)
       (define-key map (kbd "M-w") #'embterm-copy-or-send))
-    ;; 貼り付けとホイール
-    (unless (member "C-y" embterm-keymap-exceptions)
-      (define-key map (kbd "C-y") #'embterm-yank))
+    ;; 貼り付けとホイール。C-y は端末へ送るので（上。#11）、kill-ring からの貼り付けは `S-<insert>' と `C-c C-y'。
+    ;; `[remap yank]' は残す（macOS の `s-v'、cua-mode の `C-v' など、`yank' に束縛された他のキーのため）。
+    ;; `embterm-keymap-exceptions' に "C-y" を足すと C-y は端末へ送られず、この remap を通って `embterm-yank' になる
     (define-key map (kbd "S-<insert>") #'embterm-yank)
     (define-key map [remap yank] #'embterm-yank)
     (define-key map [remap mwheel-scroll] #'embterm-wheel)

@@ -267,7 +267,8 @@ CELL は `split-cell' の値（省略時は引き直す）。"
               (split-check "選択が消えた"
                            (null (with-current-buffer split-buf (embterm-module-selection embterm--term))))
               (kill-new "PASTED")
-              (split-type "echo " ?\C-y 'return)))
+              ;; C-y は端末へ送るようになったので（#11）、kill-ring からの貼り付けは C-c C-y
+              (split-type "echo " ?\C-c ?\C-y 'return)))
     (2.0 "貼り付け"
          . ,(lambda ()
               (let* ((p (split-panes)) (bottom (nth 1 p)) (bt (split-pane-text bottom)))
@@ -378,7 +379,7 @@ CELL は `split-cell' の値（省略時は引き直す）。"
                 (split-log "貼り付けの確認: paste-safe-p=%S"
                            (embterm-module-paste-safe-p embterm--term "a\nb")))
               (kill-new "echo \"bp ok\"\necho second")
-              (split-type "" ?\C-y 'return)))
+              (split-type "" ?\C-c ?\C-y 'return)))
     (2.0 "貼り付けの結果（改行を含む）"
          . ,(lambda ()
               (with-current-buffer split-buf2
