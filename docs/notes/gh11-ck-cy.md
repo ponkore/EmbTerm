@@ -130,24 +130,118 @@ ghostty の `src/terminal/osc.zig` は `MAX_BUF` が 2048 だが、OSC 52 など
 アロケータで超えられる作り（第三者のミラーで読んだもの。**公式の現行のコードは未確認**）。
 実測はこれと矛盾しない。
 
-### 5.3 nyagos: たぶんできるが、書き方が違う
+### 5.3 nyagos: できる。道が 2 つある【読・実測】（2026-11-20 に調べ直した）
 
-【読】（[doc/07-LuaFunctions_en.md](https://github.com/nyaosorg/nyagos/blob/master/doc/07-LuaFunctions_en.md)）:
+**どちらも EmbTerm で実際に動かして確かめた。** 前の版は「キルバッファを読む API がドキュメントに
+無いので `C-k` 相当を自前で書くしかない」と書いていたが、**どちらも外していた** —
+`this:call` を呼んだ後に `this.text` が更新されることと、`--clipboard` があることを見落としていた。
 
-- **Lua の関数をキーに割り当てられる** — `nyagos.key.C_K = function(this) ... end`
-- 引数 `this` から `this.text`（行全体）、`this.pos`（カーソル位置。バイト単位、行頭が 1）が読め、
-  `this:replacefrom(POS,"TEXT")` で置換、`this:call("FUNCNAME")` で組み込みを呼べる
-- `nyagos.write("TEXT")` で標準出力に書ける
+読んだのは nyagos 4.4.20_2（手元で動かしているもの）と、その go.mod が指す
+go-readline-ny v1.16.2 のソース。
 
-【読】見つからなかったもの: **キルバッファを読む API がドキュメントに無い**。
-`this:call("KILL_LINE")` で切った内容は Lua 側で受け取れそうにない。
+#### (A) `--clipboard`: Lua を書かずに Windows のクリップボードを通す【実測】
 
-【推】回避: `this.text` と `this.pos` からカーソル以降を自分で取り出し、
-`this:replacefrom(this.pos, "")` で消して、取り出した文字列を OSC 52 で出せば `C-k` 相当を
-自前で書ける。残る未確認は 2 つ — 行編集の最中に `nyagos.write` でエスケープシーケンスを
-そのまま端末へ出せるか、base64 を Lua 側でどう作るか。
-ConPTY を OSC 52 が素通りすること自体は [../research/conpty.md](../research/conpty.md) で確認済み
-（再配布版 1.22 以降）。
+nyagos の行編集は go-readline-ny で、**切り取る関数のうち 3 つ**
+— `KILL_LINE`（`C-k`）・`UNIX_LINE_DISCARD`（`C-u`）・`UNIX_WORD_RUBOUT`（`C-w`）—
+は切り取った文字列を `Clipboard.Write` に渡す【読: go-readline-ny `gommand.go` の
+`cmdKillLine` / `cmdUnixLineDiscard` / `cmdUnixWordRubout`】。行き先の既定はプロセスの中の文字列
+（`defaultClipboard`、`main.go`）だが、`--clipboard` を付けると **OS のクリップボード**になる
+【読: nyagos `internal/frame/stream.go` の `LazySetup` と `OSClipboard`。既定は false】。
+
+rcfile（`~/.nyagos`）は `lazySetup()` の**前**に読まれる【読: `internal/mains/nyagos.go` 195〜218】ので、
+次の 1 行でも同じ。**起動した後に `lua_e` で変えても効かない**（実測で踏んだ）。
+
+```lua
+nyagos.option.clipboard = true
+```
+
+実測（`embterm-shell` を `("nyagos" "--clipboard")` にして EmbTerm で動かした）:
+
+- 「echo クリップボード試験」を打って `C-a` `C-k` → Windows のクリップボードに入る
+- `kill-ring` そのものには入らないが、**Emacs の `current-kill` が拾う**ので `C-c C-y` で貼れる
+  （`select-enable-clipboard` が t、`interprogram-paste-function` が `gui-selection-value`）
+- 逆向きも通る: Emacs でコピーしたものが nyagos の `C-y`（`YANK` は `Clipboard.Read`）で貼れる
+- 書かないもの: `KILL_WHOLE_LINE`・`KILL_WORD`・`BACKWARD_KILL_WORD` は `Clipboard.Write` を呼ばない【読】
+
+#### (B) Lua で OSC 52 を出す【実測】
+
+`kill-ring` に直に入れたい（クリップボードを汚さない・OSC 52 を受ける他の端末でも使う）ならこちら。
+**行編集を自前で書く必要はない。** `this:call("KILL_LINE")` を呼ぶ前に `this.text` から
+切り取られる範囲を取っておけばよい。
+
+【読: `internal/mains/bindkey.go`】
+
+- `nyagos.key.c_k = function(this) ... end` で Lua の関数をキーに割り当てられる
+- `this.text` は行全体、`this.pos` は**バイト単位・1 始まり**（`getPosAndText`）
+- `this:call("名前")` で組み込みを呼べる。呼んだ後は `this.text` と `this.pos` が**更新される**
+  （`rl.update`）。`C-w` のように消えた範囲が後ろ向きのものは、呼ぶ前後の `pos` の差で取れる
+- base64 は自分で書く。GopherLua は Lua 5.1 相当で**ビット演算が無い**ので算術で作る
+
+```lua
+local B = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+local function b64(s)
+    local out = {}
+    for i = 1, #s, 3 do
+        local a, b, c = s:byte(i), s:byte(i + 1), s:byte(i + 2)
+        local n = a * 65536 + (b or 0) * 256 + (c or 0)
+        local c1, c2 = math.floor(n / 262144) % 64, math.floor(n / 4096) % 64
+        local c3, c4 = math.floor(n / 64) % 64, n % 64
+        out[#out + 1] = B:sub(c1 + 1, c1 + 1) .. B:sub(c2 + 1, c2 + 1)
+            .. (b and B:sub(c3 + 1, c3 + 1) or "=")
+            .. (c and B:sub(c4 + 1, c4 + 1) or "=")
+    end
+    return table.concat(out)
+end
+
+local function osc52(s)
+    if s and s ~= "" then
+        io.write("\27]52;c;" .. b64(s) .. "\7")
+        if io.flush then io.flush() end
+    end
+end
+
+nyagos.key.c_k = function(this)          -- カーソルから行末まで
+    local killed = this.text:sub(this.pos)
+    this:call("KILL_LINE")
+    osc52(killed)
+end
+
+nyagos.key.c_u = function(this)          -- 行頭からカーソルまで
+    local killed = this.text:sub(1, this.pos - 1)
+    this:call("UNIX_LINE_DISCARD")
+    osc52(killed)
+end
+
+nyagos.key.c_w = function(this)          -- 直前の語（消えるのが後ろ向きなので pos の差で取る）
+    local text0, pos0 = this.text, this.pos
+    this:call("UNIX_WORD_RUBOUT")
+    osc52(text0:sub(this.pos, pos0 - 1))
+end
+```
+
+実測（EmbTerm で `nyagos` を動かし、`lua_e "dofile([[...]])"` で読ませた）:
+
+| 試したこと | 結果 |
+|---|---|
+| 「echo あいうえおかきくけこ」の「お」と「か」の間で `C-k` | `kill-ring: ("かきくけこ")`。画面は「echo あいうえお」 |
+| 続けて `C-u` | `kill-ring: ("echo あいうえお")` |
+| 「echo あい うえ おか」で `C-w` | `kill-ring: ("おか")` |
+| 605 文字（日本語混じり・画面で折り返す行）を `C-a` `C-k` | 欠けずにそのまま入った |
+
+**前の版で未確認としていた 2 つは解けた** — `io.write` のエスケープは**行編集の最中でもそのまま
+端末へ出る**（nyagos の再描画と混ざらない。OSC 52 は画面に何も出さないため）。base64 は上のとおり。
+
+`C-k` を続けて押したときに追記する zsh の `zle -f kill` に当たるものは go-readline-ny に無く、
+`Clipboard.Write` は毎回上書きする【読】。1 回目で行末まで消えるので 2 回目は空になり、
+上のコードは OSC 52 を出さない（実測でも `kill-ring` は 1 つだけ）。
+
+#### どちらを採るか
+
+- Emacs と nyagos が**同じ Windows の上**にいるなら (A) が 1 行で済み、**双方向**になる。
+  ただし入るのは `kill-ring` ではなくクリップボードで、拾うのは `C-c C-y`（`current-kill`）
+- `kill-ring` に直に入れたい、クリップボードを経由したくない、別のマシンの nyagos を使う
+  （将来 ssh 越しなど）なら (B)。zsh の §5.1 と揃う
 
 ### 5.4 claude: 設定では無理【推】
 
