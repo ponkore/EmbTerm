@@ -249,6 +249,8 @@ const EMACS_TESTS: &[EmacsTest] = &[
     EmacsTest { name: "bigimage", file: "bigimage.el", log: "target/t105/bigimage.log", default: true },
     EmacsTest { name: "shellcmd", file: "shellcmd.el", log: "target/t118/shellcmd.log", default: true },
     EmacsTest { name: "prompt", file: "prompt.el", log: "target/t119/prompt.log", default: true },
+    // nyagos の切り取りが Emacs から拾えるか（#11。etc/embterm.lua）
+    EmacsTest { name: "clip", file: "clip-nyagos.el", log: "target/gh11/clip-nyagos.log", default: true },
     EmacsTest { name: "ime", file: "ime.el", log: "target/t137/ime.log", default: true },
     EmacsTest { name: "kitty", file: "kitty.el", log: "target/t088/emacs/kitty.log", default: true },
     EmacsTest { name: "close", file: "close.el", log: "target/t054/close.log", default: true },

@@ -246,3 +246,60 @@ end
 ### 5.4 claude: 設定では無理【推】
 
 自前の TUI で行編集していて、切り取った内容を OSC 52 で出す設定は見当たらない。
+
+---
+
+## 6. nyagos は (A) を入れた（2026-11-20）
+
+**結論: `etc/embterm.lua` に `nyagos.option.clipboard = true` の 1 行を足した。**
+EmbTerm の中で nyagos を使うと、`C-k` / `C-u` / `C-w` で切り取った文字列が Windows の
+クリップボードに入り、Emacs の `C-c C-y` で貼れる。逆向き（Emacs でコピーしたものを
+端末の中の `C-y` で貼る）も通る。
+
+はじめ (B)（Lua で OSC 52 を出す）を入れたが、**利用者の求めで (A) に差し替えた**（同日）。
+
+### 6.1 何を足したか
+
+`etc/embterm.lua` の末尾の 1 行だけ。go-readline-ny の切り取りの行き先（`Clipboard`）が
+プロセスの中の文字列から OS のクリップボードに変わる（仕組みは §5.3 の (A)）。
+
+- **【重要】効くのは rcfile を読んでいる間に立てたときだけ。** nyagos は rcfile を読み終えて
+  から行編集のクリップボードを決める（`LazySetup`）。`~/.nyagos` から `dofile` する形
+  （README の 3.6）なら効くが、**起動した後に `lua_e` で立てても効かない**
+  （試験で確かめた。§6.3 の 7）
+- 止める道（`nyagos.option.clipboard = false`）をファイルの頭と README に書いた
+- 入るのは `kill-ring` ではなく**クリップボード**。Emacs 側で拾うのは `C-c C-y`
+  （`current-kill` → `interprogram-paste-function` = `gui-selection-value`）で、
+  `kill-ring` そのものには積まれない
+- 切り取ったものは nyagos の中にも残る（端末の中の `C-y` で戻る）。つまり nyagos 本来の
+  挙動は変わらず、行き先が増えるだけ
+
+### 6.2 (B)（Lua で OSC 52）を採らなかった理由
+
+- (A) は 1 行で済み、**双方向**になる（Emacs でコピーしたものが端末の中の `C-y` で貼れる）
+- (B) は包むキーを並べる必要があり、どの組み込み関数がクリップボードに書くかに依る
+  （§5.3 の (B) のとおり `KILL_WORD` などは書かないので、包む範囲の線引きが要る）
+- (A) で困るのは、切り取るたびに Windows のクリップボードを書き換えること、
+  `kill-ring` に直に入らないこと。OSC 52 が要るのは別のマシンの nyagos（ssh 越しなど）で、
+  そのときは §5.3 の (B) のコードがそのまま使える
+
+### 6.3 確認
+
+`cargo xtask test-emacs clip`（`test/clip-nyagos.el`。38 秒、**OK 12 / NG 0**）。
+(B) 用に書いた試験を流用した（OSC 52 の確認をクリップボードの確認に替え、
+`osc52-nyagos.el` → `clip-nyagos.el` に改名）。
+
+1. rcfile 経由で `nyagos.option.clipboard` が立つ（`target/gh11/home` に置いた `.nyagos` を
+   `HOME` で読ませ、本番と同じ経路にする）
+2. `C-k` で切り取った「かきくけこ」がクリップボードに入り、`current-kill` が拾う
+3. 画面からは消え、端末の中の `C-y` で戻る（nyagos 本来の挙動を壊していない）
+4. `C-u` で行頭からカーソルまで、`C-w` で直前の語
+5. 画面で折り返す 605 文字の行が欠けずに入る
+6. 逆向き — Emacs でコピーしたものが端末の中の `C-y` で貼れる
+7. **起動した後に立てても効かない**（`.nyagos` を置かずに起こし、`lua_e` で立ててから `C-k`。
+   値そのものは立つが切り取りはクリップボードに入らない。上の【重要】の裏付け）
+
+試験はクリップボードを書き換えるので、始めに控えて終わりと時間切れで戻している。
+
+- `cargo xtask test-emacs shellcmd prompt`（`etc/embterm.lua` を読む既存の試験）も通る
+- `cargo test` も通る

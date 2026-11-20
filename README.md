@@ -152,6 +152,8 @@ tr-ime の再変換・前後参照は、端末のバッファでは無効にし�
 ### 3.6 シェル統合（任意）
 
 プロンプトの境界（OSC 133）と、シェルから Emacs の関数を呼ぶ仕組み（OSC 51;E）を有効にします。
+nyagos ではこれに加えて、行編集で切り取ったもの（`C-k` / `C-u` / `C-w`）を Emacs から貼り付けられる
+ようになります（Windows のクリップボードを行き先にします）。
 **EmbTerm の中でだけ**読み込んでください（`TERM_PROGRAM` で判定します）。
 `<配布物>` は 3.3 で写した場所に読み替えてください。
 
@@ -180,6 +182,11 @@ if nyagos.env.TERM_PROGRAM == "EmbTerm" then
     dofile(nyagos.env.USERPROFILE .. "/.emacs.d/embterm/etc/embterm.lua")
 end
 ```
+
+nyagos の切り取りの共有は、**上のように `~/.nyagos` から読み込んだときだけ**効きます
+（nyagos は `~/.nyagos` を読み終えてから行編集のクリップボードを決めるので、起動した後に
+`lua_e` などで読み込んでも効きません）。止めたいときは、読み込んだ後に
+`nyagos.option.clipboard = false` と書きます。
 
 ```zsh
 # ~/.zshrc（macOS。プロンプトを決めた後で）
@@ -246,13 +253,19 @@ elisp からコマンドを指定して開くこともできます。
 Emacs の kill-ring から貼り付けるのは `S-<insert>` か `C-c C-y` です。`C-y` も kill-ring からの貼り付けにしたい
 ときは、`embterm-keymap-exceptions` に `"C-y"` を足してください。
 
+nyagos はシェル統合（3.6）を読み込めば、切り取った文字列を Windows のクリップボードに入れるので、
+`C-c C-y` で貼り付けられます（端末の中にも残るので、端末の中の `C-y` でも戻せます）。
+逆に、Emacs でコピーしたものを端末の中の `C-y` で貼ることもできます。
+zsh で OSC 52 を使って kill-ring に直に入れる設定は
+[docs/notes/gh11-ck-cy.md](docs/notes/gh11-ck-cy.md) の §5.1 にあります。
+
 ### 4.3 シェルごとの話
 
 | シェル | |
 |---|---|
 | **pwsh / PowerShell 5.1** | PSReadLine の行編集・補完・色、starship（Nerd Font）がそのまま動きます。シェル統合は `prompt` を包むので、**プロンプトを決めた後で**読み込んでください |
 | **cmd** | そのまま動きます |
-| **nyagos** | 行編集・補完が動きます。シェル統合は `~/.nyagos` から読み込みます |
+| **nyagos** | 行編集・補完が動きます。シェル統合は `~/.nyagos` から読み込みます（`C-k` などの切り取りが Windows のクリップボードに入り、`C-c C-y` で貼れます） |
 | **Git Bash / MSYS2** | `bash.exe --login -i` で起動します。`embterm_find_file` は `cygpath -w` で Windows のパスに直してから渡します |
 | **WSL** | `wsl.exe` 経由で起動します。`wslpath -w` でパスを直します。`WSLENV` に `TERM_PROGRAM` を足しておくと統合が効きます |
 

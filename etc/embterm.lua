@@ -11,6 +11,9 @@
 -- - embterm_find_file パス...  ファイルを Emacs の別のウィンドウで開く（find-file-other-window）
 -- - embterm_dired [パス]       ディレクトリを Emacs の別のウィンドウで dired で開く（dired-other-window）
 --
+-- あわせて、プロンプトの境界（OSC 133。T-119）と、行編集で切り取ったものを Emacs に渡す
+-- 設定（Windows のクリップボード経由。#11）を入れる。どちらも下のほうを見ること。
+--
 -- エスケープは nyagos.write ではなく io.write で出す（加工されない生のバイト列を端末へ流す）。
 
 local function quote(s)
@@ -85,3 +88,18 @@ if not EMBTERM_OSC133 then
         end
     end
 end
+
+-- --- 切り取ったものを Emacs へ（Windows のクリップボード経由。#11） -------------
+-- nyagos の切り取り（C-k・C-u・C-w）は go-readline-ny の中のクリップボードに入るだけで、
+-- 既定では Emacs から見えない。`clipboard' を立てると行き先が **OS のクリップボード**になり、
+-- Emacs 側は C-c C-y（`current-kill' → `interprogram-paste-function'）で拾える。
+-- 逆向きも通る（Emacs でコピーしたものが端末の中の C-y で貼れる）。
+-- OSC 52 で kill-ring に直に入れる道もあるが、こちらを採った（docs/notes/gh11-ck-cy.md の §6）。
+--
+-- 【重要】効くのは **rcfile を読んでいる間に立てたときだけ。** nyagos は rcfile を読み終えて
+-- から行編集のクリップボードを決める（LazySetup）ので、**起動した後に lua_e などで立てても
+-- 効かない。** ~/.nyagos からこのファイルを dofile する形（README の 3.6）なら効く。
+-- コマンドラインの --clipboard も同じ。
+--
+-- 元に戻したいときは、これを読み込んだ後に nyagos.option.clipboard = false と書く。
+nyagos.option.clipboard = true
