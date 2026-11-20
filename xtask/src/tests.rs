@@ -225,6 +225,8 @@ const EMACS_TESTS: &[EmacsTest] = &[
     EmacsTest { name: "features", file: "features-mac.el", log: "target/t128/features-mac.log", default: true },
     // スクロールバック（T-135）
     EmacsTest { name: "scrollback", file: "scrollback-mac.el", log: "target/t135/scrollback-mac.log", default: true },
+    // OSC 52 でアプリから kill-ring へ渡せるか（#11 の §5）。zsh の ZLE に依るので既定では動かさない
+    EmacsTest { name: "osc52", file: "osc52-mac.el", log: "target/gh11/osc52.log", default: false },
     // 性能の測定（T-128）。時間がかかるので既定では動かさない
     EmacsTest { name: "perf", file: "perf-mac.el", log: "target/t128/perf-run.log", default: false },
     // ghostel との比べ（T-122）。利用者の ~/.emacs.d の ghostel を読む
